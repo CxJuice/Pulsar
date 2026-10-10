@@ -1,0 +1,14 @@
+node_modules/
+.nuxt/
+.output/
+dist/
+service/target/
+release/
+artifacts/
+*.log
+__pycache__/
+.env
+.env.*
+local-data/
+docs/validation.md
+design-qa.md

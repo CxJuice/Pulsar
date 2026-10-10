@@ -1,0 +1,10 @@
+<style>
+  html,body { margin:0;background:#f7f7fa;font-family:system-ui,"Microsoft YaHei",sans-serif; }
+  .startup-loading { height:100vh;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px;color:#6151d8; }
+  .startup-loading svg { width:36px;height:36px;animation:startup-rotate 1.4s linear infinite; }
+  .startup-loading circle { fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round;stroke-dasharray:36 57; }
+  .startup-loading span { font-size:13px;color:#6d6e7b; }
+  @keyframes startup-rotate { to { transform:rotate(360deg); } }
+  @media(prefers-reduced-motion:reduce) { .startup-loading svg { animation:none; } }
+</style>
+<div class="startup-loading" role="status" aria-label="正在启动 ScTranslateKit"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /></svg><strong>ScTranslateKit</strong><span>正在启动工作台…</span></div>

@@ -1,0 +1,73 @@
+{
+  "name": "sc-translate-kit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "ParaTranz translation editor with a Transifex-style workspace",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "nuxt dev --host 127.0.0.1",
+    "generate": "nuxt generate",
+    "typecheck": "nuxt typecheck",
+    "build:service": "cargo build --release --manifest-path service/Cargo.toml",
+    "build": "npm run generate && npm run build:service",
+    "start": "electron .",
+    "package": "npm run build && electron-builder --win dir",
+    "package:installer": "npm run build && electron-builder --win nsis --x64 --config.directories.output=release/installer",
+    "postinstall": "nuxt prepare"
+  },
+  "devDependencies": {
+    "electron": "44.7.0",
+    "electron-builder": "26.15.3",
+    "lucide-vue-next": "1.0.0",
+    "motion": "^14.1.0",
+    "nuxt": "4.6.1",
+    "typescript": "^5.9.3",
+    "vue-tsc": "^3.1.0"
+  },
+  "build": {
+    "appId": "com.42kit.sctranslatekit",
+    "productName": "ScTranslateKit",
+    "directories": {
+      "output": "release/desktop"
+    },
+    "files": [
+      "electron/**",
+      ".output/public/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "service/target/release/sctranslate-service.exe",
+        "to": "service/sctranslate-service.exe"
+      }
+    ],
+    "win": {
+      "target": "dir",
+      "icon": "public/icon.ico",
+      "signAndEditExecutable": true,
+      "signExecutable": false
+    },
+    "nsis": {
+      "artifactName": "ScTranslateKit-${version}-Setup-${arch}.${ext}",
+      "oneClick": false,
+      "perMachine": false,
+      "selectPerMachineByDefault": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "ScTranslateKit",
+      "installerIcon": "public/icon.ico",
+      "uninstallerIcon": "public/icon.ico",
+      "deleteAppDataOnUninstall": false
+    },
+    "asar": true
+  },
+  "dependencies": {
+    "https-proxy-agent": "^9.1.0",
+    "leven": "4.1.0",
+    "socket.io-client": "^4.8.4",
+    "socks-proxy-agent": "^10.1.0"
+  }
+}
