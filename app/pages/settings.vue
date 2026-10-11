@@ -5,6 +5,7 @@ import type { WorkspaceNavigation } from '~/composables/useWorkspaceNavigation'
 import type { LocalFontData, ProxyTestResult, TranslationMode, TranslationProvider, TranslationProxyMode, TranslationSettings, TranslationSettingsUpdate } from '~/types/editor'
 import { appearanceStorageKey, cssFontFamily, defaultAccentColors, defaultAppearanceSettings, defaultBackgroundColors, defaultFontFamily, safeFontFamily } from '~/utils/appearance'
 import type { AppearanceSettings, AppearanceTextRegion, AppearanceTheme } from '~/utils/appearance'
+import { compileTermExemptionRules, defaultTermExemptionRules } from '~/utils/termHighlights'
 import packageInfo from '../../package.json'
 
 const props = defineProps<{ editor: UnwrapNestedRefs<ReturnType<typeof useEditor>> }>()
@@ -14,8 +15,12 @@ const theme = inject<Ref<string>>('workspace-theme')!
 const translationLayout = inject<Ref<'horizontal' | 'vertical'>>('workspace-translation-layout')!
 const appearance = inject<Ref<AppearanceSettings>>('workspace-appearance')!
 const termRecognitionEnabled = inject<Ref<boolean>>('workspace-term-recognition')!
+const termExemptionRules = inject<Ref<string[]>>('workspace-term-exemption-rules')!
+const termExemptionPatterns = inject<Ref<RegExp[]>>('workspace-term-exemption-patterns')!
 const appearanceError = ref('')
 const termRecognitionError = ref('')
+const termExemptionDraft = ref(termExemptionRules.value.join('\n'))
+const termExemptionError = ref(''), termExemptionNotice = ref('')
 const systemFonts = ref<string[]>([]), systemFontsBusy = ref(false), systemFontsError = ref(false), systemFontsMessage = ref('')
 const buildInfo = ref<{ commit: string; sourceFingerprint: string; builtAt: string } | null>(null)
 const typographyRegions: { key: AppearanceTextRegion; title: string }[] = [
@@ -71,6 +76,23 @@ function saveTermRecognitionSetting() {
   termRecognitionError.value = ''
   try { localStorage.setItem('sckit-term-recognition-enabled', termRecognitionEnabled.value ? '1' : '0') }
   catch { termRecognitionError.value = '设置已应用，但无法保存到本设备。' }
+}
+function saveTermExemptionRules() {
+  termExemptionError.value = ''
+  termExemptionNotice.value = ''
+  const rules = termExemptionDraft.value.split(/\r?\n/u).map(rule => rule.trim()).filter(Boolean)
+  const compiled = compileTermExemptionRules(rules)
+  if (compiled.error) { termExemptionError.value = compiled.error; return }
+  termExemptionRules.value = rules
+  termExemptionPatterns.value = compiled.patterns
+  try {
+    localStorage.setItem('sckit-term-exemption-rules', JSON.stringify(rules))
+    termExemptionNotice.value = `已应用 ${rules.length} 条豁免规则。`
+  } catch { termExemptionError.value = '规则已应用，但无法保存到本设备。' }
+}
+function resetTermExemptionRules() {
+  termExemptionDraft.value = defaultTermExemptionRules.join('\n')
+  saveTermExemptionRules()
 }
 function saveAppearance() {
   appearanceError.value = ''
@@ -280,6 +302,13 @@ onActivated(() => { if (loadedTranslationConfig.value) void loadTranslationSetti
       <section class="settings-card" aria-labelledby="term-recognition-title">
         <div class="settings-card-heading"><Languages :size="20" /><h2 id="term-recognition-title">术语识别</h2></div>
         <div class="settings-row"><div><h3>自动识别与拆分术语</h3><p>在原文和译文中匹配项目术语，并将用“/”或“／”分隔的译名拆成独立候选。关闭后不再自动匹配、标记或拆分候选。</p></div><label class="term-recognition-toggle"><input v-model="termRecognitionEnabled" type="checkbox" @change="saveTermRecognitionSetting" /><span>启用</span></label></div>
+        <div class="term-exemption-rules">
+          <label for="term-exemption-rules"><strong>斜杠分割豁免规则</strong><small>每行一条 JavaScript 正则表达式，不含首尾斜杠。规则会检查术语原文、变体和译文：原文或变体命中时，关联译文整体作为一个候选；译文命中的片段内“/”和“／”不会用于拆分。规则忽略大小写。默认保护括号内的方向组合和单词/s。</small></label>
+          <textarea id="term-exemption-rules" v-model="termExemptionDraft" rows="4" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="每行一条正则表达式" />
+          <div class="term-exemption-actions"><button class="button" type="button" @click="resetTermExemptionRules">恢复默认</button><button class="button primary" type="button" @click="saveTermExemptionRules">应用规则</button></div>
+          <p v-if="termExemptionError" class="sidebar-message error" role="alert">{{ termExemptionError }}</p>
+          <p v-else-if="termExemptionNotice" class="sidebar-message" role="status">{{ termExemptionNotice }}</p>
+        </div>
         <p v-if="termRecognitionError" class="sidebar-message error" role="alert">{{ termRecognitionError }}</p>
       </section>
       <section class="settings-card" aria-labelledby="connection-settings-title">
