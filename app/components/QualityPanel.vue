@@ -14,7 +14,7 @@ const emit = defineEmits<{ insert: [text: string]; locate: [location: QualityLoc
         <CircleCheck v-if="editor.text.trim() && !editor.issues.length" :size="20" /><ShieldCheck v-else :size="20" />
         <h3>{{ !editor.text.trim() ? '输入译文后自动检查' : editor.issues.length ? `${editor.issues.length} 项问题` : '未发现问题' }}</h3>
       </div>
-      <QualityIssueCard v-for="issue in editor.issues" :key="issue.type" :issue="issue" :allow-insert="!editor.locked && !editor.saving && !editor.listBusy && !editor.initializing && !editor.reloadBusy" :allow-locate="!editor.locked && !editor.saving && !editor.listBusy && !editor.initializing && !editor.reloadBusy" @insert="emit('insert', $event)" @locate="emit('locate', $event)" />
+      <QualityIssueCard v-for="issue in editor.issues" :key="issue.type" :issue="issue" :allow-insert="!editor.locked && !editor.listBusy && !editor.initializing && !editor.reloadBusy" :allow-locate="!editor.locked && !editor.listBusy && !editor.initializing && !editor.reloadBusy" @insert="emit('insert', $event)" @locate="emit('locate', $event)" />
     </template>
   </section>
 </template>

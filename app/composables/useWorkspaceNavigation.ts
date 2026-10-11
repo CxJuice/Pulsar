@@ -15,7 +15,7 @@ export function useWorkspaceNavigation(e: UnwrapNestedRefs<ReturnType<typeof use
   let guideCompleted = false, startupChecked = false
   let catalogSequence = 0
   const cache = new Map<number, { project: ProjectInfo; files: FileInfo[]; search: string; folders: string[] }>()
-  const blocked = computed(() => loginBusy.value || busy.value || saving.value || e.saving || e.initializing || e.listBusy || e.reloadBusy)
+  const blocked = computed(() => loginBusy.value || busy.value || saving.value || e.initializing || e.listBusy || e.reloadBusy)
   const filteredProjects = computed(() => projects.value.filter(p => `${p.name} ${p.id}`.toLocaleLowerCase().includes(projectSearch.value.toLocaleLowerCase())))
   const fileGroups = computed(() => {
     const groups = new Map<string, FileInfo[]>([['', []]])

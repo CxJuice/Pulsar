@@ -23,6 +23,7 @@ onMounted(() => { theme.value = localStorage.getItem('sckit-theme') || 'light' }
 <template>
   <div class="app-shell" :data-theme="theme">
     <WorkspaceTitlebar :editor="editor" :caption="route.path === '/editor' ? '翻译工作台' : route.path === '/settings' ? '设置' : '项目主页'" />
+    <SubmissionNotifications :editor="editor" />
     <div class="application-body">
       <ApplicationSidebar :editor="editor" :navigation="navigation" />
       <div class="application-content" :aria-busy="pageLoading">

@@ -1,0 +1,11 @@
+.submission-notifications { position: fixed; right: 20px; bottom: 48px; width: min(350px, calc(100vw - 40px)); max-height: 55vh; overflow-y: auto; z-index: 35; display: grid; gap: 8px; }
+.submission-warning { padding: 12px 14px; border: 1px solid var(--border); border-left: 3px solid var(--warning); border-radius: 8px; background: var(--bg); box-shadow: 0 4px 20px #00000014; font-size: 11px; line-height: 1.7; }
+.submission-warning-heading { display: flex; align-items: center; gap: 7px; color: var(--warning); }
+.submission-warning-heading > strong { font-size: 12px; flex: 1; }
+.submission-warning-key { margin: 7px 0 5px; overflow-wrap: anywhere; font-size: 10px; color: var(--secondary); font-family: Consolas, monospace; }
+.submission-warning > p { overflow-wrap: anywhere; }
+.submission-warning-actions { display: flex; align-items: center; justify-content: space-between; margin-top: 9px; gap: 8px; }
+.submission-warning-actions > span { color: var(--muted); font-size: 10px; }
+.submission-expand { display: flex; align-items: center; justify-content: center; gap: 5px; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--accent); font-size: 11px; }
+.submission-open-error { padding: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font-size: 11px; color: var(--warning); }
+.titlebar-submit-status { font-size: 10px; color: var(--muted); padding: 0 10px; white-space: nowrap; }

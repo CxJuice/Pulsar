@@ -2,7 +2,7 @@ export default defineNuxtConfig({
   ssr: false,
   spaLoadingTemplate: 'spa-loading-template.html',
   devtools: { enabled: false },
-  css: ['~/assets/editor.css', '~/assets/motion-tokens.css', '~/assets/motion.css', '~/assets/select.css', '~/assets/onboarding.css', '~/assets/terms.css', '~/assets/quality.css'],
+  css: ['~/assets/editor.css', '~/assets/motion-tokens.css', '~/assets/motion.css', '~/assets/select.css', '~/assets/onboarding.css', '~/assets/terms.css', '~/assets/quality.css', '~/assets/submissions.css'],
   app: {
     head: {
       title: 'ScTranslateKit · 翻译工作台',

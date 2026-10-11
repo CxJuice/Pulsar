@@ -4,7 +4,6 @@ const props = defineProps<{ editor: UnwrapNestedRefs<ReturnType<typeof useEditor
 onMounted(() => { if (!props.editor.initializing && !props.editor.workspaceReady) navigateTo('/', { replace: true }) })
 watch(() => props.editor.initializing, value => { if (!value && !props.editor.workspaceReady) navigateTo('/', { replace: true }) })
 onBeforeRouteLeave(async () => {
-  if (props.editor.saving) return false
   try { await props.editor.flushDraft(true); return true }
   catch (reason) { props.editor.error = (reason as Error).message; return false }
 })

@@ -55,7 +55,7 @@ defineExpose({ focus: () => searchInput.value?.focus() })
         <div class="memory-result-original"><SearchHighlightedText :text="entry.original" :query="activeQuery" /></div>
         <div class="suggestion-translation"><SearchHighlightedText :text="entry.translation" :query="activeQuery" /></div>
         <div class="memory-result-meta"><span>{{ stageLabels[entry.stage] || '历史翻译' }}</span><span v-if="entry.user">{{ entry.user.nickname || entry.user.username }}</span><time>{{ displayDate(entry.updatedAt || entry.createdAt) }}</time></div>
-        <div class="memory-result-footer"><button class="suggestion-origin" :disabled="!editor.desktop" @click="openEntry(entry)">{{ entry.project.name }}</button><button class="button compact" :disabled="!entry.translation || editor.locked || editor.saving" @click="emit('replace', entry.translation)"><ArrowDownToLine :size="14" />使用译文</button></div>
+        <div class="memory-result-footer"><button class="suggestion-origin" :disabled="!editor.desktop" @click="openEntry(entry)">{{ entry.project.name }}</button><button class="button compact" :disabled="!entry.translation || editor.locked" @click="emit('replace', entry.translation)"><ArrowDownToLine :size="14" />使用译文</button></div>
       </article>
       
     </template>

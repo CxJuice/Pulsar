@@ -6,6 +6,10 @@ import { sortFilesByCompletion } from '~/utils/fileSort'
 
 const emptyProject = (): ProjectInfo => ({ id: 0, name: '', source: '', dest: '' })
 const emptyFile = (): FileInfo => ({ id: 0, name: '', project: 0, total: 0, translated: 0, disputed: 0, checked: 0, reviewed: 0, hidden: 0, locked: 0, words: 0 })
+interface Submission {
+  id: number; item: StringItem; fileId: number; accountId: number; translation: string; stage: number
+}
+interface SubmissionFailure extends Submission { message: string }
 
 export function useEditor() {
   const desktop = ref(false), connected = ref(false), initializing = ref(true)
@@ -16,7 +20,12 @@ export function useEditor() {
   const selected = ref<StringItem | null>(items.value[0] || null)
   const text = ref(''), editStage = ref(0), stageFilter = ref<number | null>(0), search = ref(''), searchMode = ref('text')
   const page = ref(1), pageSize = ref(50), pageCount = ref(1), rowCount = ref(0), fileId = ref(0), sort = ref('default')
-  const listBusy = ref(false), saving = ref(false), error = ref(''), notice = ref(''), draftStatus = ref('')
+  const listBusy = ref(false), error = ref(''), notice = ref(''), draftStatus = ref('')
+  const pendingSubmissions = ref<Submission[]>([]), submissionFailures = ref<SubmissionFailure[]>([])
+  const pendingCount = computed(() => pendingSubmissions.value.length)
+  const submissionQueue: Array<{ submission: Submission; persisted: Promise<boolean> }> = []
+  const submittedVersions = new Map<string, StringItem>()
+  let submissionId = 0, processingSubmissions = false
   const requestCount = ref(0), reloadBusy = ref(false), exportBusy = ref(false)
   const selectedIds = ref<number[]>([]), drafts = ref<Record<string, Draft>>({})
   const panel = ref<'context' | 'suggestions' | 'history' | 'terms' | 'quality' | 'comments'>('suggestions')
@@ -45,11 +54,22 @@ export function useEditor() {
     if (sort.value === 'updated') result.sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))
     return result
   })
-  const dirty = computed(() => !!selected.value && (toParaTranzText(text.value) !== toParaTranzText(selected.value.translation) || editStage.value !== selected.value.stage))
+  const dirty = computed(() => {
+    const item = selected.value
+    if (!item) return false
+    const queued = pendingSubmissions.value.findLast(job => job.item.project === item.project && job.item.id === item.id)
+    return toParaTranzText(text.value) !== toParaTranzText(queued?.translation ?? item.translation) || editStage.value !== (queued?.stage ?? item.stage)
+  })
   const locked = computed(() => [9, -1].includes(selected.value?.stage ?? 0))
   const issues = computed(() => selected.value ? qualityIssues(selected.value.original, text.value, selected.value.key) : [])
   const untranslated = computed(() => Math.max(0, file.value.total - file.value.translated - file.value.hidden))
   const draftKey = (item = selected.value) => item ? `${item.project}/${item.id}` : ''
+  const pendingFor = (item: StringItem) => pendingSubmissions.value.some(job => job.item.project === item.project && job.item.id === item.id)
+  function submissionQueued(stage = editStage.value) {
+    if (!selected.value) return false
+    const latest = pendingSubmissions.value.findLast(job => job.item.project === selected.value!.project && job.item.id === selected.value!.id)
+    return !!latest && latest.translation === toParaTranzText(text.value) && latest.stage === stage
+  }
 
   async function api<T>(action: RequestAction, payload: Record<string, unknown> = {}): Promise<T> {
     const bridge = window.scKit
@@ -90,38 +110,38 @@ export function useEditor() {
       await pending
       if (generation === draftGeneration && selected.value?.id === item.id) draftStatus.value = remove ? '' : '草稿已保存到本地'
       return true
-    } catch (reason) { draftStatus.value = `草稿保存失败：${(reason as Error).message}`; return false }
+    } catch (reason) { if (generation === draftGeneration && selected.value?.project === item.project && selected.value.id === item.id) draftStatus.value = `草稿保存失败：${(reason as Error).message}`; return false }
   }
   async function flushDraft(strict = false) {
     clearTimeout(draftTimer)
     if (!selected.value) return
     let persisted = true
-    if (dirty.value) persisted = await persistDraft(selected.value, text.value, editStage.value)
-    else if (drafts.value[draftKey()]) persisted = await persistDraft(selected.value, '', 0, true)
+    if (dirty.value || pendingFor(selected.value)) persisted = await persistDraft(selected.value, text.value, editStage.value)
+    else if (drafts.value[draftKey()] && !pendingFor(selected.value)) persisted = await persistDraft(selected.value, '', 0, true)
     await draftWrites
     if (strict && !persisted) throw new Error(draftStatus.value)
   }
   async function select(item: StringItem) {
-    if (saving.value || listBusy.value || initializing.value || reloadBusy.value || selected.value?.id === item.id) return
+    if (listBusy.value || initializing.value || reloadBusy.value || selected.value?.id === item.id) return
     const sequence = ++selectionSequence
     await flushDraft()
-    if (sequence !== selectionSequence || saving.value || listBusy.value || initializing.value || reloadBusy.value) return
+    if (sequence !== selectionSequence || listBusy.value || initializing.value || reloadBusy.value) return
     choose(item)
   }
   function input(value: string) {
-    if (saving.value || listBusy.value || initializing.value || reloadBusy.value || locked.value) return
+    if (listBusy.value || initializing.value || reloadBusy.value || locked.value) return
     text.value = toParaTranzText(value)
     if (editStage.value === 0 && value.trim()) editStage.value = 1
     if (editStage.value === 1 && !value.trim()) editStage.value = 0
   }
   watch([text, editStage], () => {
-    if (changing || !selected.value || saving.value) return
+    if (changing || !selected.value) return
     clearTimeout(draftTimer)
     const item = selected.value, translation = text.value, stage = editStage.value
-    if (dirty.value) {
+    if (dirty.value || pendingFor(item)) {
       draftStatus.value = '正在保存草稿…'
       draftTimer = setTimeout(() => persistDraft(item, translation, stage), 450)
-    } else if (drafts.value[draftKey(item)]) {
+    } else if (drafts.value[draftKey(item)] && !pendingFor(item)) {
       draftTimer = setTimeout(() => persistDraft(item, '', 0, true), 450)
     } else draftStatus.value = ''
   }, { flush: 'sync' })
@@ -140,7 +160,7 @@ export function useEditor() {
     finally { if (sequence === listSequence) listBusy.value = false }
   }
   async function bootstrap(projectId: number, newFileId: number) {
-    if (!sessionInfo.value.authenticated || saving.value || initializing.value && connected.value) return
+    if (!sessionInfo.value.authenticated || initializing.value && connected.value) return
     await flushDraft()
     initializing.value = true; error.value = ''
     try {
@@ -157,7 +177,7 @@ export function useEditor() {
     finally { initializing.value = false }
   }
   async function changeFile(id: number) {
-    if (saving.value || initializing.value || listBusy.value || id === fileId.value || !files.value.some(entry => entry.id === id)) return
+    if (initializing.value || listBusy.value || id === fileId.value || !files.value.some(entry => entry.id === id)) return
     await flushDraft(); fileId.value = id; file.value = files.value.find(entry => entry.id === id) || file.value
     page.value = 1; await loadStrings(); localStorage.setItem('sckit-workspace', JSON.stringify({ projectId: project.value.id, fileId: id }))
   }
@@ -169,9 +189,9 @@ export function useEditor() {
     files.value = refreshed
     file.value = refreshed.find(entry => entry.id === fileId.value) || file.value
   }
-  function filter(stage: number | null) { if (saving.value) return; stageFilter.value = stage; page.value = 1; loadStrings() }
+  function filter(stage: number | null) { stageFilter.value = stage; page.value = 1; loadStrings() }
   watch([search, searchMode], () => { clearTimeout(searchTimer); if (initializing.value) return; searchTimer = setTimeout(() => { page.value = 1; loadStrings() }, 350) })
-  async function paginate(newPage: number) { if (saving.value || listBusy.value) return; page.value = Math.max(1, Math.min(newPage, pageCount.value)); await loadStrings() }
+  async function paginate(newPage: number) { if (listBusy.value) return; page.value = Math.max(1, Math.min(newPage, pageCount.value)); await loadStrings() }
   async function changePageSize(size: number) { pageSize.value = size; page.value = 1; await loadStrings() }
 
   async function loadTerms(force = false): Promise<void> {
@@ -253,48 +273,107 @@ export function useEditor() {
   }
   watch(panel, () => { void loadAux(false) })
 
-  async function save(next = false, stage?: 2 | 5) {
-    if (!connected.value || !sessionInfo.value.authenticated || !selected.value || saving.value || listBusy.value || initializing.value || reloadBusy.value || locked.value) return
+  function save(next = true, stage?: 2 | 5) {
+    if (!connected.value || !sessionInfo.value.authenticated || !selected.value || listBusy.value || initializing.value || reloadBusy.value || locked.value) return
     if (stage === 2 || stage === 5) editStage.value = stage
-    if (!dirty.value) { if (next) await move(1); return }
-    const item = selected.value
-    const index = visibleItems.value.findIndex(entry => entry.id === item.id)
-    const nextId = visibleItems.value[index + 1]?.id
-    const previousId = visibleItems.value[index - 1]?.id
-    const previousPage = page.value
-    const previousPageCount = pageCount.value
-    const advance = next && (!!nextId || previousPage < previousPageCount)
-    saving.value = true; error.value = ''; notice.value = ''
+    if (!dirty.value || submissionQueued()) { if (next) void move(1); return }
+    const accountId = sessionInfo.value.user?.id
+    if (!accountId) { error.value = '请重新登录后提交'; return }
+    const item = { ...selected.value }, translation = toParaTranzText(text.value)
+    const submission: Submission = { id: ++submissionId, item, fileId: fileId.value, accountId, translation, stage: editStage.value }
+    clearTimeout(draftTimer)
+    // Capture and preserve this exact draft before leaving the entry. Upload never reads the next entry's editor state.
+    const persisted = persistDraft(item, translation, submission.stage)
+    pendingSubmissions.value.push(submission)
+    submissionQueue.push({ submission, persisted })
+    submissionFailures.value = submissionFailures.value.filter(failure => failure.item.project !== item.project || failure.item.id !== item.id || failure.accountId !== accountId)
+    notice.value = ''
+    if (next) {
+      const index = visibleItems.value.findIndex(row => row.id === item.id)
+      const following = visibleItems.value[index + 1]
+      if (index >= 0 && following) choose(following)
+      else if (page.value < pageCount.value) { choose(null); page.value++; void loadStrings() }
+    }
+    void processSubmissions()
+  }
+  async function processSubmissions() {
+    if (processingSubmissions) return
+    processingSubmissions = true
     try {
-      await flushDraft(true)
-      const translation = toParaTranzText(text.value)
-      const saved = await api<StringItem>('save', { projectId: project.value.id, stringId: item.id, translation, stage: editStage.value,
-        expectedUpdatedAt: item.updatedAt ?? null, expectedTranslation: item.translation, expectedStage: item.stage, expectedOriginal: item.original })
-      const itemIndex = items.value.findIndex(entry => entry.id === item.id)
-      if (itemIndex !== -1) items.value[itemIndex] = saved
-      await persistDraft(item, '', 0, true)
-      choose(saved)
-      notice.value = '译文已保存至 ParaTranz'
+      while (submissionQueue.length) {
+        const { submission: job, persisted } = submissionQueue.shift()!
+        const key = draftKey(job.item), versionKey = `${job.accountId}/${key}`
         try {
-          file.value = await api<FileInfo>('file', { projectId: project.value.id, fileId: file.value.id })
-          const at = files.value.findIndex(entry => entry.id === file.value.id); if (at !== -1) files.value[at] = file.value
-        } catch (reason) { error.value = `译文已保存，但文件统计刷新失败：${(reason as Error).message}` }
-      const leavesFilter = stageFilter.value !== null && saved.stage !== stageFilter.value
-      if (connected.value && (next || leavesFilter)) {
-        if (advance && !nextId && !leavesFilter && previousPage < previousPageCount) page.value = previousPage + 1
-        await loadStrings(nextId, advance ? undefined : saved)
-        if (!items.value.length && page.value > 1) { page.value--; await loadStrings(undefined, advance ? undefined : saved) }
+          if (!await persisted) throw new Error('本地草稿保存失败，未上传。请返回词条重试。')
+          if (!connected.value || !sessionInfo.value.authenticated || sessionInfo.value.user?.id !== job.accountId) throw new Error('登录已变更或过期，请使用原账号重新提交。本地草稿已保留。')
+          const base = submittedVersions.get(versionKey) || job.item
+          const saved = await api<StringItem>('save', { projectId: job.item.project, stringId: job.item.id,
+            translation: job.translation, stage: job.stage, expectedUserId: job.accountId,
+            expectedUpdatedAt: base.updatedAt ?? null, expectedTranslation: base.translation, expectedStage: base.stage, expectedOriginal: base.original })
+          submittedVersions.set(versionKey, saved)
+          if (sessionInfo.value.user?.id === job.accountId) {
+            const sameSelection = selected.value?.project === job.item.project && selected.value.id === job.item.id
+            if (project.value.id === job.item.project && fileId.value === job.fileId) {
+              const index = items.value.findIndex(row => row.id === job.item.id)
+              const visibleIndex = visibleItems.value.findIndex(row => row.id === job.item.id)
+              if (index >= 0) {
+                if (stageFilter.value !== null && saved.stage !== stageFilter.value) {
+                  if (sameSelection) detachedNeighbors = { previousId: visibleItems.value[visibleIndex - 1]?.id, nextId: visibleItems.value[visibleIndex + 1]?.id, index: visibleIndex, page: page.value }
+                  items.value.splice(index, 1); rowCount.value = Math.max(0, rowCount.value - 1)
+                  pageCount.value = Math.max(1, Math.ceil(rowCount.value / pageSize.value))
+                } else items.value[index] = saved
+              }
+            }
+            // Update only the remote baseline; preserve newer typing and never change the current selection.
+            if (sameSelection) selected.value = saved
+            const draft = drafts.value[key]
+            const newerInput = sameSelection && (toParaTranzText(text.value) !== job.translation || editStage.value !== job.stage)
+            const newerSubmission = pendingSubmissions.value.some(other => other.id > job.id && other.item.project === job.item.project && other.item.id === job.item.id)
+            if (sameSelection) clearTimeout(draftTimer)
+            if (newerInput && selected.value) {
+              if (!await persistDraft(selected.value, text.value, editStage.value)) throw new Error('译文已上传，但后续编辑的草稿保存失败。请返回词条保存。')
+            }
+            else if (!newerSubmission && (sameSelection || (draft?.translation === job.translation && draft.stage === job.stage))) {
+              if (!await persistDraft(job.item, '', 0, true)) throw new Error('译文已上传，但本地草稿清理失败。请返回词条核对。')
+            }
+          }
+        } catch (reason) {
+          if (!drafts.value[key]) {
+            const sameSelection = selected.value?.project === job.item.project && selected.value.id === job.item.id
+            await persistDraft(job.item, sameSelection ? text.value : job.translation, sameSelection ? editStage.value : job.stage)
+          }
+          submissionFailures.value.push({ ...job, message: (reason as Error).message })
+        } finally {
+          pendingSubmissions.value = pendingSubmissions.value.filter(other => other.id !== job.id)
+          if (!pendingSubmissions.value.some(other => other.item.project === job.item.project && other.item.id === job.item.id && other.accountId === job.accountId)) submittedVersions.delete(versionKey)
+        }
       }
-      else if (advance) choose(visibleItems.value.find(entry => entry.id === nextId) || visibleItems.value[0] || null)
-      if (!advance && !visibleItems.value.some(entry => entry.id === saved.id)) {
-        detachedNeighbors = { previousId, nextId, index, page: previousPage }
-        notice.value += ' · 当前词条已不符合列表筛选，仍保留在编辑器中'
-      }
-    } catch (reason) { error.value = (reason as Error).message }
-    finally { saving.value = false }
+    } finally {
+      processingSubmissions = false
+      if (workspaceReady.value && connected.value && sessionInfo.value.authenticated) void refreshFiles().catch(() => {})
+    }
+  }
+  function dismissSubmission(id: number) { submissionFailures.value = submissionFailures.value.filter(failure => failure.id !== id) }
+  async function openSubmission(id: number) {
+    const failure = submissionFailures.value.find(job => job.id === id)
+    if (!failure || listBusy.value || initializing.value || reloadBusy.value) return false
+    if (!sessionInfo.value.authenticated || sessionInfo.value.user?.id !== failure.accountId) throw new Error('请先使用提交时的账号登录')
+    await flushDraft(true)
+    const preserved = drafts.value[draftKey(failure.item)] || { translation: failure.translation, stage: failure.stage, updatedAt: new Date().toISOString() }
+    if (!workspaceReady.value || project.value.id !== failure.item.project || fileId.value !== failure.fileId) {
+      await bootstrap(failure.item.project, failure.fileId)
+      if (error.value) throw new Error(error.value)
+    }
+    const sequence = selectionSequence
+    const data = await api<StringItem>('string', { projectId: failure.item.project, stringId: failure.item.id })
+    if (sequence !== selectionSequence || project.value.id !== failure.item.project || fileId.value !== failure.fileId || sessionInfo.value.user?.id !== failure.accountId) return false
+    const restored = drafts.value[draftKey(data)]
+    if (!restored || restored.updatedAt < preserved.updatedAt) drafts.value[draftKey(data)] = preserved
+    choose(data)
+    return true
   }
   async function move(direction: number) {
-    if (saving.value || listBusy.value || initializing.value) return
+    if (listBusy.value || initializing.value) return
     const at = visibleItems.value.findIndex(item => item.id === selected.value?.id)
     let target = visibleItems.value[at + direction]
     if (at < 0 && detachedNeighbors) {
@@ -308,7 +387,7 @@ export function useEditor() {
     else if (direction < 0 && page.value > 1) { await paginate(page.value - 1); const last = visibleItems.value.at(-1); if (last) choose(last) }
   }
   async function reloadSelected() {
-    if (!selected.value || !connected.value || reloadBusy.value || saving.value || listBusy.value) return
+    if (!selected.value || !connected.value || reloadBusy.value || listBusy.value) return
     const item = selected.value
     reloadBusy.value = true
     try {
@@ -350,7 +429,7 @@ export function useEditor() {
     finally { exportBusy.value = false }
   }
   async function loginPresence() {
-    if (presenceLoginBusy.value || saving.value || listBusy.value || initializing.value || reloadBusy.value || !window.scKit) return
+    if (presenceLoginBusy.value || listBusy.value || initializing.value || reloadBusy.value || !window.scKit) return
     presenceLoginBusy.value = true
     try {
       await flushDraft(true)
@@ -373,6 +452,6 @@ export function useEditor() {
     initializing.value = false
   })
   onBeforeUnmount(() => { clearTimeout(draftTimer); clearTimeout(searchTimer); ++auxSequence; ++historySequence; ++termsSequence; flushDraft() })
-  return { desktop, connected, initializing, workspaceReady, project, file, files, sortedFiles, items, visibleItems, selected, text, editStage, stageFilter, search, searchMode, page, pageSize, pageCount, rowCount, fileId, sort, listBusy, saving, error, notice, draftStatus, dirty, locked, issues, untranslated, selectedIds, panel, suggestions, terms, history, auxBusy, auxError, termsBusy, termsError, sessionInfo, drafts,
-    presence, presenceProjectId, presenceLoginBusy, loginPresence, requestCount, reloadBusy, exportBusy, api, input, select, loadStrings, bootstrap, changeFile, refreshFiles, filter, paginate, changePageSize, loadAux, loadTerms, save, move, reloadSelected, discardDraft, resetWorkspace, restoreSession, flushDraft, exportPage }
+  return { desktop, connected, initializing, workspaceReady, project, file, files, sortedFiles, items, visibleItems, selected, text, editStage, stageFilter, search, searchMode, page, pageSize, pageCount, rowCount, fileId, sort, listBusy, pendingCount, submissionFailures, error, notice, draftStatus, dirty, locked, issues, untranslated, selectedIds, panel, suggestions, terms, history, auxBusy, auxError, termsBusy, termsError, sessionInfo, drafts,
+    presence, presenceProjectId, presenceLoginBusy, loginPresence, requestCount, reloadBusy, exportBusy, api, input, select, loadStrings, bootstrap, changeFile, refreshFiles, filter, paginate, changePageSize, loadAux, loadTerms, submissionQueued, dismissSubmission, openSubmission, save, move, reloadSelected, discardDraft, resetWorkspace, restoreSession, flushDraft, exportPage }
 }

@@ -613,6 +613,13 @@ async fn rpc(
             .await?
         }
         "save" => {
+            if let Some(expected_user) = payload.get("expectedUserId") {
+                let account = remote(&state, &credentials, Method::GET, "/users/my", &[], None).await?;
+                let user = account.get("user").unwrap_or(&account);
+                if expected_user != user.get("id").unwrap_or(&Value::Null) {
+                    return Err(ApiError::new(StatusCode::CONFLICT, "登录账号已变更，未上传此词条。本地草稿已保留。"));
+                }
+            }
             let string = id(&payload, "stringId")?;
             let target = format!("{project_path}/strings/{string}");
             let current = remote(&state, &credentials, Method::GET, &target, &[], None).await?;

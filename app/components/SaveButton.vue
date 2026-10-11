@@ -7,9 +7,9 @@ const props = defineProps<{ editor: UnwrapNestedRefs<ReturnType<typeof useEditor
 const emit = defineEmits<{ 'update:mode': [value: SaveMode]; save: [] }>()
 const root = ref<HTMLElement>(), trigger = ref<HTMLButtonElement>(), menu = ref<HTMLElement>()
 const open = ref(false)
-const blocked = computed(() => props.editor.saving || props.editor.listBusy || props.editor.initializing || props.editor.reloadBusy || props.editor.locked)
+const blocked = computed(() => props.editor.listBusy || props.editor.initializing || props.editor.reloadBusy || props.editor.locked)
 const selectedMode = computed(() => saveModes.find(mode => mode.id === props.mode) || saveModes[0]!)
-const canSave = computed(() => !!props.editor.selected && (props.editor.dirty || (selectedMode.value.stage !== undefined && selectedMode.value.stage !== props.editor.selected.stage)))
+const canSave = computed(() => props.editor.connected && props.editor.sessionInfo.authenticated && !!props.editor.selected && !props.editor.submissionQueued(selectedMode.value.stage ?? props.editor.editStage) && (props.editor.dirty || (selectedMode.value.stage !== undefined && selectedMode.value.stage !== props.editor.selected.stage)))
 function toggle() {
   if (blocked.value) return
   open.value = !open.value
@@ -38,7 +38,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', outside))
 <template>
   <div ref="root" class="save-button-control">
     <div class="split-save">
-      <button class="button primary" :disabled="!canSave || blocked" @click="emit('save')"><LoadingIndicator v-if="editor.saving" :size="14" label="正在提交译文" /><Cloud v-else-if="editor.connected" :size="14" />{{ selectedMode.label }}</button>
+      <button class="button primary" :disabled="!canSave || blocked" @click="emit('save')"><Cloud :size="14" />{{ selectedMode.label }}</button>
       <button ref="trigger" class="save-option" :disabled="blocked" aria-label="选择提交方式" aria-haspopup="menu" :aria-expanded="open" title="选择提交方式" @click="toggle" @keydown.down.prevent="!open && toggle()"><ChevronDown :size="14" /></button>
     </div>
     <Transition name="menu"><div v-if="open" ref="menu" class="save-mode-menu" role="menu" aria-label="提交方式" @keydown="menuKeydown">
