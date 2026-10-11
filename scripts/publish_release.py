@@ -21,8 +21,16 @@ def digest(path: Path) -> str:
 
 
 def gh(*arguments: str) -> str:
-    result = subprocess.run(['gh', *arguments], text=True, capture_output=True, check=True)
+    result = subprocess.run(['gh', *arguments], text=True, capture_output=True)
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or 'GitHub CLI command failed')
     return result.stdout.strip()
+
+
+def release_information(repository: str, tag: str) -> dict:
+    # The REST tag endpoint only finds published releases; CLI lookup includes drafts.
+    identifier = gh('release', 'view', tag, '--json', 'databaseId', '--jq', '.databaseId')
+    return json.loads(gh('api', f'repos/{repository}/releases/{identifier}'))
 
 
 def collect_assets(version: str, commit: str) -> list[Path]:
@@ -102,7 +110,7 @@ def main() -> None:
         if tagged_commit != commit:
             raise RuntimeError('Existing release tag points to a different commit')
         if information['isImmutable']:
-            release = json.loads(gh('api', f'repos/{repository}/releases/tags/{quote(tag, safe="")}'))
+            release = release_information(repository, tag)
             if {item['name']: item.get('digest') for item in release['assets']} != hashes:
                 raise RuntimeError('Immutable release already exists with different assets')
             print(f'Release already published: {release["html_url"]}')
@@ -111,7 +119,7 @@ def main() -> None:
         gh('release', 'create', tag, '--target', commit, '--draft', '--title', title, '--notes-file', str(notes))
     gh('release', 'upload', tag, *(str(path) for path in assets), '--clobber')
     # Check uploaded files before publishing the draft or marking it as latest.
-    release = json.loads(gh('api', f'repos/{repository}/releases/tags/{quote(tag, safe="")}'))
+    release = release_information(repository, tag)
     if {item['name']: item.get('digest') for item in release['assets']} != hashes:
         raise RuntimeError('Uploaded release assets do not match the complete build')
     gh('release', 'edit', tag, '--draft=false', f'--prerelease={str(prerelease).lower()}',
