@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, protocol, session, net, safeStorage, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, protocol, session, net, safeStorage, dialog, shell, screen } = require('electron');
 const { spawn } = require('node:child_process');
 const { randomBytes } = require('node:crypto');
 const fs = require('node:fs');
@@ -17,9 +17,42 @@ if (smoke) {
 }
 const serviceKey = randomBytes(32).toString('hex');
 let mainWindow, loginWindow, sidecar, serviceUrl, closing = false;
+let windowStateTimer, windowWasMaximized = false;
 const actions = new Set(['session', 'projects', 'project', 'updateProject', 'files', 'file', 'renameFile', 'strings', 'string', 'suggestions', 'memory', 'terms', 'projectTerms', 'term', 'createTerm', 'updateTerm', 'deleteTerm', 'history', 'save', 'drafts', 'draft']);
 const credentialFile = () => path.join(app.getPath('userData'), 'credentials.bin');
 const connectionPreferenceFile = () => path.join(app.getPath('userData'), 'connection.json');
+const windowStateFile = () => path.join(app.getPath('userData'), 'window-state.json');
+function restoredWindowState() {
+  let stored;
+  if (!smoke) {
+    try { stored = JSON.parse(fs.readFileSync(windowStateFile(), 'utf8')); }
+    catch { /* Use the initial layout when no usable preference exists. */ }
+  }
+  const saved = stored?.bounds;
+  const valid = saved && ['x', 'y', 'width', 'height'].every(key => Number.isSafeInteger(saved[key])) && saved.width > 0 && saved.height > 0;
+  const area = (valid ? screen.getDisplayMatching(saved) : screen.getPrimaryDisplay()).workArea;
+  const minWidth = Math.min(1100, area.width), minHeight = Math.min(720, area.height);
+  const width = Math.max(minWidth, Math.min(valid ? saved.width : 1600, area.width));
+  const height = Math.max(minHeight, Math.min(valid ? saved.height : 1000, area.height));
+  const x = valid ? Math.max(area.x, Math.min(saved.x, area.x + area.width - width)) : area.x + Math.round((area.width - width) / 2);
+  const y = valid ? Math.max(area.y, Math.min(saved.y, area.y + area.height - height)) : area.y + Math.round((area.height - height) / 2);
+  return { bounds: { x, y, width, height }, minWidth, minHeight, maximized: valid && stored.maximized === true };
+}
+function rememberWindowState() {
+  clearTimeout(windowStateTimer);
+  if (smoke || !mainWindow || mainWindow.isDestroyed()) return;
+  try {
+    const state = { bounds: mainWindow.getNormalBounds(), maximized: windowWasMaximized };
+    const target = windowStateFile();
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(`${target}.tmp`, JSON.stringify(state));
+    fs.renameSync(`${target}.tmp`, target);
+  } catch { log('Window layout preference could not be saved'); }
+}
+function scheduleWindowState() {
+  clearTimeout(windowStateTimer);
+  windowStateTimer = setTimeout(rememberWindowState, 300);
+}
 function rememberConnectionMethod(mode) {
   try { fs.writeFileSync(connectionPreferenceFile(), JSON.stringify({ mode })); }
   catch { log('Connection method preference could not be saved'); }
@@ -289,8 +322,15 @@ else {
     await registerProtocol();
     await startService();
     if (!smoke) await restoreConnection();
-    mainWindow = new BrowserWindow({ width: 1600, height: 1000, minWidth: 1100, minHeight: 720, frame: false, backgroundColor: '#ffffff', show: !smoke, icon: appIcon,
+    const restored = restoredWindowState();
+    windowWasMaximized = restored.maximized;
+    mainWindow = new BrowserWindow({ ...restored.bounds, minWidth: restored.minWidth, minHeight: restored.minHeight, frame: false, backgroundColor: '#ffffff', show: false, icon: appIcon,
       webPreferences: { preload: path.join(__dirname, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: !smoke } });
+    mainWindow.on('resize', scheduleWindowState);
+    mainWindow.on('move', scheduleWindowState);
+    mainWindow.on('maximize', () => { windowWasMaximized = true; scheduleWindowState(); });
+    mainWindow.on('unmaximize', () => { windowWasMaximized = false; scheduleWindowState(); });
+    mainWindow.on('close', rememberWindowState);
     mainWindow.setMenu(null);
     mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     mainWindow.webContents.on('will-navigate', (event, url) => { if (!(url.startsWith('sckit://app/') || (devUrl && new URL(url).origin === new URL(devUrl).origin))) event.preventDefault(); });
@@ -298,7 +338,7 @@ else {
     registerIpc();
     await mainWindow.loadURL(devUrl || 'sckit://app/');
     if (smoke) await smokeCapture();
-    else revealEditor();
+    else { if (restored.maximized) mainWindow.maximize(); revealEditor(); }
     log('Editor window loaded');
   }).catch(error => {
     log(`${smoke ? 'Diagnostic' : 'Startup'} failed: ${error.message}`);
@@ -306,6 +346,6 @@ else {
     else { dialog.showErrorBox('ScTranslateKit 启动失败', error.message); app.quit(); }
   });
 }
-app.on('before-quit', () => { presence.stop(); closing = true; if (sidecar) sidecar.kill(); });
+app.on('before-quit', () => { rememberWindowState(); presence.stop(); closing = true; if (sidecar) sidecar.kill(); });
 app.on('will-quit', () => { if (sidecar) sidecar.kill(); });
 app.on('window-all-closed', () => app.quit());

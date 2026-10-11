@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Home, Settings, PanelLeftClose, PanelLeftOpen, Search, RefreshCw, ChevronRight, FolderOpen, FolderClosed, FileText, ArrowRight, ChevronsDown, ChevronsUp } from 'lucide-vue-next'
+import { Home, Settings, PanelLeftClose, PanelLeftOpen, Search, RefreshCw, ChevronRight, FolderOpen, FolderClosed, FileText, ChevronsDown, ChevronsUp } from 'lucide-vue-next'
 import type { WorkspaceNavigation } from '~/composables/useWorkspaceNavigation'
 import type { UnwrapNestedRefs } from 'vue'
 import { fileCompletionPercent } from '~/utils/fileSort'
@@ -34,7 +34,6 @@ watch(() => props.navigation.browse.id, (id, old) => {
     </div></Transition>
     <div class="application-sidebar-bottom">
       <button class="sidebar-settings" :class="{ active: route.path === '/settings' }" :aria-current="route.path === '/settings' ? 'page' : undefined" :disabled="navigation.blocked" aria-label="设置" title="设置" @click="navigation.goSettings"><Settings :size="18" /><span v-show="!navigation.collapsed">设置</span></button>
-      <div class="application-sidebar-footer"><span class="online-dot" :class="{ offline: !editor.connected || !editor.sessionInfo.authenticated }"></span><span>{{ editor.connected ? editor.sessionInfo.authenticated ? 'ParaTranz' : '登录已过期' : '未连接' }}</span><button v-if="editor.workspaceReady" class="text-button" :disabled="navigation.blocked" @click="navigation.continueEditing">继续翻译 <ArrowRight :size="13" /></button></div>
     </div>
   </aside>
 </template>

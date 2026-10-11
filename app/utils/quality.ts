@@ -12,7 +12,6 @@ export interface QualityLocation {
   start: number; end: number; line: number; before: string; text: string; after: string
 }
 const ignoredKey = 'item_NameFood_bar_snaggle_01_pepper_a'
-const pairs = (text: string) => [...text.matchAll(/~\s*([\p{L}\p{N}_]+)\s*[(（](.*?)[)）]/gsu)].map(match => [match[1]!, match[2]!] as const)
 const equalBag = (a: string[], b: string[]) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort())
 // SCCL advisory uses Decimal(abs(value)); string normalization avoids float loss.
 function canonicalNumber(value: string) {
@@ -54,6 +53,41 @@ function skeleton(value: string) {
 function issue(type: string, message: string, source: string[] = [], target: string[] = [], rule: QualityIssue['rule'] = 'SCCL', insert: string[] = []): QualityIssue {
   return { type, message, source, target, rule, tokens: insert, insertable: !!insert.length }
 }
+function qualityLocation(text: string, start: number, end: number): QualityLocation {
+  const lineStart = text.lastIndexOf('\n', start - 1) + 1, nextBreak = text.indexOf('\n', end)
+  const lineEnd = nextBreak < 0 ? text.length : nextBreak
+  const beforeStart = Math.max(lineStart, start - 48), afterEnd = Math.min(lineEnd, end + 48)
+  return { start, end, line: text.slice(0, start).split('\n').length,
+    before: (beforeStart > lineStart ? '…' : '') + text.slice(beforeStart, start), text: text.slice(start, end),
+    after: text.slice(end, afterEnd) + (afterEnd < lineEnd ? '…' : '') }
+}
+function entryPlaceholders(value: string) {
+  const text = toEditorText(value)
+  return [...text.matchAll(/~\s*([\p{L}\p{N}_]+)\s*[(（](.*?)[)）]/gsu)].map(match => ({
+    signature: JSON.stringify([match[1], match[2]]), value: match[0],
+    location: qualityLocation(text, match.index!, match.index! + match[0].length),
+  }))
+}
+function entryPlaceholderIssues(original: string, translation: string): QualityIssue[] {
+  const source = entryPlaceholders(original), target = entryPlaceholders(translation)
+  // Multiset comparison, as in SCCL's Counter checks: each occurrence is consumed once.
+  function unmatched(rows: typeof source, other: typeof source) {
+    const counts = new Map<string, number>()
+    for (const row of other) counts.set(row.signature, (counts.get(row.signature) || 0) + 1)
+    return rows.filter(row => {
+      const count = counts.get(row.signature) || 0
+      if (!count) return true
+      counts.set(row.signature, count - 1); return false
+    })
+  }
+  const missing = unmatched(source, target), extra = unmatched(target, source)
+  if (!missing.length && !extra.length) return []
+  const message = !missing.length ? '译文有额外的占位符名称或参数' : !extra.length ? '译文缺少占位符名称或参数' : '占位符名称或参数不一致'
+  return [{
+    ...issue('key_placeholder', message, missing.map(row => row.value), extra.map(row => row.value), '编辑器', [...new Set(missing.map(row => row.value))]),
+    locations: { source: missing.map(row => row.location), target: extra.map(row => row.location) },
+  }]
+}
 // Check all visible numbers, independently of SCCL's key and segment restrictions.
 function entryNumbers(value: string) {
   const decoded = toEditorText(value), starts: number[] = [], ends: number[] = []
@@ -71,12 +105,7 @@ function entryNumbers(value: string) {
     const raw = match[0].replaceAll(',', ''), absolute = canonicalNumber(raw)
     const number = raw.startsWith('-') && absolute !== '0' ? `-${absolute}` : absolute
     const start = starts[match.index!]!, end = ends[match.index! + match[0].length - 1]!
-    const lineStart = decoded.lastIndexOf('\n', start - 1) + 1, nextBreak = decoded.indexOf('\n', end)
-    const lineEnd = nextBreak < 0 ? decoded.length : nextBreak
-    const beforeStart = Math.max(lineStart, start - 48), afterEnd = Math.min(lineEnd, end + 48)
-    const location: QualityLocation = { start, end, line: decoded.slice(0, start).split('\n').length,
-      before: (beforeStart > lineStart ? '…' : '') + decoded.slice(beforeStart, start), text: decoded.slice(start, end),
-      after: decoded.slice(end, afterEnd) + (afterEnd < lineEnd ? '…' : '') }
+    const location = qualityLocation(decoded, start, end)
     if (raw.endsWith('%')) percentages.push({ value: number + '%', location })
     else values.push({ value: number, location })
   }
@@ -103,15 +132,10 @@ function entryNumericIssues(original: string, translation: string): QualityIssue
   return result
 }
 export function qualityIssues(original: string, translation: string, key = ''): QualityIssue[] {
-  if (!translation.trim()) return [issue('empty', '译文为空', [], [], '编辑器')]
-  const target = translation.trim(), result = entryNumericIssues(original, translation)
+  if (!toEditorText(translation).trim()) return []
+  const target = translation.trim(), result = [...entryNumericIssues(original, translation), ...entryPlaceholderIssues(original, translation)]
   const formal = key !== ignoredKey, advisory = !key.endsWith(',P')
   if (formal) {
-    const sourcePairs = pairs(original), targetPairs = pairs(target)
-    const same = (a: readonly string[], b: readonly string[]) => a[0] === b[0] && a[1] === b[1]
-    const missing = sourcePairs.filter(a => !targetPairs.some(b => same(a, b))).map(pair => `~${pair[0]}(${pair[1]})`)
-    const extra = targetPairs.filter(a => !sourcePairs.some(b => same(a, b))).map(pair => `~${pair[0]}(${pair[1]})`)
-    if (missing.length || extra.length) result.push(issue('key_placeholder', '占位符名称或参数不一致', missing, extra, 'SCCL', [...new Set(missing)]))
     const a = (toEditorText(original).match(/\n/g) || []).length, b = (toEditorText(target).match(/\n/g) || []).length
     if (a !== b) result.push(issue('newline', '换行数量不一致', [String(a)], [String(b)]))
   }

@@ -5,6 +5,7 @@ import type { UnwrapNestedRefs } from 'vue'
 import type { Term } from '~/types/editor'
 import { saveModes, type SaveMode } from '~/utils/saveModes'
 import { toEditorText } from '~/utils/translationText'
+import { highlightTranslatedTerms } from '~/utils/termHighlights'
 import type { QualityLocation } from '~/utils/quality'
 const props = defineProps<{ editor: UnwrapNestedRefs<ReturnType<typeof useEditor>> }>()
 const e = props.editor
@@ -22,6 +23,7 @@ const theme = inject<Ref<string>>('workspace-theme')!, showBreaks = ref(true), s
 watch(saveMode, value => { try { localStorage.setItem('sckit-save-mode', value) } catch { /* Keep the choice for this session. */ } })
 function changeSaveStage(stage: number) {
   if (e.locked || e.listBusy || e.initializing || e.reloadBusy) return
+  typingGroupOpen = false
   e.editStage = stage
   const mode = saveModes.find(option => option.id === saveMode.value)
   if (mode?.stage !== undefined && mode.stage !== stage) saveMode.value = 'next'
@@ -32,13 +34,44 @@ function submitSelectedMode() {
 }
 const translationInput = ref<HTMLTextAreaElement>(), workspace = ref<HTMLElement>(), editorPanel = ref<HTMLElement>()
 const translationText = computed(() => toEditorText(e.text))
-const leftWidth = ref(47), rightWidth = ref(26.5), narrowLeftWidth = ref(53), narrow = ref(false)
+const translationHighlights = computed(() => highlightTranslatedTerms(translationText.value, e.terms))
+const translationHighlightOffset = ref({ top: 0, left: 0 })
+function syncTranslationHighlightScroll() {
+  translationHighlightOffset.value = { top: translationInput.value?.scrollTop || 0, left: translationInput.value?.scrollLeft || 0 }
+}
+function storedPanelLayout() {
+  const defaults = { left: 47, right: 26.5, narrowLeft: 53 }
+  if (!import.meta.client) return defaults
+  try {
+    const saved = JSON.parse(localStorage.getItem('sckit-panel-layout') || 'null')
+    if (saved?.version === 1 && [saved.left, saved.right, saved.narrowLeft].every(value => typeof value === 'number' && Number.isFinite(value)) &&
+      saved.left >= 28 && saved.right > 0 && saved.left + saved.right < 100 && saved.narrowLeft >= 28 && saved.narrowLeft < 100) return saved
+  } catch { /* Use the initial proportions when storage is unavailable or invalid. */ }
+  return defaults
+}
+const storedLayout = storedPanelLayout()
+const leftWidth = ref<number>(storedLayout.left), rightWidth = ref<number>(storedLayout.right), narrowLeftWidth = ref<number>(storedLayout.narrowLeft), narrow = ref(false)
+const workspaceWidth = ref(0)
+const layoutWidths = computed(() => {
+  const width = workspaceWidth.value || 1600, editorMinimum = 250 / width * 100
+  const right = Math.max(220 / width * 100, Math.min(rightWidth.value, 100 - 28 - editorMinimum))
+  const left = Math.max(28, Math.min(leftWidth.value, 100 - right - editorMinimum))
+  return { left, right, narrowLeft: Math.max(28, Math.min(narrowLeftWidth.value, 100 - 280 / width * 100)) }
+})
+let panelLayoutTimer: ReturnType<typeof setTimeout> | undefined
+function rememberPanelLayout() {
+  clearTimeout(panelLayoutTimer)
+  try { localStorage.setItem('sckit-panel-layout', JSON.stringify({ version: 1, left: leftWidth.value, right: rightWidth.value, narrowLeft: narrowLeftWidth.value })) }
+  catch { /* Retain the proportions for this session when storage is unavailable. */ }
+}
+watch([leftWidth, rightWidth, narrowLeftWidth], () => { clearTimeout(panelLayoutTimer); panelLayoutTimer = setTimeout(rememberPanelLayout, 200) })
 const editingContent = ref<HTMLElement>()
 const auxiliaryPanel = ref<{ focusTerm: (id: number) => void; openHistorySearch: () => void }>()
-function focusTerm(term: Term) { e.panel = 'terms'; nextTick(() => auxiliaryPanel.value?.focusTerm(term.id)) }
+function insertTerm(term: Term) { if (term.translation.trim()) insert(term.translation) }
 let active = true
 function updateCompactLayout() {
   if (!active || !workspace.value?.clientWidth) return
+  workspaceWidth.value = workspace.value.clientWidth
   const compact = workspace.value.clientWidth <= 1456
   if (compact === narrow.value) return
   narrow.value = compact
@@ -50,16 +83,137 @@ useLayoutMotion(workspace, narrow, ['.editor-panel', '.aux-panel'])
 const selectedAll = computed(() => e.visibleItems.length > 0 && e.visibleItems.every(item => e.selectedIds.includes(item.id)))
 const availableTokens = computed(() => [...new Set(tokens(e.selected?.original || ''))])
 const progress = computed(() => e.file.total ? Math.round(e.file.translated / e.file.total * 100) : 0)
-const shortcuts = [ ['Ctrl + S', '后台提交并下一条'], ['Ctrl + Enter', '后台提交并下一条'], ['Tab', '编辑框中提交并下一条'], ['Alt + ↑ / ↓', '上一条 / 下一条'], ['Ctrl + 1', '翻译建议'], ['Ctrl + 2', '词条历史'], ['Ctrl + 4', '项目术语'], ['Ctrl + 5', '词条评论'], ['Ctrl + F', '搜索字符串'], ['Ctrl + Shift + F', '搜索历史翻译'] ]
-function insert(value: string) {
-  if (e.locked || e.listBusy || e.initializing || e.reloadBusy) return
-  const field = translationInput.value
-  const content = translationText.value, inserted = toEditorText(value)
-  const start = field?.selectionStart ?? content.length, end = field?.selectionEnd ?? start
-  e.input(content.slice(0, start) + inserted + content.slice(end))
-  nextTick(() => { field?.focus(); field?.setSelectionRange(start + inserted.length, start + inserted.length) })
+const shortcuts = [ ['Ctrl + S', '后台提交并下一条'], ['Ctrl + Enter', '后台提交并下一条'], ['Tab', '编辑框中提交并下一条'], ['Alt + Z / Ctrl + Z', '撤销译文编辑或填充'], ['Alt + Shift + Z / Ctrl + Y', '重做译文编辑或填充'], ['Alt + ↑ / ↓', '上一条 / 下一条'], ['Ctrl + 1', '翻译建议'], ['Ctrl + 2', '词条历史'], ['Ctrl + 4', '项目术语'], ['Ctrl + 5', '词条评论'], ['Ctrl + F', '搜索字符串'], ['Ctrl + Shift + F', '搜索历史翻译'] ]
+function captureTranslationScroll(field: HTMLTextAreaElement) {
+  const positions: { node: HTMLElement; top: number; left: number }[] = []
+  for (let node: HTMLElement | null = field; node; node = node.parentElement) {
+    positions.push({ node, top: node.scrollTop, left: node.scrollLeft })
+  }
+  return () => {
+    for (const { node, top, left } of positions) {
+      node.scrollTop = top
+      node.scrollLeft = left
+    }
+  }
 }
-function replace(value: string) { if (!e.locked && !e.listBusy && !e.initializing && !e.reloadBusy) { e.input(value); nextTick(() => translationInput.value?.focus()) } }
+let insertionVersion = 0
+type TranslationSnapshot = {
+  text: string; stage: number; start: number; end: number
+  direction: 'forward' | 'backward' | 'none'; restoreScroll?: () => void
+}
+type TranslationEdit = { before: TranslationSnapshot; after: TranslationSnapshot; kind: string; time: number }
+const undoEdits: TranslationEdit[] = [], redoEdits: TranslationEdit[] = []
+let pendingInput: TranslationSnapshot | undefined, compositionStart: TranslationSnapshot | undefined
+let writingTranslation = false, typingGroupOpen = false
+function canEditTranslation() { return !!e.selected && !e.locked && !e.listBusy && !e.initializing && !e.reloadBusy }
+function translationSnapshot(text = translationText.value): TranslationSnapshot {
+  const field = translationInput.value
+  return { text, stage: e.editStage, start: Math.min(field?.selectionStart ?? text.length, text.length),
+    end: Math.min(field?.selectionEnd ?? text.length, text.length), direction: field?.selectionDirection || 'none',
+    restoreScroll: field ? captureTranslationScroll(field) : undefined }
+}
+function writeTranslation(value: string) {
+  writingTranslation = true
+  try { e.input(value) } finally { writingTranslation = false }
+}
+function resetTranslationHistory() {
+  undoEdits.length = redoEdits.length = 0
+  pendingInput = compositionStart = undefined
+  typingGroupOpen = false
+  ++insertionVersion
+}
+// A reload/discard can replace the text without changing the entry ID. Background
+// saves only update its remote baseline, so they do not invalidate this history.
+watch(() => [e.project.id, e.selected?.id, e.text], () => {
+  if (!writingTranslation) resetTranslationHistory()
+}, { flush: 'sync' })
+function recordTranslationEdit(before: TranslationSnapshot, after: TranslationSnapshot, kind: string) {
+  if (before.text === after.text) return
+  const time = Date.now(), previous = undoEdits.at(-1)
+  const typing = ['insertText', 'deleteContentBackward', 'deleteContentForward'].includes(kind)
+  if (typing && typingGroupOpen && previous?.kind === kind && time - previous.time < 750 &&
+    previous.after.text === before.text && previous.after.start === before.start && previous.after.end === before.end &&
+    before.start === before.end && after.start === after.end) {
+    previous.after = after; previous.time = time
+  } else {
+    undoEdits.push({ before, after, kind, time })
+    if (undoEdits.length > 100) undoEdits.shift()
+  }
+  redoEdits.length = 0
+  typingGroupOpen = typing
+}
+function restoreTranslationSelection(snapshot: TranslationSnapshot) {
+  const field = translationInput.value, selectedId = e.selected?.id, projectId = e.project.id, version = ++insertionVersion
+  nextTick(() => {
+    if (!active || !field || field !== translationInput.value || field.disabled || version !== insertionVersion ||
+      e.selected?.id !== selectedId || e.project.id !== projectId || field.value !== snapshot.text) return
+    fitTranslation()
+    field.setSelectionRange(snapshot.start, snapshot.end, snapshot.direction)
+    field.focus({ preventScroll: true })
+    snapshot.restoreScroll?.()
+    syncTranslationHighlightScroll()
+  })
+}
+function changeTranslation(value: string, start: number, end = start) {
+  if (!canEditTranslation() || compositionStart) return
+  const before = translationSnapshot(), updated = toEditorText(value)
+  writeTranslation(updated)
+  const after = { ...translationSnapshot(updated), start, end, direction: 'none' as const, restoreScroll: before.restoreScroll }
+  recordTranslationEdit(before, after, 'fill')
+  pendingInput = undefined; typingGroupOpen = false
+  restoreTranslationSelection(after)
+}
+function insert(value: string) {
+  const content = translationText.value, inserted = toEditorText(value), before = translationSnapshot()
+  const start = before.start, end = before.end
+  const updated = content.slice(0, start) + inserted + content.slice(end)
+  changeTranslation(updated, start + inserted.length)
+}
+function replace(value: string) { const updated = toEditorText(value); changeTranslation(updated, updated.length) }
+function undoTranslation(redo = false) {
+  if (!canEditTranslation() || compositionStart) return
+  const source = redo ? redoEdits : undoEdits, target = redo ? undoEdits : redoEdits, edit = source.pop()
+  if (!edit) return
+  const expected = redo ? edit.before : edit.after, snapshot = redo ? edit.after : edit.before
+  if (translationText.value !== expected.text) { resetTranslationHistory(); return }
+  const restoreStage = e.editStage === expected.stage
+  writeTranslation(snapshot.text)
+  if (restoreStage) e.editStage = snapshot.stage
+  target.push(edit)
+  pendingInput = undefined; typingGroupOpen = false
+  restoreTranslationSelection(snapshot)
+}
+function beforeTranslationInput(event: InputEvent) {
+  if (event.inputType === 'historyUndo' || event.inputType === 'historyRedo') {
+    if (event.cancelable) { event.preventDefault(); undoTranslation(event.inputType === 'historyRedo') }
+    return
+  }
+  if (!compositionStart) pendingInput = translationSnapshot()
+}
+function translationChanged(event: Event) {
+  if (!canEditTranslation()) return
+  const field = event.target as HTMLTextAreaElement, before = pendingInput || translationSnapshot()
+  const kind = (event as InputEvent).inputType
+  if (kind === 'historyUndo' || kind === 'historyRedo') {
+    field.value = translationText.value
+    undoTranslation(kind === 'historyRedo'); return
+  }
+  // Ignore the browser's separate undo stack: keyboard and beforeinput history
+  // requests are handled above so typed edits and fills always undo in order.
+  ++insertionVersion
+  writeTranslation(field.value)
+  if (!compositionStart) recordTranslationEdit(before, translationSnapshot(), kind || 'input')
+  pendingInput = undefined
+}
+function beginTranslationComposition() { typingGroupOpen = false; pendingInput = undefined; compositionStart = translationSnapshot() }
+function endTranslationComposition(event: CompositionEvent) {
+  const before = compositionStart
+  compositionStart = undefined
+  if (!before || !canEditTranslation()) return
+  writeTranslation((event.target as HTMLTextAreaElement).value)
+  recordTranslationEdit(before, translationSnapshot(), 'composition')
+  pendingInput = undefined; typingGroupOpen = false
+}
 async function locateQuality(location: QualityLocation) {
   if (e.locked || e.listBusy || e.initializing || e.reloadBusy) return
   const selectedId = e.selected?.id, content = translationText.value
@@ -92,6 +246,13 @@ function openString() { if (e.selected) window.scKit?.openExternal(`https://para
 function keydown(event: KeyboardEvent) {
   if (document.querySelector('.concordance-dialog')) { if ((event.ctrlKey || event.metaKey) && ['s', 'Enter'].includes(event.key)) event.preventDefault(); return }
   if (showConnection.value || showShortcuts.value || showOverview.value) { if (event.key === 'Escape') { showShortcuts.value = false; showOverview.value = false } return }
+  const key = event.key.toLowerCase(), target = event.target instanceof Element ? event.target : null
+  const otherInput = target?.closest('input, textarea, [contenteditable]:not([contenteditable="false"]), [role="textbox"]') && target !== translationInput.value
+  const altUndo = event.altKey && !event.ctrlKey && !event.metaKey && key === 'z' && !otherInput
+  const editorUndo = target === translationInput.value && !event.altKey && (event.ctrlKey || event.metaKey) && ['z', 'y'].includes(key)
+  if (!event.defaultPrevented && !event.isComposing && (altUndo || editorUndo)) {
+    event.preventDefault(); undoTranslation(key === 'y' || event.shiftKey); return
+  }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); e.save(); return }
   if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); e.save(true); return }
   if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'f') { event.preventDefault(); auxiliaryPanel.value?.openHistorySearch(); return }
@@ -99,28 +260,40 @@ function keydown(event: KeyboardEvent) {
   if (event.ctrlKey && ['1', '2', '4', '5'].includes(event.key)) { event.preventDefault(); e.panel = ({ '1': 'suggestions', '2': 'history', '4': 'terms', '5': 'comments' } as const)[event.key as '1' | '2' | '4' | '5']; return }
   if (event.altKey && ['ArrowUp', 'ArrowDown'].includes(event.key)) { event.preventDefault(); e.move(event.key === 'ArrowUp' ? -1 : 1) }
 }
-function editorKeydown(event: KeyboardEvent) { if (event.key === 'Tab' && !event.shiftKey && e.dirty) { event.preventDefault(); e.save(true) } }
+function editorKeydown(event: KeyboardEvent) {
+  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key) ||
+    ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a')) typingGroupOpen = false
+  if (!event.isComposing && event.key === 'Tab' && !event.shiftKey && e.dirty) { event.preventDefault(); e.save(true) }
+}
 function fitTranslation() {
   if (!active || CSS.supports('field-sizing', 'content')) return
   const field = translationInput.value
   if (!field) return
+  const restoreScroll = captureTranslationScroll(field)
   field.style.height = '160px'
   field.style.height = `${Math.max(160, field.scrollHeight)}px`
+  restoreScroll()
 }
 let fitFrame = 0
 function scheduleFit() { cancelAnimationFrame(fitFrame); fitFrame = requestAnimationFrame(fitTranslation) }
 watch(() => [e.text, e.selected?.id], () => nextTick(scheduleFit))
+watch(() => [e.text, e.selected?.id], () => nextTick(syncTranslationHighlightScroll))
 watch(() => e.selected?.id, () => { savedScroll.clear(); nextTick(() => { if (narrow.value) editingContent.value?.scrollTo({ top: 0 }); else editorPanel.value?.querySelector('.editor-scroll')?.scrollTo({ top: 0 }) }) })
+let stopResizing: (() => void) | undefined
 function resize(event: PointerEvent, side: 'left' | 'right') {
+  if (event.button !== 0) return
+  stopResizing?.()
   const rect = workspace.value?.getBoundingClientRect(); if (!rect) return
+  if (!narrow.value) { const widths = layoutWidths.value; leftWidth.value = widths.left; rightWidth.value = widths.right }
   const move = (pointer: PointerEvent) => {
     const width = rect.width
     if (side === 'left' && narrow.value) narrowLeftWidth.value = Math.max(28, Math.min((pointer.clientX - rect.left) / width * 100, 100 - 280 / width * 100))
     else if (side === 'left') leftWidth.value = Math.max(28, Math.min((pointer.clientX - rect.left) / width * 100, 100 - rightWidth.value - 250 / width * 100))
     else rightWidth.value = Math.max(220 / width * 100, Math.min((rect.right - pointer.clientX) / width * 100, 100 - leftWidth.value - 250 / width * 100))
   }
-  const end = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', end); document.body.style.cursor = ''; document.body.style.userSelect = '' }
-  document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none'; window.addEventListener('pointermove', move); window.addEventListener('pointerup', end)
+  const end = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', end); window.removeEventListener('pointercancel', end); window.removeEventListener('blur', end); document.body.style.cursor = ''; document.body.style.userSelect = ''; stopResizing = undefined; rememberPanelLayout() }
+  stopResizing = end
+  document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none'; window.addEventListener('pointermove', move); window.addEventListener('pointerup', end); window.addEventListener('pointercancel', end); window.addEventListener('blur', end)
   event.preventDefault()
 }
 const savedScroll = new Map<string, number>()
@@ -135,6 +308,8 @@ function activate() {
 }
 function deactivate() {
   active = false
+  stopResizing?.()
+  rememberPanelLayout()
   window.removeEventListener('keydown', keydown)
   showMenu.value = false
 }
@@ -163,7 +338,7 @@ onMounted(() => {
 })
 onActivated(activate)
 onDeactivated(deactivate)
-onBeforeUnmount(() => { window.removeEventListener('keydown', keydown); cancelAnimationFrame(fitFrame); editorObserver?.disconnect(); layoutObserver?.disconnect() })
+onBeforeUnmount(() => { stopResizing?.(); rememberPanelLayout(); window.removeEventListener('keydown', keydown); cancelAnimationFrame(fitFrame); editorObserver?.disconnect(); layoutObserver?.disconnect() })
 </script>
 <template>
   <div class="editor-workspace">
@@ -173,7 +348,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', keydown); cancelAn
     </header>
     <Transition name="banner"><div v-if="e.error" class="error-banner" role="alert"><TriangleAlert :size="16" /><span>{{ e.error }}</span><button v-if="e.connected" @click="e.reloadSelected()">重新载入词条</button><button class="icon-button" aria-label="关闭错误提示" @click="e.error = ''"><X :size="15" /></button></div></Transition>
     <div class="workspace-shell">
-    <main ref="workspace" class="workspace" :style="{ '--list-width': `${narrow ? narrowLeftWidth : leftWidth}%`, '--aux-share': `${rightWidth / (100 - leftWidth) * 100}%` }">
+    <main ref="workspace" class="workspace" :style="{ '--list-width': `${narrow ? layoutWidths.narrowLeft : layoutWidths.left}%`, '--aux-share': `${layoutWidths.right / (100 - layoutWidths.left) * 100}%` }">
       <section class="list-panel" aria-label="字符串列表">
         <nav class="status-tabs" aria-label="词条筛选"><button :class="{ active: e.stageFilter === null }" @click="e.filter(null)"><strong>{{ e.file.total }}</strong><span>全部</span></button><button :class="{ active: e.stageFilter === 0 }" @click="e.filter(0)"><strong>{{ e.untranslated }}</strong><span>未翻译</span></button><button :class="{ active: e.stageFilter === 2 }" @click="e.filter(2)"><strong>{{ e.file.disputed }}</strong><span>有疑问</span></button></nav>
         <div class="filters"><div class="search-bar"><span class="filter-label"><Filter :size="13" />过滤器</span><Search :size="15" /><input id="string-search" v-model="e.search" placeholder="按文本或键值搜索" aria-label="搜索字符串" /><button v-if="e.search" class="icon-button small" aria-label="清除搜索" @click="e.search = ''"><X :size="14" /></button></div><div class="filter-controls"><AppSelect v-model="e.searchMode" :options="searchOptions" label="搜索范围" /><AppSelect :model-value="e.stageFilter ?? 'all'" :options="stageOptions" label="词条状态" @update:model-value="value => e.filter(value === 'all' ? null : Number(value))" /><span class="filter-spacer"></span><span class="sort-label">本页排序</span><AppSelect v-model="e.sort" :options="sortOptions" label="本页排序" /><input type="checkbox" :checked="selectedAll" aria-label="选择当前页全部词条" @change="toggleAll" /></div></div>
@@ -189,9 +364,9 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', keydown); cancelAn
       <div class="editing-columns">
       <div ref="editingContent" class="editing-content">
       <section ref="editorPanel" class="editor-panel" aria-label="译文编辑器" :aria-busy="e.reloadBusy">
-        <template v-if="e.selected"><div class="editor-scroll"><div class="source-area"><div class="source-heading"><div class="source-heading-title"><span>待翻译的字符串</span><span class="current-occupancy" :title="e.presence.occupied ? '其他用户正在编辑此词条，你仍可编辑和提交。' : undefined"><OccupancyBadge :users="e.presence.current" :user-id="e.presence.state.userId" /></span></div><span class="source-metadata"><span v-if="e.termsBusy" class="source-term-status"><LoadingIndicator :size="12" label="正在获取术语" />正在获取术语…</span><button v-else-if="e.termsError" class="source-term-status term-error" :title="e.termsError" @click="e.loadTerms(true)">术语获取失败 · 重试</button><button v-else-if="e.terms.length" class="source-term-status" @click="e.panel = 'terms'">{{ e.terms.length }} 条术语</button><span class="stage-badge" :class="`stage-${e.selected.stage}`">{{ stageLabels[e.selected.stage] }}</span></span></div><div class="source-content"><ProtectedText :text="e.selected.original" :breaks="showBreaks" :terms="e.terms" interactive @insert="insert" @term="focusTerm" /></div></div>
+        <template v-if="e.selected"><div class="editor-scroll"><div class="source-area"><div class="source-heading"><div class="source-heading-title"><span>待翻译的字符串</span><span class="current-occupancy" :title="e.presence.occupied ? '其他用户正在编辑此词条，你仍可编辑和提交。' : undefined"><OccupancyBadge :users="e.presence.current" :user-id="e.presence.state.userId" /></span></div><span class="source-metadata"><span v-if="e.termsBusy" class="source-term-status"><LoadingIndicator :size="12" label="正在获取术语" />正在获取术语…</span><button v-else-if="e.termsError" class="source-term-status term-error" :title="e.termsError" @click="e.loadTerms(true)">术语获取失败 · 重试</button><button v-else-if="e.terms.length" class="source-term-status" @click="e.panel = 'terms'">{{ e.terms.length }} 条术语</button><span class="stage-badge" :class="`stage-${e.selected.stage}`">{{ stageLabels[e.selected.stage] }}</span></span></div><div class="source-content"><ProtectedText :text="e.selected.original" :breaks="showBreaks" :terms="e.terms" interactive :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @insert="insert" @term="insertTerm" /></div></div>
           <div class="toolbelt"><button class="icon-button" title="复制原文到译文框" aria-label="复制原文到译文框" :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @click="replace(e.selected.original)"><Copy :size="16" /></button><button class="icon-button" title="恢复当前远端译文" aria-label="恢复远端译文" :disabled="!e.dirty" @click="e.discardDraft()"><Undo2 :size="16" /></button><button class="icon-button" :class="{ pressed: showBreaks }" title="显示原文的转义换行" aria-label="切换原文换行显示" @click="showBreaks = !showBreaks"><WrapText :size="17" /></button><button class="icon-button" title="打开术语" aria-label="打开术语面板" @click="e.panel = 'terms'"><BookOpen :size="16" /></button><span class="toolbelt-spacer"></span><span class="character-count">{{ translationText.length }} 字符</span></div>
-          <div class="translation-area"><textarea ref="translationInput" :value="translationText" aria-label="译文" placeholder="在此输入翻译" spellcheck="false" :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @input="e.input(($event.target as HTMLTextAreaElement).value)" @keydown="editorKeydown"></textarea><div v-if="e.locked" class="locked-notice">此词条{{ stageLabels[e.selected.stage] }}，编辑已禁用。</div><div v-if="availableTokens.length" class="token-tray"><span>标记</span><button v-for="token in availableTokens" :key="token" :title="`插入 ${token}`" :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @click="insert(token)">{{ token }}</button></div><div class="save-row"><div class="save-controls"><AppSelect :model-value="e.editStage" :options="saveStageOptions" label="保存为词条状态" :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @update:model-value="changeSaveStage" /><SaveButton v-model:mode="saveMode" :editor="e" @save="submitSelectedMode" /></div></div></div>
+          <div class="translation-area"><div class="translation-editor"><div class="translation-highlights" aria-hidden="true"><div :style="{ transform: `translate(${-translationHighlightOffset.left}px, ${-translationHighlightOffset.top}px)` }"><template v-for="(piece, index) in translationHighlights" :key="index"><mark v-if="piece.terms?.length" class="translated-term-highlight">{{ piece.text }}</mark><template v-else>{{ piece.text }}</template></template></div></div><textarea ref="translationInput" :value="translationText" aria-label="译文" placeholder="在此输入翻译" spellcheck="false" :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @beforeinput="beforeTranslationInput" @input="translationChanged" @compositionstart="beginTranslationComposition" @compositionend="endTranslationComposition" @pointerdown="typingGroupOpen = false" @blur="typingGroupOpen = false" @scroll="syncTranslationHighlightScroll" @keydown="editorKeydown"></textarea></div><div v-if="e.locked" class="locked-notice">此词条{{ stageLabels[e.selected.stage] }}，编辑已禁用。</div><div v-if="availableTokens.length" class="token-tray"><span>标记</span><button v-for="token in availableTokens" :key="token" :title="`插入 ${token}`" :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @click="insert(token)">{{ token }}</button></div><div class="save-row"><div class="save-controls"><AppSelect :model-value="e.editStage" :options="saveStageOptions" label="保存为词条状态" :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @update:model-value="changeSaveStage" /><SaveButton v-model:mode="saveMode" :editor="e" @save="submitSelectedMode" /></div></div></div>
           <div class="editor-hint"><span class="draft-status"><LoadingIndicator v-if="e.draftStatus.startsWith('正在')" :size="12" label="正在保存草稿" /><span v-else-if="e.dirty" class="draft-dot"></span>{{ e.draftStatus || (e.notice ? e.notice : 'Tab 提交并下一条') }}</span></div>
           <StringDetails :editor="e" class="desktop-details" />
         </div>

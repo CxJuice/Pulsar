@@ -3,6 +3,7 @@ import { qualityIssues } from '~/utils/quality'
 import { matchSuggestions } from '~/utils/textWorker'
 import { toParaTranzText } from '~/utils/translationText'
 import { sortFilesByCompletion } from '~/utils/fileSort'
+import { EntryAuxCache } from '~/utils/entryAuxCache'
 
 const emptyProject = (): ProjectInfo => ({ id: 0, name: '', source: '', dest: '' })
 const emptyFile = (): FileInfo => ({ id: 0, name: '', project: 0, total: 0, translated: 0, disputed: 0, checked: 0, reviewed: 0, hidden: 0, locked: 0, words: 0 })
@@ -45,15 +46,33 @@ export function useEditor() {
   let historyRequest: { sequence: number; promise: Promise<void> } | undefined
   let termsRequest: { sequence: number; promise: Promise<void> } | undefined
   let draftWrites: Promise<void> = Promise.resolve()
-  let detachedNeighbors: { previousId?: number; nextId?: number; index: number; page: number } | null = null
+  const detachedNeighbors = shallowRef<{ previousId?: number; nextId?: number; index: number; page: number } | null>(null)
+  const termsCache = new EntryAuxCache<Term[]>(), suggestionsCache = new EntryAuxCache<Suggestion[]>()
+  let prefetchTimer: ReturnType<typeof setTimeout> | undefined, prefetchSequence = 0, disposed = false
+  const auxiliaryKey = (item: StringItem) => JSON.stringify([sessionInfo.value.user?.id, sessionInfo.value.mode, item.project, item.id, item.original])
 
-  const visibleItems = computed(() => {
-    let result = [...items.value]
+  function orderedItems(rows: StringItem[]) {
+    const result = [...rows]
     if (sort.value === 'key') result.sort((a, b) => a.key.localeCompare(b.key))
     if (sort.value === 'length') result.sort((a, b) => b.original.length - a.original.length)
     if (sort.value === 'updated') result.sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))
     return result
-  })
+  }
+  const visibleItems = computed(() => orderedItems(items.value))
+  function adjacentItem(direction: number) {
+    if (!selected.value) return undefined
+    const rows = visibleItems.value, at = rows.findIndex(item => item.id === selected.value!.id)
+    if (at >= 0) return rows[at + direction]
+    const neighbors = detachedNeighbors.value
+    if (!neighbors) return direction > 0 ? rows[0] : undefined
+    const id = direction > 0 ? neighbors.nextId : neighbors.previousId
+    const remembered = rows.find(item => item.id === id)
+    if (remembered) return remembered
+    if (neighbors.page === page.value) return rows[neighbors.index + (direction > 0 ? 0 : -1)]
+    if (direction < 0 && neighbors.page > page.value) return rows.at(-1)
+    return undefined
+  }
+  const nextLocalItem = computed(() => adjacentItem(1))
   const dirty = computed(() => {
     const item = selected.value
     if (!item) return false
@@ -86,7 +105,7 @@ export function useEditor() {
   }
   function choose(item: StringItem | null) {
     ++selectionSequence
-    detachedNeighbors = null
+    detachedNeighbors.value = null
     changing = true
     selected.value = item
     const draft = item ? drafts.value[draftKey(item)] : undefined
@@ -146,7 +165,7 @@ export function useEditor() {
     } else draftStatus.value = ''
   }, { flush: 'sync' })
 
-  async function loadStrings(preferredId?: number, retainedSelection?: StringItem) {
+  async function loadStrings(preferredId?: number, retainedSelection?: StringItem, edge: 'first' | 'last' = 'first') {
     await flushDraft()
     if (!connected.value) return
     const sequence = ++listSequence
@@ -155,13 +174,15 @@ export function useEditor() {
       const data = await api<StringPage>('strings', { projectId: project.value.id, fileId: fileId.value, page: page.value, pageSize: pageSize.value, stage: stageFilter.value, text: search.value, searchMode: searchMode.value })
       if (sequence !== listSequence) return
       items.value = data.results; rowCount.value = data.rowCount; pageCount.value = Math.max(1, data.pageCount); page.value = data.page
-      choose(retainedSelection || items.value.find(item => item.id === preferredId) || items.value[0] || null)
+      const rows = visibleItems.value
+      choose(retainedSelection || rows.find(item => item.id === preferredId) || (edge === 'last' ? rows.at(-1) : rows[0]) || null)
     } catch (reason) { if (sequence === listSequence) error.value = (reason as Error).message }
     finally { if (sequence === listSequence) listBusy.value = false }
   }
   async function bootstrap(projectId: number, newFileId: number) {
     if (!sessionInfo.value.authenticated || initializing.value && connected.value) return
     await flushDraft()
+    clearAuxiliaryCache()
     initializing.value = true; error.value = ''
     try {
       const [newProject, newFiles, localDrafts] = await Promise.all([api<ProjectInfo>('project', { projectId }), api<FileInfo[]>('files', { projectId }), api<Record<string, Draft>>('drafts')])
@@ -191,19 +212,21 @@ export function useEditor() {
   }
   function filter(stage: number | null) { stageFilter.value = stage; page.value = 1; loadStrings() }
   watch([search, searchMode], () => { clearTimeout(searchTimer); if (initializing.value) return; searchTimer = setTimeout(() => { page.value = 1; loadStrings() }, 350) })
-  async function paginate(newPage: number) { if (listBusy.value) return; page.value = Math.max(1, Math.min(newPage, pageCount.value)); await loadStrings() }
+  async function paginate(newPage: number, edge: 'first' | 'last' = 'first') { if (listBusy.value) return; page.value = Math.max(1, Math.min(newPage, pageCount.value)); await loadStrings(undefined, undefined, edge) }
   async function changePageSize(size: number) { pageSize.value = size; page.value = 1; await loadStrings() }
 
   async function loadTerms(force = false): Promise<void> {
-    if (force) { ++termsSequence; termsLoaded = false; termsRequest = undefined }
+    if (force) { termsCache.clear(); ++termsSequence; termsLoaded = false; termsRequest = undefined }
     const item = selected.value, sequence = termsSequence
     if (!item || !connected.value) { termsBusy.value = false; return }
     if (termsRequest?.sequence === sequence) return termsRequest.promise
     if (termsLoaded && !force) return
+    const key = auxiliaryKey(item), cached = termsCache.read(key)
+    if (cached !== undefined) { terms.value = cached; termsLoaded = true; termsBusy.value = false; termsError.value = ''; return }
     termsBusy.value = true; termsError.value = ''
     const promise = (async () => {
       try {
-        const data = await api<Term[]>('terms', { projectId: item.project, stringId: item.id })
+        const data = await termsCache.load(key, () => api<Term[]>('terms', { projectId: item.project, stringId: item.id }))
         if (sequence === termsSequence) { terms.value = data; termsLoaded = true }
       } catch (reason) { if (sequence === termsSequence) termsError.value = (reason as Error).message }
       finally { if (sequence === termsSequence) { termsBusy.value = false; termsRequest = undefined } }
@@ -211,6 +234,7 @@ export function useEditor() {
     termsRequest = { sequence, promise }
     await promise
     if (termsRequest?.sequence === sequence) termsRequest = undefined
+    if (force) scheduleNextPrefetch()
   }
   function scheduleTerms() {
     ++termsSequence
@@ -219,17 +243,17 @@ export function useEditor() {
     if (selected.value) void loadTerms()
   }
   async function loadSuggestions(force = false): Promise<void> {
-    if (force) { ++auxSequence; suggestionsLoaded = false; suggestionsRequest = undefined }
+    if (force) { suggestionsCache.clear(); ++auxSequence; suggestionsLoaded = false; suggestionsRequest = undefined }
     const item = selected.value, sequence = auxSequence
     if (!item || !connected.value) return
     if (suggestionsRequest?.sequence === sequence) return suggestionsRequest.promise
     if (suggestionsLoaded) return
+    const key = auxiliaryKey(item), cached = suggestionsCache.read(key)
+    if (cached !== undefined) { suggestions.value = cached; suggestionsLoaded = true; suggestionsBusy.value = false; suggestionsError.value = ''; return }
     suggestionsBusy.value = true; suggestionsError.value = ''
     const promise = (async () => {
       try {
-        const data = await api<Suggestion[]>('suggestions', { projectId: item.project, stringId: item.id })
-        if (sequence !== auxSequence) return
-        const matched = await matchSuggestions(data, item.original)
+        const matched = await suggestionsCache.load(key, () => fetchSuggestions(item))
         if (sequence === auxSequence) { suggestions.value = matched; suggestionsLoaded = true }
       } catch (reason) { if (sequence === auxSequence) suggestionsError.value = (reason as Error).message }
       finally { if (sequence === auxSequence) { suggestionsBusy.value = false; suggestionsRequest = undefined } }
@@ -237,7 +261,44 @@ export function useEditor() {
     suggestionsRequest = { sequence, promise }
     await promise
     if (suggestionsRequest?.sequence === sequence) suggestionsRequest = undefined
+    if (force) scheduleNextPrefetch()
   }
+  async function fetchSuggestions(item: StringItem) {
+    const data = await api<Suggestion[]>('suggestions', { projectId: item.project, stringId: item.id })
+    return matchSuggestions(data, item.original)
+  }
+  function clearAuxiliaryCache() {
+    clearTimeout(prefetchTimer); ++prefetchSequence
+    termsCache.clear(); suggestionsCache.clear()
+  }
+  function scheduleNextPrefetch() {
+    clearTimeout(prefetchTimer)
+    const sequence = ++prefetchSequence, item = selected.value
+    if (disposed || !item || !connected.value || !sessionInfo.value.authenticated || listBusy.value || initializing.value || reloadBusy.value) return
+    // Finish foreground requests first so background work cannot delay this entry.
+    void Promise.allSettled([loadTerms(), loadSuggestions()]).then(() => {
+      if (sequence !== prefetchSequence || disposed || !connected.value || !sessionInfo.value.authenticated) return
+      prefetchTimer = setTimeout(() => { void prefetchNext(sequence).catch(() => {}) }, 120)
+    })
+  }
+  async function prefetchNext(sequence: number) {
+    const valid = () => !disposed && sequence === prefetchSequence && connected.value && sessionInfo.value.authenticated && !listBusy.value && !initializing.value && !reloadBusy.value
+    if (!valid()) return
+    let next = nextLocalItem.value
+    if (!next && page.value < pageCount.value) {
+      const data = await api<StringPage>('strings', { projectId: project.value.id, fileId: fileId.value, page: page.value + 1, pageSize: pageSize.value, stage: stageFilter.value, text: search.value, searchMode: searchMode.value })
+      if (!valid()) return
+      next = orderedItems(data.results)[0]
+    }
+    if (!next || !valid()) return
+    const upcoming = next, key = auxiliaryKey(upcoming)
+    await Promise.allSettled([
+      termsCache.load(key, () => api<Term[]>('terms', { projectId: upcoming.project, stringId: upcoming.id })),
+      suggestionsCache.load(key, () => fetchSuggestions(upcoming)),
+    ])
+  }
+  watch([selected, nextLocalItem, sort, page, pageSize, stageFilter, search, searchMode, fileId, listBusy, initializing, reloadBusy], scheduleNextPrefetch)
+  watch([connected, () => sessionInfo.value.authenticated, () => sessionInfo.value.user?.id, () => sessionInfo.value.mode], clearAuxiliaryCache, { flush: 'sync' })
   async function loadHistory(force = false): Promise<void> {
     if (force) { ++historySequence; historyLoaded = false; historyRequest = undefined }
     const item = selected.value, sequence = historySequence
@@ -280,6 +341,8 @@ export function useEditor() {
     const accountId = sessionInfo.value.user?.id
     if (!accountId) { error.value = '请重新登录后提交'; return }
     const item = { ...selected.value }, translation = toParaTranzText(text.value)
+    // Resolve the exact displayed neighbor before queuing or updating the entry.
+    const following = next ? adjacentItem(1) : undefined
     const submission: Submission = { id: ++submissionId, item, fileId: fileId.value, accountId, translation, stage: editStage.value }
     clearTimeout(draftTimer)
     // Capture and preserve this exact draft before leaving the entry. Upload never reads the next entry's editor state.
@@ -289,10 +352,8 @@ export function useEditor() {
     submissionFailures.value = submissionFailures.value.filter(failure => failure.item.project !== item.project || failure.item.id !== item.id || failure.accountId !== accountId)
     notice.value = ''
     if (next) {
-      const index = visibleItems.value.findIndex(row => row.id === item.id)
-      const following = visibleItems.value[index + 1]
-      if (index >= 0 && following) choose(following)
-      else if (page.value < pageCount.value) { choose(null); page.value++; void loadStrings() }
+      if (following) choose(following)
+      else if (page.value < pageCount.value) { choose(null); void paginate(page.value + 1) }
     }
     void processSubmissions()
   }
@@ -311,6 +372,8 @@ export function useEditor() {
             translation: job.translation, stage: job.stage, expectedUserId: job.accountId,
             expectedUpdatedAt: base.updatedAt ?? null, expectedTranslation: base.translation, expectedStage: base.stage, expectedOriginal: base.original })
           submittedVersions.set(versionKey, saved)
+          // The saved translation can now be a suggestion for another entry.
+          suggestionsCache.clear()
           if (sessionInfo.value.user?.id === job.accountId) {
             const sameSelection = selected.value?.project === job.item.project && selected.value.id === job.item.id
             if (project.value.id === job.item.project && fileId.value === job.fileId) {
@@ -318,7 +381,7 @@ export function useEditor() {
               const visibleIndex = visibleItems.value.findIndex(row => row.id === job.item.id)
               if (index >= 0) {
                 if (stageFilter.value !== null && saved.stage !== stageFilter.value) {
-                  if (sameSelection) detachedNeighbors = { previousId: visibleItems.value[visibleIndex - 1]?.id, nextId: visibleItems.value[visibleIndex + 1]?.id, index: visibleIndex, page: page.value }
+                  if (sameSelection) detachedNeighbors.value = { previousId: visibleItems.value[visibleIndex - 1]?.id, nextId: visibleItems.value[visibleIndex + 1]?.id, index: visibleIndex, page: page.value }
                   items.value.splice(index, 1); rowCount.value = Math.max(0, rowCount.value - 1)
                   pageCount.value = Math.max(1, Math.ceil(rowCount.value / pageSize.value))
                 } else items.value[index] = saved
@@ -350,6 +413,7 @@ export function useEditor() {
       }
     } finally {
       processingSubmissions = false
+      scheduleNextPrefetch()
       if (workspaceReady.value && connected.value && sessionInfo.value.authenticated) void refreshFiles().catch(() => {})
     }
   }
@@ -374,21 +438,15 @@ export function useEditor() {
   }
   async function move(direction: number) {
     if (listBusy.value || initializing.value) return
-    const at = visibleItems.value.findIndex(item => item.id === selected.value?.id)
-    let target = visibleItems.value[at + direction]
-    if (at < 0 && detachedNeighbors) {
-      const id = direction > 0 ? detachedNeighbors.nextId : detachedNeighbors.previousId
-      target = visibleItems.value.find(item => item.id === id)
-      if (!target && detachedNeighbors.page === page.value) target = visibleItems.value[detachedNeighbors.index + (direction > 0 ? 0 : -1)]
-      if (!target && direction < 0 && detachedNeighbors.page > page.value) target = visibleItems.value.at(-1)
-    }
+    const target = adjacentItem(direction)
     if (target) await select(target)
     else if (direction > 0 && page.value < pageCount.value) await paginate(page.value + 1)
-    else if (direction < 0 && page.value > 1) { await paginate(page.value - 1); const last = visibleItems.value.at(-1); if (last) choose(last) }
+    else if (direction < 0 && page.value > 1) await paginate(page.value - 1, 'last')
   }
   async function reloadSelected() {
     if (!selected.value || !connected.value || reloadBusy.value || listBusy.value) return
     const item = selected.value
+    clearAuxiliaryCache()
     reloadBusy.value = true
     try {
       await flushDraft()
@@ -404,6 +462,7 @@ export function useEditor() {
     clearTimeout(draftTimer); await persistDraft(selected.value, '', 0, true); choose(selected.value)
   }
   async function resetWorkspace() {
+    clearAuxiliaryCache()
     await flushDraft(); connected.value = false; sessionInfo.value = { authenticated: false, mode: 'none' }
     workspaceReady.value = false
     items.value = []; project.value = emptyProject(); file.value = emptyFile(); files.value = []; drafts.value = {}
@@ -411,6 +470,7 @@ export function useEditor() {
     choose(null)
   }
   async function restoreSession(session: SessionStatus) {
+    clearAuxiliaryCache()
     await flushDraft()
     sessionInfo.value = session; connected.value = session.authenticated; workspaceReady.value = false
     choose(null)
@@ -451,7 +511,7 @@ export function useEditor() {
     }
     initializing.value = false
   })
-  onBeforeUnmount(() => { clearTimeout(draftTimer); clearTimeout(searchTimer); ++auxSequence; ++historySequence; ++termsSequence; flushDraft() })
+  onBeforeUnmount(() => { disposed = true; clearAuxiliaryCache(); clearTimeout(draftTimer); clearTimeout(searchTimer); ++auxSequence; ++historySequence; ++termsSequence; flushDraft() })
   return { desktop, connected, initializing, workspaceReady, project, file, files, sortedFiles, items, visibleItems, selected, text, editStage, stageFilter, search, searchMode, page, pageSize, pageCount, rowCount, fileId, sort, listBusy, pendingCount, submissionFailures, error, notice, draftStatus, dirty, locked, issues, untranslated, selectedIds, panel, suggestions, terms, history, auxBusy, auxError, termsBusy, termsError, sessionInfo, drafts,
     presence, presenceProjectId, presenceLoginBusy, loginPresence, requestCount, reloadBusy, exportBusy, api, input, select, loadStrings, bootstrap, changeFile, refreshFiles, filter, paginate, changePageSize, loadAux, loadTerms, submissionQueued, dismissSubmission, openSubmission, save, move, reloadSelected, discardDraft, resetWorkspace, restoreSession, flushDraft, exportPage }
 }
