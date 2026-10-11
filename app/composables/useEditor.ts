@@ -22,12 +22,18 @@ export function useEditor() {
   const panel = ref<'context' | 'suggestions' | 'history' | 'terms' | 'quality' | 'comments'>('suggestions')
   const suggestions = ref<Suggestion[]>([]), terms = ref<Term[]>([]), history = ref<HistoryEntry[]>([])
   const termsBusy = ref(false), termsError = ref('')
-  const auxBusy = ref(false), auxError = ref(''), sessionInfo = ref<SessionStatus>({ authenticated: false, mode: 'none' })
+  const suggestionsBusy = ref(false), suggestionsError = ref(''), historyBusy = ref(false), historyError = ref('')
+  const auxBusy = computed(() => panel.value === 'suggestions' ? suggestionsBusy.value : panel.value === 'history' ? historyBusy.value : false)
+  const auxError = computed(() => panel.value === 'suggestions' ? suggestionsError.value : panel.value === 'history' ? historyError.value : '')
+  const sessionInfo = ref<SessionStatus>({ authenticated: false, mode: 'none' })
   const presenceProjectId = ref(0)
   const presenceLoginBusy = ref(false)
   const presence = reactive(usePresence(presenceProjectId, computed(() => selected.value?.id || null), computed(() => desktop.value && connected.value && sessionInfo.value.authenticated), computed(() => workspaceReady.value && ![9, -1].includes(selected.value?.stage ?? 0))))
-  let draftTimer: ReturnType<typeof setTimeout>, searchTimer: ReturnType<typeof setTimeout>, auxTimer: ReturnType<typeof setTimeout>, termsTimer: ReturnType<typeof setTimeout>
-  let listSequence = 0, auxSequence = 0, termsSequence = 0, selectionSequence = 0, changing = false, draftGeneration = 0, termsLoaded = false
+  let draftTimer: ReturnType<typeof setTimeout>, searchTimer: ReturnType<typeof setTimeout>
+  let listSequence = 0, auxSequence = 0, historySequence = 0, termsSequence = 0, selectionSequence = 0, changing = false, draftGeneration = 0, termsLoaded = false
+  let suggestionsLoaded = false, historyLoaded = false
+  let suggestionsRequest: { sequence: number; promise: Promise<void> } | undefined
+  let historyRequest: { sequence: number; promise: Promise<void> } | undefined
   let termsRequest: { sequence: number; promise: Promise<void> } | undefined
   let draftWrites: Promise<void> = Promise.resolve()
   let detachedNeighbors: { previousId?: number; nextId?: number; index: number; page: number } | null = null
@@ -68,8 +74,8 @@ export function useEditor() {
     editStage.value = draft?.stage ?? item?.stage ?? 0
     draftStatus.value = draft ? '已恢复本地草稿' : ''
     changing = false
-    scheduleTerms()
     scheduleAux()
+    scheduleTerms()
   }
   async function persistDraft(item: StringItem, translation: string, stage: number, remove = false) {
     translation = toParaTranzText(translation)
@@ -169,7 +175,6 @@ export function useEditor() {
   async function changePageSize(size: number) { pageSize.value = size; page.value = 1; await loadStrings() }
 
   async function loadTerms(force = false): Promise<void> {
-    clearTimeout(termsTimer)
     if (force) { ++termsSequence; termsLoaded = false; termsRequest = undefined }
     const item = selected.value, sequence = termsSequence
     if (!item || !connected.value) { termsBusy.value = false; return }
@@ -188,38 +193,65 @@ export function useEditor() {
     if (termsRequest?.sequence === sequence) termsRequest = undefined
   }
   function scheduleTerms() {
-    clearTimeout(termsTimer); ++termsSequence
+    ++termsSequence
     terms.value = []; termsError.value = ''; termsLoaded = false; termsRequest = undefined
     termsBusy.value = !!selected.value
-    if (selected.value) termsTimer = setTimeout(() => loadTerms(), 300)
+    if (selected.value) void loadTerms()
   }
-  async function loadAux() {
-    const item = selected.value, activePanel = panel.value, sequence = ++auxSequence
-    auxError.value = ''
-    if (!item || !connected.value || ['context', 'terms', 'quality', 'comments'].includes(activePanel)) { auxBusy.value = false; return }
-    auxBusy.value = true
-    try {
-      const payload = { projectId: project.value.id, stringId: item.id }
-      if (activePanel === 'suggestions') {
-        const data = await api<Suggestion[]>('suggestions', payload)
+  async function loadSuggestions(force = false): Promise<void> {
+    if (force) { ++auxSequence; suggestionsLoaded = false; suggestionsRequest = undefined }
+    const item = selected.value, sequence = auxSequence
+    if (!item || !connected.value) return
+    if (suggestionsRequest?.sequence === sequence) return suggestionsRequest.promise
+    if (suggestionsLoaded) return
+    suggestionsBusy.value = true; suggestionsError.value = ''
+    const promise = (async () => {
+      try {
+        const data = await api<Suggestion[]>('suggestions', { projectId: item.project, stringId: item.id })
         if (sequence !== auxSequence) return
         const matched = await matchSuggestions(data, item.original)
-        if (sequence === auxSequence) suggestions.value = matched
-      } else {
-        const data = await api<{ results: HistoryEntry[] } | HistoryEntry[]>('history', payload)
-        if (sequence === auxSequence) history.value = Array.isArray(data) ? data : data.results || []
-      }
-    } catch (reason) { if (sequence === auxSequence) auxError.value = (reason as Error).message }
-    finally { if (sequence === auxSequence) auxBusy.value = false }
+        if (sequence === auxSequence) { suggestions.value = matched; suggestionsLoaded = true }
+      } catch (reason) { if (sequence === auxSequence) suggestionsError.value = (reason as Error).message }
+      finally { if (sequence === auxSequence) { suggestionsBusy.value = false; suggestionsRequest = undefined } }
+    })()
+    suggestionsRequest = { sequence, promise }
+    await promise
+    if (suggestionsRequest?.sequence === sequence) suggestionsRequest = undefined
   }
-  function scheduleAux(reset = true) {
-    clearTimeout(auxTimer); ++auxSequence
-    if (reset) { suggestions.value = []; history.value = [] }
-    auxError.value = ''
-    auxBusy.value = !!selected.value && !['context', 'terms', 'quality', 'comments'].includes(panel.value)
-    auxTimer = setTimeout(loadAux, 300)
+  async function loadHistory(force = false): Promise<void> {
+    if (force) { ++historySequence; historyLoaded = false; historyRequest = undefined }
+    const item = selected.value, sequence = historySequence
+    if (!item || !connected.value) return
+    if (historyRequest?.sequence === sequence) return historyRequest.promise
+    if (historyLoaded) return
+    historyBusy.value = true; historyError.value = ''
+    const promise = (async () => {
+      try {
+        const data = await api<{ results: HistoryEntry[] } | HistoryEntry[]>('history', { projectId: item.project, stringId: item.id })
+        if (sequence === historySequence) { history.value = Array.isArray(data) ? data : data.results || []; historyLoaded = true }
+      } catch (reason) { if (sequence === historySequence) historyError.value = (reason as Error).message }
+      finally { if (sequence === historySequence) { historyBusy.value = false; historyRequest = undefined } }
+    })()
+    historyRequest = { sequence, promise }
+    await promise
+    if (historyRequest?.sequence === sequence) historyRequest = undefined
   }
-  watch(panel, () => scheduleAux(false))
+  async function loadAux(force = true) {
+    if (panel.value === 'suggestions') await loadSuggestions(force)
+    else if (panel.value === 'history') await loadHistory(force)
+  }
+  function scheduleAux() {
+    ++auxSequence; ++historySequence
+    suggestions.value = []; history.value = []
+    suggestionsError.value = ''; historyError.value = ''
+    suggestionsLoaded = false; historyLoaded = false
+    suggestionsRequest = undefined; historyRequest = undefined
+    suggestionsBusy.value = false; historyBusy.value = false
+    // Suggestions start on every selection, including while QA or terms is open.
+    void loadSuggestions()
+    if (panel.value === 'history') void loadHistory()
+  }
+  watch(panel, () => { void loadAux(false) })
 
   async function save(next = false, stage?: 2 | 5) {
     if (!connected.value || !sessionInfo.value.authenticated || !selected.value || saving.value || listBusy.value || initializing.value || reloadBusy.value || locked.value) return
@@ -340,7 +372,7 @@ export function useEditor() {
     }
     initializing.value = false
   })
-  onBeforeUnmount(() => { clearTimeout(draftTimer); clearTimeout(searchTimer); clearTimeout(auxTimer); clearTimeout(termsTimer); ++termsSequence; flushDraft() })
+  onBeforeUnmount(() => { clearTimeout(draftTimer); clearTimeout(searchTimer); ++auxSequence; ++historySequence; ++termsSequence; flushDraft() })
   return { desktop, connected, initializing, workspaceReady, project, file, files, sortedFiles, items, visibleItems, selected, text, editStage, stageFilter, search, searchMode, page, pageSize, pageCount, rowCount, fileId, sort, listBusy, saving, error, notice, draftStatus, dirty, locked, issues, untranslated, selectedIds, panel, suggestions, terms, history, auxBusy, auxError, termsBusy, termsError, sessionInfo, drafts,
     presence, presenceProjectId, presenceLoginBusy, loginPresence, requestCount, reloadBusy, exportBusy, api, input, select, loadStrings, bootstrap, changeFile, refreshFiles, filter, paginate, changePageSize, loadAux, loadTerms, save, move, reloadSelected, discardDraft, resetWorkspace, restoreSession, flushDraft, exportPage }
 }

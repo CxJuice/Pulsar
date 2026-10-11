@@ -1,6 +1,5 @@
 import type { Suggestion } from '../types/editor'
 import type { SourceDiffPart } from './sourceDiff'
-import type { QualityEntry, QualityReport } from './quality'
 
 let worker: Worker | undefined, nextId = 0
 const pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>()
@@ -27,9 +26,6 @@ function calculate<T>(operation: string, payload: unknown): Promise<T> {
 }
 export function matchSuggestions(candidates: Suggestion[], current: string) {
   return calculate<Suggestion[]>('suggestions', { candidates, current })
-}
-export function checkFileQuality(entries: QualityEntry[]) {
-  return calculate<QualityReport>('quality', { entries })
 }
 const diffs = new Map<string, Promise<SourceDiffPart[]>>()
 export function compareSources(original: string, current: string) {

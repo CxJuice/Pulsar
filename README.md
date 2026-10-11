@@ -35,6 +35,12 @@ python scripts/package_portable.py
 
 当前 Electron 44 提供的桌面架构为 x64 和 ARM64，不构建已停止提供的 32 位版本。Windows 包未签名；macOS 使用本地临时签名，未经过 Apple 公证。CI 构建成功不代表已验证各平台的安装或真实账户操作。
 
+## 当前词条 QA
+
+QA 只检查当前选中的词条，并随编辑框输入实时更新。数字和百分比检查覆盖全文，不受 `item_` 键值、冒号或括号位置限制；核对数值及出现次数，支持小数、正负号、全角数字和逗号千位分隔，忽略标签、占位符和 URL 中的数字。保留 SCCL 的变量、标签、换行和物品类型标签提示。
+
+选择词条后立即获取翻译建议和术语，建议获取不依赖当前辅助面板；面板切换复用该词条结果，快速换条忽略旧响应。建议仍由 Rust 服务串行请求并缓存 30 秒，本地计算匹配度。
+
 ## 下载与构建状态
 
 Windows x64 安装版见 [GitHub Releases](https://github.com/CxJuice/ScTranslateKit/releases/latest)。安装 EXE 附带 SHA256 校验文件；应用无需另外安装 Node.js、Rust 或 Python。安装包未签名。
