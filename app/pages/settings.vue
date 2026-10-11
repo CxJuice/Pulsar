@@ -12,7 +12,9 @@ const navigation = inject<WorkspaceNavigation>('workspace-navigation')!
 const theme = inject<Ref<string>>('workspace-theme')!
 const translationLayout = inject<Ref<'horizontal' | 'vertical'>>('workspace-translation-layout')!
 const appearance = inject<Ref<AppearanceSettings>>('workspace-appearance')!
+const termRecognitionEnabled = inject<Ref<boolean>>('workspace-term-recognition')!
 const appearanceError = ref('')
+const termRecognitionError = ref('')
 const systemFonts = ref<string[]>([]), systemFontsBusy = ref(false), systemFontsError = ref(false), systemFontsMessage = ref('')
 const typographyRegions: { key: AppearanceTextRegion; title: string }[] = [
   { key: 'ui', title: '界面默认' },
@@ -51,6 +53,11 @@ function setTranslationLayout(value: 'horizontal' | 'vertical') {
   translationLayout.value = value; appearanceError.value = ''
   try { localStorage.setItem('sckit-translation-layout', value) }
   catch { appearanceError.value = '布局已应用，但无法保存到本设备。' }
+}
+function saveTermRecognitionSetting() {
+  termRecognitionError.value = ''
+  try { localStorage.setItem('sckit-term-recognition-enabled', termRecognitionEnabled.value ? '1' : '0') }
+  catch { termRecognitionError.value = '设置已应用，但无法保存到本设备。' }
 }
 function saveAppearance() {
   appearanceError.value = ''
@@ -221,6 +228,11 @@ onMounted(() => {
           </div>
         </div>
         <p v-if="appearanceError" class="sidebar-message error" role="alert">{{ appearanceError }}</p>
+      </section>
+      <section class="settings-card" aria-labelledby="term-recognition-title">
+        <div class="settings-card-heading"><Languages :size="20" /><h2 id="term-recognition-title">术语识别</h2></div>
+        <div class="settings-row"><div><h3>自动识别与拆分术语</h3><p>在原文和译文中匹配项目术语，并将用“/”或“／”分隔的译名拆成独立候选。关闭后不再自动匹配、标记或拆分候选。</p></div><label class="term-recognition-toggle"><input v-model="termRecognitionEnabled" type="checkbox" @change="saveTermRecognitionSetting" /><span>启用</span></label></div>
+        <p v-if="termRecognitionError" class="sidebar-message error" role="alert">{{ termRecognitionError }}</p>
       </section>
       <section class="settings-card" aria-labelledby="connection-settings-title">
         <div class="settings-card-heading"><Link :size="20" /><h2 id="connection-settings-title">ParaTranz 连接</h2></div>

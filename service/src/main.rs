@@ -156,6 +156,7 @@ async fn remote(
     query: &[(String, String)],
     body: Option<Value>,
 ) -> Result<Value, ApiError> {
+    let is_delete = method == Method::DELETE;
     let mut request = state
         .client
         .request(method, format!("{}{path}", state.base_url))
@@ -213,6 +214,9 @@ async fn remote(
         );
         error.code = data.get("code").cloned();
         return Err(error);
+    }
+    if is_delete {
+        return Ok(Value::Null);
     }
     if data.is_null() && !text.trim().is_empty() {
         return Err(ApiError::new(

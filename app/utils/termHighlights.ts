@@ -5,9 +5,12 @@ export interface TermTextPart { text: string; terms?: Term[] }
 export interface SourceTermReplacement { source: string; translation: string; term: Term }
 const wordCharacter = /[\p{Script=Latin}\p{N}_]/u
 const escapePattern = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+export function splitTranslationAlternatives(value: string) {
+  return value.split(/\s*[\/／]\s*/u).map(part => part.trim()).filter(Boolean)
+}
 
 export function highlightTerms(text: string, terms: Term[], side: 'source' | 'translation' = 'source'): TermTextPart[] {
-  const spellings = (term: Term) => side === 'translation' ? [toEditorText(term.translation)] : [...(term.match || []), ...(term.variants || []), term.term]
+  const spellings = (term: Term) => side === 'translation' ? splitTranslationAlternatives(toEditorText(term.translation)) : [...(term.match || []), ...(term.variants || []), term.term]
   const variants = new Map<string, Term[]>()
   for (const term of terms) {
     for (const value of spellings(term)) {
@@ -74,5 +77,5 @@ export function highlightTranslatedTerms(text: string, terms: Term[]): TermTextP
 }
 
 export function termDescription(terms: Term[]) {
-  return terms.map(term => `${term.term} → ${term.translation}${term.pos ? ` (${term.pos})` : ''}${term.note ? `\n${term.note}` : ''}`).join('\n\n')
+  return terms.map(term => `${term.term} → ${splitTranslationAlternatives(term.translation).join(' / ')}${term.pos ? ` (${term.pos})` : ''}${term.note ? `\n${term.note}` : ''}`).join('\n\n')
 }

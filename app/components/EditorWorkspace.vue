@@ -6,8 +6,7 @@ import type { StringItem, StringPage, Term, TranslationSettings } from '~/types/
 import { saveModes, type SaveMode } from '~/utils/saveModes'
 import { toEditorText } from '~/utils/translationText'
 import { searchHighlightParts } from '~/utils/searchHighlight'
-import { replaceSourceTerms } from '~/utils/termHighlights'
-import { highlightTranslatedTerms } from '~/utils/termHighlights'
+import { highlightTranslatedTerms, replaceSourceTerms, splitTranslationAlternatives } from '~/utils/termHighlights'
 import type { QualityLocation } from '~/utils/quality'
 const props = defineProps<{ editor: UnwrapNestedRefs<ReturnType<typeof useEditor>> }>()
 const e = props.editor
@@ -22,6 +21,7 @@ const sortOptions = [{ value: 'default', label: '默认' }, { value: 'key', labe
 const pageSizeOptions = [50, 100, 200, 500].map(value => ({ value, label: `${value} / 页` }))
 const saveStageOptions = [0, 1, 2, 3, 5].map(value => ({ value, label: stageLabels[value]! }))
 const theme = inject<Ref<string>>('workspace-theme')!, showBreaks = ref(true), saveMode = ref<SaveMode>('next'), clearAfterSaveNext = ref(true)
+const termRecognitionEnabled = inject<Ref<boolean>>('workspace-term-recognition')!
 const translationLayout = inject<Ref<'horizontal' | 'vertical'>>('workspace-translation-layout')!
 watch(saveMode, value => { try { localStorage.setItem('sckit-save-mode', value) } catch { /* Keep the choice for this session. */ } })
 function changeSaveStage(stage: number) {
@@ -40,10 +40,16 @@ function submitDisputedMode(next: boolean) { return e.save(next, 2, clearAfterSa
 const translationInput = ref<HTMLTextAreaElement>(), workspace = ref<HTMLElement>(), editorPanel = ref<HTMLElement>(), sourceContent = ref<HTMLElement>()
 const dictionarySelection = useState('cambridge-selected-word', () => '')
 watch(() => [e.project.id, e.selected?.id], () => { dictionarySelection.value = '' })
+type TermTranslationOption = { translation: string; terms: string[] }
+type TermTranslationPosition = { x: number; y: number; focus: boolean }
+const termTranslationOptions = ref<TermTranslationOption[]>([]), termTranslationPopup = ref<HTMLElement>()
+const termTranslationPopupStyle = ref({ left: '0px', top: '0px' })
+watch(() => e.selected?.id, closeTermTranslationPicker)
+watch(termRecognitionEnabled, enabled => { if (!enabled) closeTermTranslationPicker() })
 const translationText = computed(() => toEditorText(e.text))
 const originalSearchQuery = computed(() => ['text', 'original'].includes(e.searchMode) ? e.search : '')
 const translationSearchQuery = computed(() => ['text', 'translation'].includes(e.searchMode) ? e.search : '')
-const translationHighlights = computed(() => highlightTranslatedTerms(translationText.value, e.terms).map(piece => ({ ...piece, searchParts: searchHighlightParts(piece.text, translationSearchQuery.value) })))
+const translationHighlights = computed(() => highlightTranslatedTerms(translationText.value, termRecognitionEnabled.value ? e.terms : []).map(piece => ({ ...piece, searchParts: searchHighlightParts(piece.text, translationSearchQuery.value) })))
 const translationHighlightOffset = ref({ top: 0, left: 0 })
 function syncTranslationHighlightScroll() {
   translationHighlightOffset.value = { top: translationInput.value?.scrollTop || 0, left: translationInput.value?.scrollLeft || 0 }
@@ -83,7 +89,49 @@ const batchPrefillProgress = ref(0), batchPrefillTotal = ref(0), batchPrefillSki
 let batchPrefillRun = 0
 const selectionContextMenu = ref<{ x: number; y: number; text: string; selected: string; word: string } | null>(null)
 const preservedSelection = computed(() => selectionContextMenu.value ? replaceSourceTerms(selectionContextMenu.value.text, e.terms) : null)
-function insertTerm(term: Term) { if (term.translation.trim()) insert(term.translation) }
+function closeTermTranslationPicker() { termTranslationOptions.value = [] }
+function positionTermTranslationPicker(position: TermTranslationPosition) {
+  termTranslationPopupStyle.value = { left: `${position.x + 10}px`, top: `${position.y + 10}px` }
+  void nextTick(() => {
+    const popup = termTranslationPopup.value
+    if (!popup) return
+    const rect = popup.getBoundingClientRect(), gap = 8
+    let left = position.x + 10, top = position.y + 10
+    if (left + rect.width > window.innerWidth - gap) left = position.x - rect.width - 10
+    if (top + rect.height > window.innerHeight - gap) top = position.y - rect.height - 10
+    left = Math.max(gap, Math.min(left, window.innerWidth - rect.width - gap))
+    top = Math.max(gap, Math.min(top, window.innerHeight - rect.height - gap))
+    termTranslationPopupStyle.value = { left: `${left}px`, top: `${top}px` }
+    if (position.focus) popup.querySelector<HTMLButtonElement>('.term-fill-pill')?.focus()
+  })
+}
+function insertTerm(terms: Term[], position: TermTranslationPosition) {
+  const options = new Map<string, TermTranslationOption>()
+  for (const term of terms) {
+    for (const translation of splitTranslationAlternatives(toEditorText(term.translation))) {
+      const key = translation.toLocaleLowerCase(), previous = options.get(key)
+      if (previous) {
+        if (!previous.terms.includes(term.term)) previous.terms.push(term.term)
+      } else options.set(key, { translation, terms: [term.term] })
+    }
+  }
+  const choices = [...options.values()]
+  if (choices.length === 1) { closeTermTranslationPicker(); insert(choices[0]!.translation) }
+  else if (choices.length > 1) {
+    termTranslationOptions.value = choices
+    positionTermTranslationPicker(position)
+  } else closeTermTranslationPicker()
+}
+function chooseTermTranslation(option: TermTranslationOption) {
+  closeTermTranslationPicker()
+  insert(option.translation)
+}
+function dismissTermTranslationPicker(event: PointerEvent) {
+  if (!termTranslationOptions.value.length) return
+  const target = event.target
+  if (target instanceof Element && (termTranslationPopup.value?.contains(target) || target.closest('.term-highlight'))) return
+  closeTermTranslationPicker()
+}
 function singleEnglishWord(value: string) {
   const term = value.trim().replace(/^[^\p{Script=Latin}\p{M}]+|[^\p{Script=Latin}\p{M}]+$/gu, '')
   return /^[\p{Script=Latin}\p{M}]+(?:['’\-][\p{Script=Latin}\p{M}]+)*$/u.test(term) ? term : ''
@@ -433,6 +481,7 @@ function keydown(event: KeyboardEvent) {
   if (document.querySelector('.concordance-dialog')) { if ((event.ctrlKey || event.metaKey) && ['s', 'Enter'].includes(event.key)) event.preventDefault(); return }
   if (showBatchPrefill.value) { if (event.key === 'Escape') batchPrefillBusy.value ? stopBatchPrefill() : closeBatchPrefill(); return }
   if (showConnection.value || showShortcuts.value || showOverview.value) { if (event.key === 'Escape') { showShortcuts.value = false; showOverview.value = false } return }
+  if (event.key === 'Escape' && termTranslationOptions.value.length) { event.preventDefault(); closeTermTranslationPicker(); return }
   if (event.key === 'Escape' && selectionContextMenu.value) { selectionContextMenu.value = null; return }
   const key = event.key.toLowerCase(), target = event.target instanceof Element ? event.target : null
   const otherInput = target?.closest('input, textarea, [contenteditable]:not([contenteditable="false"]), [role="textbox"]') && target !== translationInput.value
@@ -554,6 +603,7 @@ function onTranslationSettingsUpdated(event: Event) {
 }
 onMounted(() => {
   window.addEventListener('sckit:translation-settings-updated', onTranslationSettingsUpdated)
+  document.addEventListener('pointerdown', dismissTermTranslationPicker, true)
   void loadTranslationBehavior()
   let previousWidth = 0
   editorObserver = new ResizeObserver(entries => {
@@ -572,7 +622,7 @@ onMounted(() => {
 })
 onActivated(activate)
 onDeactivated(deactivate)
-onBeforeUnmount(() => { if (batchPrefillBusy.value) stopBatchPrefill(); stopResizing?.(); rememberPanelLayout(); window.removeEventListener('keydown', keydown); window.removeEventListener('sckit:translation-settings-updated', onTranslationSettingsUpdated); document.removeEventListener('selectionchange', syncDictionarySelection); cancelAnimationFrame(fitFrame); editorObserver?.disconnect(); layoutObserver?.disconnect() })
+onBeforeUnmount(() => { if (batchPrefillBusy.value) stopBatchPrefill(); stopResizing?.(); rememberPanelLayout(); window.removeEventListener('keydown', keydown); window.removeEventListener('sckit:translation-settings-updated', onTranslationSettingsUpdated); document.removeEventListener('pointerdown', dismissTermTranslationPicker, true); document.removeEventListener('selectionchange', syncDictionarySelection); cancelAnimationFrame(fitFrame); editorObserver?.disconnect(); layoutObserver?.disconnect() })
 </script>
 <template>
   <div class="editor-workspace" @click="selectionContextMenu = null">
@@ -615,6 +665,7 @@ onBeforeUnmount(() => { if (batchPrefillBusy.value) stopBatchPrefill(); stopResi
       </div>
     </main>
     </div>
+    <Teleport to=".app-shell"><Transition name="fade"><div v-if="termTranslationOptions.length" ref="termTranslationPopup" class="term-translation-popup" role="menu" aria-label="选择要填入的译名" :style="termTranslationPopupStyle" @pointerdown.stop @click.stop><button v-for="option in termTranslationOptions" :key="option.translation" class="term-fill-pill" role="menuitem" @click="chooseTermTranslation(option)">{{ option.translation }}</button></div></Transition></Teleport>
     <Transition name="dialog"><div v-if="showBatchPrefill" class="modal-backdrop" @click.self="closeBatchPrefill"><section class="info-dialog batch-prefill-dialog" role="dialog" aria-modal="true" aria-labelledby="batch-prefill-title" :aria-busy="batchPrefillBusy"><button class="icon-button modal-close" aria-label="关闭批量预填充窗口" :disabled="batchPrefillBusy" @click="closeBatchPrefill"><X :size="18" /></button><Languages :size="28" class="dialog-icon" /><h2 id="batch-prefill-title">全文翻译并预填充</h2><p class="dialog-description">逐条翻译当前文件中的原文。已有译文、本机草稿和未保存编辑会跳过，避免覆盖。</p><fieldset class="batch-prefill-options" :disabled="batchPrefillBusy"><legend>选择翻译范围</legend><label><input v-model="batchPrefillScope" type="radio" name="batch-prefill-scope" value="selected" /><span><strong>已选中的文本</strong><small>{{ e.selectedIds.length }} 条，仅限当前列表页的勾选项。</small></span></label><label><input v-model="batchPrefillScope" type="radio" name="batch-prefill-scope" value="untranslated" /><span><strong>本文件所有未翻译文本</strong><small>读取整个当前文件的未翻译条目（约 {{ e.untranslated }} 条），不受当前页和搜索结果限制。</small></span></label></fieldset><fieldset class="batch-prefill-options" :disabled="batchPrefillBusy"><legend>选择保存位置</legend><label><input v-model="batchPrefillDestination" type="radio" name="batch-prefill-destination" value="local" /><span><strong>只保存在本机</strong><small>保存为本机草稿，ParaTranz 词条状态保持不变。</small></span></label><label><input v-model="batchPrefillDestination" type="radio" name="batch-prefill-destination" value="paratranz" /><span><strong>保存到 ParaTranz</strong><small>提交译文并将词条状态设为“未翻译”。</small></span></label></fieldset><div v-if="batchPrefillBusy" class="batch-prefill-progress" role="status"><div><LoadingIndicator :size="15" label="正在翻译" />正在翻译并保存 {{ batchPrefillProgress }} / {{ batchPrefillTotal }} 条</div><div class="progress-track"><span :style="{ width: `${batchPrefillTotal ? batchPrefillProgress / batchPrefillTotal * 100 : 0}%` }"></span></div></div><p v-if="batchPrefillError" class="batch-prefill-result" :class="{ success: batchPrefillError.startsWith('已完成') }" role="status">{{ batchPrefillError }}</p><div class="batch-prefill-actions"><button class="button" :disabled="batchPrefillBusy" @click="closeBatchPrefill">关闭</button><button v-if="batchPrefillBusy" class="button primary" @click="stopBatchPrefill()"><X :size="14" />停止</button><button v-else class="button primary" :disabled="!auxiliaryPanel?.canPrefillTranslation || (batchPrefillScope === 'selected' && !e.selectedIds.length) || !e.connected || !e.sessionInfo.authenticated" @click="startBatchPrefill"><Languages :size="14" />开始翻译并预填充</button></div></section></div></Transition>
     <Transition name="dialog"><div v-if="showShortcuts || showOverview" class="modal-backdrop" @click.self="showShortcuts = false; showOverview = false"><section class="info-dialog" role="dialog" aria-modal="true" :aria-label="showShortcuts ? '快捷键' : '文件概览'"><button class="icon-button modal-close" aria-label="关闭窗口" @click="showShortcuts = false; showOverview = false"><X :size="18" /></button><template v-if="showShortcuts"><Keyboard :size="28" class="dialog-icon" /><h2>快捷键</h2><div v-for="[key, label] in shortcuts" :key="key" class="shortcut-row"><span>{{ label }}</span><kbd>{{ key }}</kbd></div></template><template v-else><BarChart3 :size="28" class="dialog-icon" /><h2>文件概览</h2><p class="dialog-description">{{ e.file.name }}<span v-if="!e.connected"> · 7 条样例</span></p><div class="progress-heading"><strong>{{ progress }}<small>%</small></strong><span>{{ e.file.translated }} / {{ e.file.total }} 已翻译</span></div><div class="progress-track"><span :style="{ width: `${progress}%` }"></span></div><div class="overview-stats"><div><span>未翻译</span><strong>{{ e.untranslated }}</strong></div><div><span>有疑问</span><strong>{{ e.file.disputed }}</strong></div><div><span>已检查</span><strong>{{ e.file.checked }}</strong></div><div><span>已审核</span><strong>{{ e.file.reviewed }}</strong></div></div></template></section></div></Transition>
     <Teleport to=".app-shell"><Transition name="menu"><div v-if="selectionContextMenu" class="selection-context-menu" role="menu" :style="selectionMenuStyle(selectionContextMenu)" @click.stop><button role="menuitem" @click="runSelectionContextAction()">{{ selectionContextMenu.word ? '查询剑桥中文释义' : selectionContextMenu.selected ? '翻译所选内容到简体中文' : '翻译当前句子到简体中文' }}</button><button v-if="!selectionContextMenu.word && (e.termsBusy || (preservedSelection?.replacements.length || 0) > 0)" role="menuitem" :disabled="e.termsBusy || !preservedSelection?.replacements.length" @click="runSelectionContextAction(true)">{{ e.termsBusy ? '保留译名翻译（术语加载中…）' : `保留译名翻译（${preservedSelection?.replacements.length} 处）` }}</button><p>{{ selectionContextMenu.text }}</p></div></Transition></Teleport>

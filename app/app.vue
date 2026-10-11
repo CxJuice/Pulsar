@@ -6,6 +6,11 @@ const navigation = reactive(useWorkspaceNavigation(editor))
 const theme = ref('light')
 const translationLayout = ref<'horizontal' | 'vertical'>('horizontal')
 const appearance = ref(defaultAppearanceSettings())
+const termRecognitionEnabled = ref(true)
+if (import.meta.client) {
+  try { termRecognitionEnabled.value = localStorage.getItem('sckit-term-recognition-enabled') !== '0' }
+  catch { /* Keep term recognition enabled when local storage is unavailable. */ }
+}
 const appearanceStyle = computed(() => appearanceCssVariables(appearance.value, theme.value))
 const route = useRoute()
 const loadingLabel = computed(() => {
@@ -26,6 +31,7 @@ provide('workspace-navigation', navigation)
 provide('workspace-theme', theme)
 provide('workspace-translation-layout', translationLayout)
 provide('workspace-appearance', appearance)
+provide('workspace-term-recognition', termRecognitionEnabled)
 onMounted(() => {
   theme.value = localStorage.getItem('sckit-theme') || 'light'
   try {
