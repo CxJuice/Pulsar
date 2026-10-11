@@ -65,9 +65,10 @@ async function serviceRequest(endpoint, method = 'POST', body) {
   }
 }
 async function startService() {
+  const serviceName = process.platform === 'win32' ? 'sctranslate-service.exe' : 'sctranslate-service';
   const executable = app.isPackaged
-    ? path.join(process.resourcesPath, 'service', 'sctranslate-service.exe')
-    : path.join(app.getAppPath(), 'service', 'target', devUrl ? 'debug' : 'release', process.platform === 'win32' ? 'sctranslate-service.exe' : 'sctranslate-service');
+    ? path.join(process.resourcesPath, 'service', serviceName)
+    : path.join(app.getAppPath(), 'service', 'target', devUrl ? 'debug' : 'release', serviceName);
   if (!fs.existsSync(executable)) throw new Error('找不到 Rust 服务，请先运行 npm run build（开发模式运行 npm run dev）。');
   const env = { ...process.env, SCKIT_SECRET: serviceKey, SCKIT_DATA_DIR: app.getPath('userData') };
   const proxy = await session.defaultSession.resolveProxy('https://paratranz.cn');

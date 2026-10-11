@@ -4,13 +4,16 @@
   "private": true,
   "type": "module",
   "description": "ParaTranz translation editor with a Transifex-style workspace",
+  "author": "CxJuice <110189934+CxJuice@users.noreply.github.com>",
+  "homepage": "https://github.com/CxJuice/ScTranslateKit",
+  "repository": { "type": "git", "url": "https://github.com/CxJuice/ScTranslateKit.git" },
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "dev:web": "nuxt dev --host 127.0.0.1",
     "generate": "nuxt generate",
     "typecheck": "nuxt typecheck",
-    "build:service": "cargo build --release --manifest-path service/Cargo.toml",
+    "build:service": "cargo build --release --locked --manifest-path service/Cargo.toml",
     "build": "npm run generate && npm run build:service",
     "start": "electron .",
     "package": "npm run build && electron-builder --win dir",
@@ -29,6 +32,7 @@
   "build": {
     "appId": "com.42kit.sctranslatekit",
     "productName": "ScTranslateKit",
+    "artifactName": "ScTranslateKit-${version}-${os}-${arch}.${ext}",
     "directories": {
       "output": "release/desktop"
     },
@@ -37,18 +41,30 @@
       ".output/public/**",
       "package.json"
     ],
-    "extraResources": [
-      {
-        "from": "service/target/release/sctranslate-service.exe",
-        "to": "service/sctranslate-service.exe"
-      }
-    ],
     "win": {
       "target": "dir",
       "icon": "public/icon.ico",
       "signAndEditExecutable": true,
-      "signExecutable": false
+      "signExecutable": false,
+      "extraResources": [{ "from": "service/target/release/sctranslate-service.exe", "to": "service/sctranslate-service.exe" }]
     },
+    "mac": {
+      "target": ["dmg", "zip"],
+      "icon": "public/icon.png",
+      "category": "public.app-category.productivity",
+      "identity": "-",
+      "notarize": false,
+      "hardenedRuntime": false,
+      "extraResources": [{ "from": "service/target/release/sctranslate-service", "to": "service/sctranslate-service" }]
+    },
+    "linux": {
+      "target": ["AppImage", "deb", "rpm", "tar.gz"],
+      "icon": "public/icon.png",
+      "category": "Utility",
+      "maintainer": "CxJuice <110189934+CxJuice@users.noreply.github.com>",
+      "extraResources": [{ "from": "service/target/release/sctranslate-service", "to": "service/sctranslate-service" }]
+    },
+    "portable": { "artifactName": "ScTranslateKit-${version}-Portable-${arch}.${ext}" },
     "nsis": {
       "artifactName": "ScTranslateKit-${version}-Setup-${arch}.${ext}",
       "oneClick": false,

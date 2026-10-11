@@ -1,0 +1,137 @@
+name: Build all desktop versions
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: win, arch: x64, runner: windows-2025, rust: x86_64-pc-windows-msvc }
+          - { platform: win, arch: arm64, runner: windows-11-arm, rust: aarch64-pc-windows-msvc }
+          - { platform: mac, arch: x64, runner: macos-15-intel, rust: x86_64-apple-darwin }
+          - { platform: mac, arch: arm64, runner: macos-15, rust: aarch64-apple-darwin }
+          - { platform: mac, arch: universal, runner: macos-15, rust: universal }
+          - { platform: linux, arch: x64, runner: ubuntu-24.04, rust: x86_64-unknown-linux-gnu }
+          - { platform: linux, arch: arm64, runner: ubuntu-24.04-arm, rust: aarch64-unknown-linux-gnu }
+    defaults:
+      run:
+        shell: bash
+    env:
+      CI_PLATFORM: ${{ matrix.platform }}
+      CI_ARCH: ${{ matrix.arch }}
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      USE_SYSTEM_FPM: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Check release version
+        run: |
+          python - <<'PY'
+          import json, os
+          version = json.load(open('package.json', encoding='utf-8'))['version']
+          ref = os.environ['GITHUB_REF']
+          if ref.startswith('refs/tags/') and ref != f'refs/tags/v{version}':
+              raise SystemExit('Tag must match package.json version')
+          PY
+      - name: Install Linux packaging tools
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential ruby ruby-dev rpm libarchive-tools
+          sudo gem install fpm --no-document
+      - name: Install dependencies
+        run: npm ci
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          if [[ "$CI_ARCH" == universal ]]; then
+            rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          else
+            rustup target add '${{ matrix.rust }}'
+          fi
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            service/target
+          key: rust-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('service/Cargo.lock') }}
+      - name: Compile Rust service
+        run: |
+          mkdir -p service/target/release
+          if [[ "$CI_ARCH" == universal ]]; then
+            cargo build --release --locked --manifest-path service/Cargo.toml --target x86_64-apple-darwin
+            cargo build --release --locked --manifest-path service/Cargo.toml --target aarch64-apple-darwin
+            lipo -create service/target/x86_64-apple-darwin/release/sctranslate-service service/target/aarch64-apple-darwin/release/sctranslate-service -output service/target/release/sctranslate-service
+            chmod +x service/target/release/sctranslate-service
+          else
+            cargo build --release --locked --manifest-path service/Cargo.toml --target '${{ matrix.rust }}'
+            binary=sctranslate-service
+            if [[ "$CI_PLATFORM" == win ]]; then binary=sctranslate-service.exe; fi
+            cp "service/target/${{ matrix.rust }}/release/$binary" "service/target/release/$binary"
+          fi
+      - name: Build frontend
+        run: npm run generate
+      - name: Package application
+        run: |
+          case "$CI_PLATFORM" in
+            win) npx electron-builder --win nsis portable zip --${{ matrix.arch }} --publish never --config.directories.output=release/ci ;;
+            mac) npx electron-builder --mac dmg zip --${{ matrix.arch }} --publish never --config.directories.output=release/ci ;;
+            linux) npx electron-builder --linux AppImage deb rpm tar.gz --${{ matrix.arch }} --publish never --config.directories.output=release/ci ;;
+          esac
+      - name: Collect packages and checksums
+        run: python scripts/ci_artifacts.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ScTranslateKit-${{ matrix.platform }}-${{ matrix.arch }}
+          path: release/artifacts/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  publish:
+    name: Publish tagged release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: ScTranslateKit-*
+          path: release-assets
+          merge-multiple: true
+      - name: Publish all packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --title "ScTranslateKit ${RELEASE_TAG#v}" --generate-notes
+          fi
+          gh release upload "$RELEASE_TAG" release-assets/* --clobber
