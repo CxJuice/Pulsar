@@ -19,7 +19,7 @@ export function useEditor() {
   const files = ref<FileInfo[]>([]), items = ref<StringItem[]>([])
   const sortedFiles = computed(() => sortFilesByCompletion(files.value))
   const selected = ref<StringItem | null>(items.value[0] || null)
-  const text = ref(''), editStage = ref(0), stageFilter = ref<number | null>(0), search = ref(''), searchMode = ref('text')
+  const text = ref(''), editStage = ref(0), translationDisplayCleared = ref(false), stageFilter = ref<number | null>(0), search = ref(''), searchMode = ref('text')
   const page = ref(1), pageSize = ref(50), pageCount = ref(1), rowCount = ref(0), fileId = ref(0), sort = ref('default')
   const listBusy = ref(false), error = ref(''), notice = ref(''), draftStatus = ref('')
   const pendingSubmissions = ref<Submission[]>([]), submissionFailures = ref<SubmissionFailure[]>([])
@@ -47,15 +47,53 @@ export function useEditor() {
   let termsRequest: { sequence: number; promise: Promise<void> } | undefined
   let draftWrites: Promise<void> = Promise.resolve()
   const detachedNeighbors = shallowRef<{ previousId?: number; nextId?: number; index: number; page: number } | null>(null)
-  const termsCache = new EntryAuxCache<Term[]>(), suggestionsCache = new EntryAuxCache<Suggestion[]>()
+  const termsCache = new EntryAuxCache<Term[]>(), suggestionsCache = new EntryAuxCache<Suggestion[]>(), disputedStringsCache = new EntryAuxCache<StringItem[]>(120_000, 8)
+  const updatedStringsCache = shallowRef<{ key: string; items: StringItem[] } | null>(null)
+  let updatedSortNeedsRefresh = false
   let prefetchTimer: ReturnType<typeof setTimeout> | undefined, prefetchSequence = 0, disposed = false
   const auxiliaryKey = (item: StringItem) => JSON.stringify([sessionInfo.value.user?.id, sessionInfo.value.mode, item.project, item.id, item.original])
+
+  function updatedStringsQueryKey() {
+    return JSON.stringify([project.value.id, fileId.value, stageFilter.value, searchMode.value, search.value])
+  }
+  function compareUpdated(a: StringItem, b: StringItem) {
+    const aTime = Date.parse(a.updatedAt || '') || 0, bTime = Date.parse(b.updatedAt || '') || 0
+    return bTime - aTime || b.id - a.id
+  }
+  function sortByUpdated(rows: StringItem[]) { return [...rows].sort(compareUpdated) }
+  function updateUpdatedStringsCache(saved: StringItem, preferSaved = false) {
+    const cache = updatedStringsCache.value
+    if (sort.value !== 'updated' || !cache || cache.key !== updatedStringsQueryKey()) return false
+    if (search.value) {
+      updatedStringsCache.value = null
+      updatedSortNeedsRefresh = true
+      return false
+    }
+
+    const rows = [...cache.items], index = rows.findIndex(item => item.project === saved.project && item.id === saved.id)
+    const matchesStage = stageFilter.value === null || saved.stage === stageFilter.value
+    if (index >= 0) {
+      if (matchesStage) rows[index] = saved
+      else rows.splice(index, 1)
+    } else if (matchesStage) rows.push(saved)
+    const sorted = sortByUpdated(rows)
+    updatedStringsCache.value = { key: cache.key, items: sorted }
+    rowCount.value = sorted.length
+    pageCount.value = Math.max(1, Math.ceil(rowCount.value / pageSize.value))
+    if (preferSaved && matchesStage) {
+      const savedIndex = sorted.findIndex(item => item.project === saved.project && item.id === saved.id)
+      if (savedIndex >= 0) page.value = Math.floor(savedIndex / pageSize.value) + 1
+    }
+    page.value = Math.max(1, Math.min(page.value, pageCount.value))
+    items.value = sorted.slice((page.value - 1) * pageSize.value, page.value * pageSize.value)
+    return true
+  }
 
   function orderedItems(rows: StringItem[]) {
     const result = [...rows]
     if (sort.value === 'key') result.sort((a, b) => a.key.localeCompare(b.key))
     if (sort.value === 'length') result.sort((a, b) => b.original.length - a.original.length)
-    if (sort.value === 'updated') result.sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))
+    if (sort.value === 'updated') result.sort(compareUpdated)
     return result
   }
   const visibleItems = computed(() => orderedItems(items.value))
@@ -76,11 +114,12 @@ export function useEditor() {
   const dirty = computed(() => {
     const item = selected.value
     if (!item) return false
+    if (translationDisplayCleared.value) return false
     const queued = pendingSubmissions.value.findLast(job => job.item.project === item.project && job.item.id === item.id)
     return toParaTranzText(text.value) !== toParaTranzText(queued?.translation ?? item.translation) || editStage.value !== (queued?.stage ?? item.stage)
   })
   const locked = computed(() => [9, -1].includes(selected.value?.stage ?? 0))
-  const issues = computed(() => selected.value ? qualityIssues(selected.value.original, text.value, selected.value.key) : [])
+  const issues = computed(() => selected.value ? qualityIssues(selected.value.original, text.value, selected.value.key, terms.value) : [])
   const untranslated = computed(() => Math.max(0, file.value.total - file.value.translated - file.value.hidden))
   const draftKey = (item = selected.value) => item ? `${item.project}/${item.id}` : ''
   const pendingFor = (item: StringItem) => pendingSubmissions.value.some(job => job.item.project === item.project && job.item.id === item.id)
@@ -103,18 +142,34 @@ export function useEditor() {
       return result.data as T
     } finally { requestCount.value-- }
   }
-  function choose(item: StringItem | null) {
+  function choose(item: StringItem | null, clearTranslation = false) {
     ++selectionSequence
     detachedNeighbors.value = null
     changing = true
+    translationDisplayCleared.value = false
     selected.value = item
     const draft = item ? drafts.value[draftKey(item)] : undefined
     text.value = toParaTranzText(draft?.translation ?? item?.translation ?? '')
     editStage.value = draft?.stage ?? item?.stage ?? 0
-    draftStatus.value = draft ? '已恢复本地草稿' : ''
+    if (clearTranslation && item) {
+      text.value = ''
+      translationDisplayCleared.value = true
+      draftStatus.value = draft ? '译文框已清空，本地草稿已保留' : '译文框已清空'
+    } else draftStatus.value = draft ? '已恢复本地草稿' : ''
     changing = false
     scheduleAux()
     scheduleTerms()
+  }
+  function restoreClearedTranslation() {
+    const item = selected.value
+    if (!translationDisplayCleared.value || !item) return
+    changing = true
+    translationDisplayCleared.value = false
+    const draft = drafts.value[draftKey(item)]
+    text.value = toParaTranzText(draft?.translation ?? item.translation ?? '')
+    editStage.value = draft?.stage ?? item.stage ?? 0
+    draftStatus.value = draft ? '已恢复本地草稿' : ''
+    changing = false
   }
   async function persistDraft(item: StringItem, translation: string, stage: number, remove = false) {
     translation = toParaTranzText(translation)
@@ -131,30 +186,92 @@ export function useEditor() {
       return true
     } catch (reason) { if (generation === draftGeneration && selected.value?.project === item.project && selected.value.id === item.id) draftStatus.value = `草稿保存失败：${(reason as Error).message}`; return false }
   }
+  async function savePrefillDraft(item: StringItem, translation: string) {
+    const normalized = toParaTranzText(translation), current = selected.value?.project === item.project && selected.value.id === item.id
+    const wasClean = current && !dirty.value
+    if (!await persistDraft(item, normalized, 0)) throw new Error(draftStatus.value || '本机草稿保存失败')
+    if (wasClean && selected.value?.project === item.project && selected.value.id === item.id) {
+      changing = true
+      translationDisplayCleared.value = false
+      text.value = normalized
+      editStage.value = 0
+      changing = false
+    }
+  }
+  async function savePrefillToParaTranz(item: StringItem, translation: string) {
+    if (!connected.value || !sessionInfo.value.authenticated) throw new Error('请先登录 ParaTranz')
+    if ([9, -1].includes(item.stage)) throw new Error('此词条已锁定，无法保存')
+    const accountId = sessionInfo.value.user?.id
+    if (!accountId) throw new Error('请重新登录后提交')
+    const normalized = toParaTranzText(translation)
+    await savePrefillDraft(item, normalized)
+    const saved = await api<StringItem>('save', { projectId: item.project, stringId: item.id, translation: normalized, stage: 0,
+      expectedUserId: accountId, expectedUpdatedAt: item.updatedAt ?? null, expectedTranslation: item.translation,
+      expectedStage: item.stage, expectedOriginal: item.original })
+    const key = draftKey(item), sameSelection = selected.value?.project === item.project && selected.value.id === item.id
+    if (project.value.id === item.project && fileId.value === (item.fileId || item.file?.id || fileId.value)) {
+      const priorVisible = visibleItems.value
+      const priorVisibleIndex = priorVisible.findIndex(row => row.project === item.project && row.id === item.id)
+      if (sameSelection && stageFilter.value !== null && saved.stage !== stageFilter.value && priorVisibleIndex >= 0) {
+        detachedNeighbors.value = { previousId: priorVisible[priorVisibleIndex - 1]?.id, nextId: priorVisible[priorVisibleIndex + 1]?.id, index: priorVisibleIndex, page: page.value }
+      }
+      const updatedCacheHandled = updateUpdatedStringsCache(saved, sameSelection)
+      const index = items.value.findIndex(row => row.project === item.project && row.id === item.id)
+      const visibleIndex = visibleItems.value.findIndex(row => row.project === item.project && row.id === item.id)
+      if (!updatedCacheHandled && index >= 0) {
+        if (stageFilter.value !== null && saved.stage !== stageFilter.value) {
+          if (sameSelection) detachedNeighbors.value = { previousId: visibleItems.value[visibleIndex - 1]?.id, nextId: visibleItems.value[visibleIndex + 1]?.id, index: visibleIndex, page: page.value }
+          items.value.splice(index, 1)
+          rowCount.value = Math.max(0, rowCount.value - 1)
+          pageCount.value = Math.max(1, Math.ceil(rowCount.value / pageSize.value))
+        } else items.value[index] = saved
+      }
+    }
+    if (sameSelection) {
+      const newerInput = toParaTranzText(text.value) !== normalized || editStage.value !== 0
+      selected.value = saved
+      if (newerInput) await persistDraft(saved, text.value, editStage.value)
+      else {
+        changing = true
+        translationDisplayCleared.value = false
+        text.value = normalized
+        editStage.value = 0
+        changing = false
+        if (drafts.value[key]?.translation === normalized) await persistDraft(saved, '', 0, true)
+      }
+    } else if (drafts.value[key]?.translation === normalized) await persistDraft(saved, '', 0, true)
+    if (updatedSortNeedsRefresh && sort.value === 'updated') {
+      updatedSortNeedsRefresh = false
+      await loadStrings(selected.value?.id)
+    }
+    return saved
+  }
   async function flushDraft(strict = false) {
     clearTimeout(draftTimer)
     if (!selected.value) return
+    if (translationDisplayCleared.value) { await draftWrites; return }
     let persisted = true
     if (dirty.value || pendingFor(selected.value)) persisted = await persistDraft(selected.value, text.value, editStage.value)
     else if (drafts.value[draftKey()] && !pendingFor(selected.value)) persisted = await persistDraft(selected.value, '', 0, true)
     await draftWrites
     if (strict && !persisted) throw new Error(draftStatus.value)
   }
-  async function select(item: StringItem) {
+  async function select(item: StringItem, clearTranslation = false) {
     if (listBusy.value || initializing.value || reloadBusy.value || selected.value?.id === item.id) return
     const sequence = ++selectionSequence
     await flushDraft()
     if (sequence !== selectionSequence || listBusy.value || initializing.value || reloadBusy.value) return
-    choose(item)
+    choose(item, clearTranslation)
   }
   function input(value: string) {
     if (listBusy.value || initializing.value || reloadBusy.value || locked.value) return
+    translationDisplayCleared.value = false
     text.value = toParaTranzText(value)
     if (editStage.value === 0 && value.trim()) editStage.value = 1
     if (editStage.value === 1 && !value.trim()) editStage.value = 0
   }
   watch([text, editStage], () => {
-    if (changing || !selected.value) return
+    if (changing || !selected.value || translationDisplayCleared.value) return
     clearTimeout(draftTimer)
     const item = selected.value, translation = text.value, stage = editStage.value
     if (dirty.value || pendingFor(item)) {
@@ -165,17 +282,44 @@ export function useEditor() {
     } else draftStatus.value = ''
   }, { flush: 'sync' })
 
-  async function loadStrings(preferredId?: number, retainedSelection?: StringItem, edge: 'first' | 'last' = 'first') {
+  async function loadStrings(preferredId?: number, retainedSelection?: StringItem, edge: 'first' | 'last' = 'first', clearTranslation = false, force = true) {
     await flushDraft()
     if (!connected.value) return
     const sequence = ++listSequence
     listBusy.value = true; error.value = ''; selectedIds.value = []
     try {
-      const data = await api<StringPage>('strings', { projectId: project.value.id, fileId: fileId.value, page: page.value, pageSize: pageSize.value, stage: stageFilter.value, text: search.value, searchMode: searchMode.value })
-      if (sequence !== listSequence) return
-      items.value = data.results; rowCount.value = data.rowCount; pageCount.value = Math.max(1, data.pageCount); page.value = data.page
+      if (sort.value === 'updated') {
+        const key = updatedStringsQueryKey()
+        let all = !force && updatedStringsCache.value?.key === key ? updatedStringsCache.value.items : undefined
+        if (!all) {
+          // ParaTranz does not expose a list sort parameter, so collect the full filtered result before sorting.
+          updatedStringsCache.value = null
+          const remotePageSize = 800
+          const query = { projectId: project.value.id, fileId: fileId.value, pageSize: remotePageSize, stage: stageFilter.value, text: search.value, searchMode: searchMode.value }
+          const first = await api<StringPage>('strings', { ...query, page: 1 })
+          if (sequence !== listSequence) return
+          const fetched = new Map(first.results.map(item => [item.id, item]))
+          for (let currentPage = 2; currentPage <= first.pageCount; currentPage++) {
+            const data = await api<StringPage>('strings', { ...query, page: currentPage })
+            if (sequence !== listSequence) return
+            for (const item of data.results) fetched.set(item.id, item)
+          }
+          all = sortByUpdated([...fetched.values()])
+          updatedStringsCache.value = { key, items: all }
+          updatedSortNeedsRefresh = false
+        }
+        if (sequence !== listSequence) return
+        rowCount.value = all.length
+        pageCount.value = Math.max(1, Math.ceil(rowCount.value / pageSize.value))
+        page.value = Math.max(1, Math.min(page.value, pageCount.value))
+        items.value = all.slice((page.value - 1) * pageSize.value, page.value * pageSize.value)
+      } else {
+        const data = await api<StringPage>('strings', { projectId: project.value.id, fileId: fileId.value, page: page.value, pageSize: pageSize.value, stage: stageFilter.value, text: search.value, searchMode: searchMode.value })
+        if (sequence !== listSequence) return
+        items.value = data.results; rowCount.value = data.rowCount; pageCount.value = Math.max(1, data.pageCount); page.value = data.page
+      }
       const rows = visibleItems.value
-      choose(retainedSelection || rows.find(item => item.id === preferredId) || (edge === 'last' ? rows.at(-1) : rows[0]) || null)
+      choose(retainedSelection || rows.find(item => item.id === preferredId) || (edge === 'last' ? rows.at(-1) : rows[0]) || null, clearTranslation)
     } catch (reason) { if (sequence === listSequence) error.value = (reason as Error).message }
     finally { if (sequence === listSequence) listBusy.value = false }
   }
@@ -183,6 +327,7 @@ export function useEditor() {
     if (!sessionInfo.value.authenticated || initializing.value && connected.value) return
     await flushDraft()
     clearAuxiliaryCache()
+    updatedStringsCache.value = null
     initializing.value = true; error.value = ''
     try {
       const [newProject, newFiles, localDrafts] = await Promise.all([api<ProjectInfo>('project', { projectId }), api<FileInfo[]>('files', { projectId }), api<Record<string, Draft>>('drafts')])
@@ -199,7 +344,7 @@ export function useEditor() {
   }
   async function changeFile(id: number) {
     if (initializing.value || listBusy.value || id === fileId.value || !files.value.some(entry => entry.id === id)) return
-    await flushDraft(); fileId.value = id; file.value = files.value.find(entry => entry.id === id) || file.value
+    await flushDraft(); updatedStringsCache.value = null; fileId.value = id; file.value = files.value.find(entry => entry.id === id) || file.value
     page.value = 1; await loadStrings(); localStorage.setItem('sckit-workspace', JSON.stringify({ projectId: project.value.id, fileId: id }))
   }
   async function refreshFiles() {
@@ -212,8 +357,9 @@ export function useEditor() {
   }
   function filter(stage: number | null) { stageFilter.value = stage; page.value = 1; loadStrings() }
   watch([search, searchMode], () => { clearTimeout(searchTimer); if (initializing.value) return; searchTimer = setTimeout(() => { page.value = 1; loadStrings() }, 350) })
-  async function paginate(newPage: number, edge: 'first' | 'last' = 'first') { if (listBusy.value) return; page.value = Math.max(1, Math.min(newPage, pageCount.value)); await loadStrings(undefined, undefined, edge) }
-  async function changePageSize(size: number) { pageSize.value = size; page.value = 1; await loadStrings() }
+  watch(sort, () => { page.value = 1; void loadStrings(selected.value?.id) })
+  async function paginate(newPage: number, edge: 'first' | 'last' = 'first', clearTranslation = false) { if (listBusy.value) return; page.value = Math.max(1, Math.min(newPage, pageCount.value)); await loadStrings(undefined, undefined, edge, clearTranslation, false) }
+  async function changePageSize(size: number) { pageSize.value = size; page.value = 1; await loadStrings(undefined, undefined, 'first', false, false) }
 
   async function loadTerms(force = false): Promise<void> {
     if (force) { termsCache.clear(); ++termsSequence; termsLoaded = false; termsRequest = undefined }
@@ -264,12 +410,40 @@ export function useEditor() {
     if (force) scheduleNextPrefetch()
   }
   async function fetchSuggestions(item: StringItem) {
-    const data = await api<Suggestion[]>('suggestions', { projectId: item.project, stringId: item.id })
-    return matchSuggestions(data, item.original)
+    const [data, disputed] = await Promise.all([
+      api<Suggestion[]>('suggestions', { projectId: item.project, stringId: item.id }),
+      fetchDisputedStrings(item).catch(() => []),
+    ])
+    const candidates = new Map(data.map(suggestion => [suggestion.id, suggestion]))
+    for (const entry of disputed) {
+      if (entry.id === item.id || !entry.translation.trim()) continue
+      const existing = candidates.get(entry.id)
+      candidates.set(entry.id, existing ? { ...existing, stage: 2 } : {
+        id: entry.id, key: entry.key, original: entry.original, translation: entry.translation,
+        matching: 0, stage: 2, project: { id: entry.project, name: project.value.name },
+        file: entry.file || { id: item.fileId || item.file?.id || fileId.value, name: file.value.name, project: entry.project },
+        user: entry.user, updatedAt: entry.updatedAt || undefined,
+      })
+    }
+    return matchSuggestions([...candidates.values()], item.original)
+  }
+  async function fetchDisputedStrings(item: StringItem): Promise<StringItem[]> {
+    const sourceFileId = item.fileId || item.file?.id || (project.value.id === item.project ? fileId.value : 0)
+    if (!sourceFileId) return []
+    return disputedStringsCache.load(`${item.project}/${sourceFileId}`, async () => {
+      const pageSize = 800
+      const first = await api<StringPage>('strings', { projectId: item.project, fileId: sourceFileId, page: 1, pageSize, stage: 2 })
+      const entries = [...first.results]
+      for (let page = 2; page <= first.pageCount; page++) {
+        const next = await api<StringPage>('strings', { projectId: item.project, fileId: sourceFileId, page, pageSize, stage: 2 })
+        entries.push(...next.results)
+      }
+      return entries.filter(entry => entry.stage === 2)
+    })
   }
   function clearAuxiliaryCache() {
     clearTimeout(prefetchTimer); ++prefetchSequence
-    termsCache.clear(); suggestionsCache.clear()
+    termsCache.clear(); suggestionsCache.clear(); disputedStringsCache.clear()
   }
   function scheduleNextPrefetch() {
     clearTimeout(prefetchTimer)
@@ -286,9 +460,14 @@ export function useEditor() {
     if (!valid()) return
     let next = nextLocalItem.value
     if (!next && page.value < pageCount.value) {
-      const data = await api<StringPage>('strings', { projectId: project.value.id, fileId: fileId.value, page: page.value + 1, pageSize: pageSize.value, stage: stageFilter.value, text: search.value, searchMode: searchMode.value })
-      if (!valid()) return
-      next = orderedItems(data.results)[0]
+      if (sort.value === 'updated') {
+        const cache = updatedStringsCache.value
+        if (cache?.key === updatedStringsQueryKey()) next = cache.items[page.value * pageSize.value]
+      } else {
+        const data = await api<StringPage>('strings', { projectId: project.value.id, fileId: fileId.value, page: page.value + 1, pageSize: pageSize.value, stage: stageFilter.value, text: search.value, searchMode: searchMode.value })
+        if (!valid()) return
+        next = orderedItems(data.results)[0]
+      }
     }
     if (!next || !valid()) return
     const upcoming = next, key = auxiliaryKey(upcoming)
@@ -298,7 +477,10 @@ export function useEditor() {
     ])
   }
   watch([selected, nextLocalItem, sort, page, pageSize, stageFilter, search, searchMode, fileId, listBusy, initializing, reloadBusy], scheduleNextPrefetch)
-  watch([connected, () => sessionInfo.value.authenticated, () => sessionInfo.value.user?.id, () => sessionInfo.value.mode], clearAuxiliaryCache, { flush: 'sync' })
+  watch([connected, () => sessionInfo.value.authenticated, () => sessionInfo.value.user?.id, () => sessionInfo.value.mode], () => {
+    clearAuxiliaryCache()
+    updatedStringsCache.value = null
+  }, { flush: 'sync' })
   async function loadHistory(force = false): Promise<void> {
     if (force) { ++historySequence; historyLoaded = false; historyRequest = undefined }
     const item = selected.value, sequence = historySequence
@@ -334,10 +516,10 @@ export function useEditor() {
   }
   watch(panel, () => { void loadAux(false) })
 
-  function save(next = true, stage?: 2 | 5) {
+  function save(next = true, stage?: 2 | 5, clearTranslationAfterNext = false) {
     if (!connected.value || !sessionInfo.value.authenticated || !selected.value || listBusy.value || initializing.value || reloadBusy.value || locked.value) return
     if (stage === 2 || stage === 5) editStage.value = stage
-    if (!dirty.value || submissionQueued()) { if (next) void move(1); return }
+    if (!dirty.value || submissionQueued()) { if (next) void move(1, clearTranslationAfterNext); return }
     const accountId = sessionInfo.value.user?.id
     if (!accountId) { error.value = '请重新登录后提交'; return }
     const item = { ...selected.value }, translation = toParaTranzText(text.value)
@@ -352,8 +534,8 @@ export function useEditor() {
     submissionFailures.value = submissionFailures.value.filter(failure => failure.item.project !== item.project || failure.item.id !== item.id || failure.accountId !== accountId)
     notice.value = ''
     if (next) {
-      if (following) choose(following)
-      else if (page.value < pageCount.value) { choose(null); void paginate(page.value + 1) }
+      if (following) choose(following, clearTranslationAfterNext)
+      else if (page.value < pageCount.value) { choose(null); void paginate(page.value + 1, 'first', clearTranslationAfterNext) }
     }
     void processSubmissions()
   }
@@ -373,13 +555,19 @@ export function useEditor() {
             expectedUpdatedAt: base.updatedAt ?? null, expectedTranslation: base.translation, expectedStage: base.stage, expectedOriginal: base.original })
           submittedVersions.set(versionKey, saved)
           // The saved translation can now be a suggestion for another entry.
-          suggestionsCache.clear()
+          suggestionsCache.clear(); disputedStringsCache.clear()
           if (sessionInfo.value.user?.id === job.accountId) {
             const sameSelection = selected.value?.project === job.item.project && selected.value.id === job.item.id
             if (project.value.id === job.item.project && fileId.value === job.fileId) {
+              const priorVisible = visibleItems.value
+              const priorVisibleIndex = priorVisible.findIndex(row => row.id === job.item.id)
+              if (sameSelection && stageFilter.value !== null && saved.stage !== stageFilter.value && priorVisibleIndex >= 0) {
+                detachedNeighbors.value = { previousId: priorVisible[priorVisibleIndex - 1]?.id, nextId: priorVisible[priorVisibleIndex + 1]?.id, index: priorVisibleIndex, page: page.value }
+              }
+              const updatedCacheHandled = updateUpdatedStringsCache(saved, sameSelection)
               const index = items.value.findIndex(row => row.id === job.item.id)
               const visibleIndex = visibleItems.value.findIndex(row => row.id === job.item.id)
-              if (index >= 0) {
+              if (!updatedCacheHandled && index >= 0) {
                 if (stageFilter.value !== null && saved.stage !== stageFilter.value) {
                   if (sameSelection) detachedNeighbors.value = { previousId: visibleItems.value[visibleIndex - 1]?.id, nextId: visibleItems.value[visibleIndex + 1]?.id, index: visibleIndex, page: page.value }
                   items.value.splice(index, 1); rowCount.value = Math.max(0, rowCount.value - 1)
@@ -413,6 +601,10 @@ export function useEditor() {
       }
     } finally {
       processingSubmissions = false
+      if (updatedSortNeedsRefresh && sort.value === 'updated' && workspaceReady.value && connected.value && sessionInfo.value.authenticated) {
+        updatedSortNeedsRefresh = false
+        await loadStrings(selected.value?.id)
+      }
       scheduleNextPrefetch()
       if (workspaceReady.value && connected.value && sessionInfo.value.authenticated) void refreshFiles().catch(() => {})
     }
@@ -436,11 +628,11 @@ export function useEditor() {
     choose(data)
     return true
   }
-  async function move(direction: number) {
+  async function move(direction: number, clearTranslation = false) {
     if (listBusy.value || initializing.value) return
     const target = adjacentItem(direction)
-    if (target) await select(target)
-    else if (direction > 0 && page.value < pageCount.value) await paginate(page.value + 1)
+    if (target) await select(target, clearTranslation)
+    else if (direction > 0 && page.value < pageCount.value) await paginate(page.value + 1, 'first', clearTranslation)
     else if (direction < 0 && page.value > 1) await paginate(page.value - 1, 'last')
   }
   async function reloadSelected() {
@@ -452,8 +644,13 @@ export function useEditor() {
       await flushDraft()
       const data = await api<StringItem>('string', { projectId: item.project, stringId: item.id })
       if (selected.value?.id !== item.id || selected.value.project !== item.project) return
+      const updatedCacheHandled = updateUpdatedStringsCache(data, true)
       const index = items.value.findIndex(item => item.id === data.id); if (index !== -1) items.value[index] = data
       choose(data); notice.value = '已载入远端版本，本地草稿保留在编辑框'
+      if (!updatedCacheHandled && updatedSortNeedsRefresh && sort.value === 'updated') {
+        updatedSortNeedsRefresh = false
+        await loadStrings(data.id)
+      }
     } catch (reason) { error.value = (reason as Error).message }
     finally { reloadBusy.value = false }
   }
@@ -463,6 +660,8 @@ export function useEditor() {
   }
   async function resetWorkspace() {
     clearAuxiliaryCache()
+    updatedStringsCache.value = null
+    updatedSortNeedsRefresh = false
     await flushDraft(); connected.value = false; sessionInfo.value = { authenticated: false, mode: 'none' }
     workspaceReady.value = false
     items.value = []; project.value = emptyProject(); file.value = emptyFile(); files.value = []; drafts.value = {}
@@ -513,5 +712,5 @@ export function useEditor() {
   })
   onBeforeUnmount(() => { disposed = true; clearAuxiliaryCache(); clearTimeout(draftTimer); clearTimeout(searchTimer); ++auxSequence; ++historySequence; ++termsSequence; flushDraft() })
   return { desktop, connected, initializing, workspaceReady, project, file, files, sortedFiles, items, visibleItems, selected, text, editStage, stageFilter, search, searchMode, page, pageSize, pageCount, rowCount, fileId, sort, listBusy, pendingCount, submissionFailures, error, notice, draftStatus, dirty, locked, issues, untranslated, selectedIds, panel, suggestions, suggestionsBusy, suggestionsError, terms, history, historyBusy, historyError, auxBusy, auxError, termsBusy, termsError, sessionInfo, drafts,
-    presence, presenceProjectId, presenceLoginBusy, loginPresence, requestCount, reloadBusy, exportBusy, api, input, select, loadStrings, bootstrap, changeFile, refreshFiles, filter, paginate, changePageSize, loadAux, loadTerms, submissionQueued, dismissSubmission, openSubmission, save, move, reloadSelected, discardDraft, resetWorkspace, restoreSession, flushDraft, exportPage }
+    presence, presenceProjectId, presenceLoginBusy, loginPresence, requestCount, reloadBusy, exportBusy, api, input, select, loadStrings, bootstrap, changeFile, refreshFiles, filter, paginate, changePageSize, loadAux, loadTerms, loadSuggestions, submissionQueued, dismissSubmission, openSubmission, save, move, reloadSelected, discardDraft, restoreClearedTranslation, savePrefillDraft, savePrefillToParaTranz, translationDisplayCleared, resetWorkspace, restoreSession, flushDraft, exportPage }
 }

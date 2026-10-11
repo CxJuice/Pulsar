@@ -1,28 +1,91 @@
 <script setup lang="ts">
 import { BookOpen, ChevronLeft, ChevronRight, Copy, Pencil, Plus, RotateCw, Search, Trash2, X } from 'lucide-vue-next'
 import type { UnwrapNestedRefs } from 'vue'
-import type { Term, TermPage } from '~/types/editor'
+import type { CommunityTranslationCandidate, LocalUnresolvedTerm, Term, TermPage } from '~/types/editor'
 import type { WorkspaceNavigation } from '~/composables/useWorkspaceNavigation'
+import { translationCollectionUrl, translationVoteUrl } from '~/data/communityTranslationSources'
+import { matchLocalUnresolvedTerms, mergeLocalUnresolvedTerms, readLocalUnresolvedTerms } from '~/utils/localUnresolvedTerms'
+import { deleteProjectTerm, projectTermCatalogScope, readProjectTermCatalog, syncProjectTermCatalog, upsertProjectTerm } from '~/utils/projectTermCatalogCache'
 
 const props = defineProps<{ editor: UnwrapNestedRefs<ReturnType<typeof useEditor>> }>()
 const emit = defineEmits<{ insert: [text: string] }>()
 const navigation = inject<WorkspaceNavigation>('workspace-navigation')!
 const root = ref<HTMLElement>(), termInput = ref<HTMLInputElement>()
-const scope = ref<'matched' | 'all'>('matched'), search = ref(''), page = ref(1)
+type TermScope = 'matched' | 'all'
+type TermListItem =
+  | { kind: 'term'; key: string; term: Term; candidate?: LocalUnresolvedTerm }
+  | { kind: 'candidate'; key: string; entry: LocalUnresolvedTerm }
+const scope = ref<TermScope>('matched'), search = ref(''), page = ref(1)
 const catalog = ref<Term[]>([]), catalogLoaded = ref(false), catalogBusy = ref(false), catalogError = ref(''), loadCount = ref(0)
+const communityEntries = ref<CommunityTranslationCandidate[]>([]), communityBusy = ref(false), communityError = ref(''), communityWarnings = ref<string[]>([]), communityFetchedAt = ref('')
+const localTerms = ref<LocalUnresolvedTerm[]>([]), localError = ref('')
 const formOpen = ref(false), snapshot = ref<Term | null>(null), operation = ref(''), error = ref(''), notice = ref(''), confirmDelete = ref(false), focusedId = ref<number | null>(null)
 const form = reactive({ term: '', translation: '', pos: 'noun', note: '', variants: '', caseSensitive: false })
-let catalogSequence = 0, operationSequence = 0
-const blocked = computed(() => !props.editor.connected || !props.editor.sessionInfo.authenticated || catalogBusy.value || !!operation.value || props.editor.initializing || props.editor.listBusy || props.editor.reloadBusy)
-const termList = computed(() => scope.value === 'matched' ? props.editor.terms : catalog.value)
-const filtered = computed(() => {
-  const query = search.value.trim().toLocaleLowerCase()
-  return termList.value.filter(term => `${term.term} ${term.translation} ${term.note || ''} ${(term.variants || []).join(' ')}`.toLocaleLowerCase().includes(query))
+let catalogSequence = 0, communitySequence = 0, operationSequence = 0
+const blocked = computed(() => !props.editor.connected || !props.editor.sessionInfo.authenticated || catalogBusy.value || (scope.value === 'all' && communityBusy.value) || !!operation.value || props.editor.initializing || props.editor.listBusy || props.editor.reloadBusy)
+const communityProject = computed(() => String(props.editor.project.id).includes('8340'))
+const mergedCandidates = computed(() => {
+  const entries = new Map<string, LocalUnresolvedTerm>()
+  for (const entry of localTerms.value) entries.set(entry.source.trim().toLocaleLowerCase(), entry)
+  const feed = new Map<string, CommunityTranslationCandidate>()
+  for (const entry of communityEntries.value) {
+    const key = entry.source.trim().toLocaleLowerCase(), previous = feed.get(key)
+    feed.set(key, { ...previous, ...entry, candidates: [...new Set([...(previous?.candidates || []), ...entry.candidates])] })
+  }
+  for (const [key, entry] of feed) {
+    const previous = entries.get(key)
+    entries.set(key, { ...previous, ...entry, candidates: entry.candidates, syncedAt: communityFetchedAt.value || previous?.syncedAt || '' })
+  }
+  return [...entries.values()]
 })
-const pageCount = computed(() => Math.max(1, Math.ceil(filtered.value.length / 50)))
-const visibleTerms = computed(() => filtered.value.slice((page.value - 1) * 50, page.value * 50))
-const busy = computed(() => scope.value === 'matched' ? props.editor.termsBusy : catalogBusy.value)
-const loadError = computed(() => scope.value === 'matched' ? props.editor.termsError : catalogError.value)
+const termItems = computed<TermListItem[]>(() => {
+  const candidates = new Map(mergedCandidates.value.map(entry => [entry.source.trim().toLocaleLowerCase(), entry]))
+  const matchedSources = new Set<string>()
+  const items = catalog.value.map((term): TermListItem => {
+    const source = term.term.trim().toLocaleLowerCase(), candidate = candidates.get(source)
+    matchedSources.add(source)
+    return { kind: 'term', key: `term:${term.id}`, term, ...(candidate ? { candidate } : {}) }
+  })
+  for (const entry of mergedCandidates.value) {
+    const source = entry.source.trim().toLocaleLowerCase()
+    if (!matchedSources.has(source)) items.push({ kind: 'candidate', key: `candidate:${entry.id}:${source}`, entry })
+  }
+  return items.sort((first, second) => {
+    const firstText = first.kind === 'term' ? first.term.term : first.entry.source
+    const secondText = second.kind === 'term' ? second.term.term : second.entry.source
+    return firstText.localeCompare(secondText)
+  })
+})
+const matchedCandidates = computed(() => matchLocalUnresolvedTerms(props.editor.selected?.original || '', mergedCandidates.value))
+const termList = computed<TermListItem[]>(() => {
+  if (scope.value === 'all') return termItems.value
+  const candidates = new Map(matchedCandidates.value.map(entry => [entry.source.trim().toLocaleLowerCase(), entry]))
+  const matchedSources = new Set<string>()
+  const items = props.editor.terms.map((term): TermListItem => {
+    const source = term.term.trim().toLocaleLowerCase(), candidate = candidates.get(source)
+    matchedSources.add(source)
+    return { kind: 'term', key: `term:${term.id}`, term, ...(candidate ? { candidate } : {}) }
+  })
+  for (const entry of matchedCandidates.value) {
+    const source = entry.source.trim().toLocaleLowerCase()
+    if (!matchedSources.has(source)) items.push({ kind: 'candidate', key: `candidate:${entry.id}:${source}`, entry })
+  }
+  return items
+})
+const filteredTerms = computed(() => {
+  const query = search.value.trim().toLocaleLowerCase()
+  return termList.value.filter(item => {
+    const text = item.kind === 'term'
+      ? `${item.term.term} ${item.term.translation} ${item.term.note || ''} ${(item.term.variants || []).join(' ')} ${item.candidate?.category || ''} ${item.candidate?.candidates.join(' ') || ''} ${item.candidate?.topicTitle || ''}`
+      : `${item.entry.source} ${item.entry.category} ${item.entry.candidates.join(' ')} ${item.entry.topicTitle} ${item.entry.sourceType}`
+    return text.toLocaleLowerCase().includes(query)
+  })
+})
+const filteredCount = computed(() => filteredTerms.value.length)
+const pageCount = computed(() => Math.max(1, Math.ceil(filteredCount.value / 50)))
+const visibleTerms = computed(() => filteredTerms.value.slice((page.value - 1) * 50, page.value * 50))
+const busy = computed(() => scope.value === 'matched' ? props.editor.termsBusy || (communityProject.value && communityBusy.value) : catalogBusy.value || (communityProject.value && communityBusy.value))
+const loadError = computed(() => scope.value === 'matched' ? props.editor.termsError : catalogError.value && !catalog.value.length && !mergedCandidates.value.length ? catalogError.value : '')
 const posLabels: Record<string, string> = { noun: '名词', verb: '动词', adj: '形容词', adv: '副词' }
 const posOptions = computed(() => [
   ...(snapshot.value && !snapshot.value.pos ? [{ value: '', label: '未指定' }] : []),
@@ -42,25 +105,98 @@ const canDelete = computed(() => props.editor.connected && props.editor.sessionI
 async function loadCatalog(force = false) {
   if (catalogBusy.value || (catalogLoaded.value && !force)) return
   const sequence = ++catalogSequence, projectId = props.editor.project.id
+  const scopeKey = projectTermCatalogScope(projectId, props.editor.sessionInfo.user?.id, props.editor.sessionInfo.mode)
   catalogBusy.value = true; catalogError.value = ''; loadCount.value = 0
   try {
-    if (!props.editor.connected || !props.editor.sessionInfo.authenticated) return
+    if (!catalogLoaded.value) {
+      try {
+        const cached = await readProjectTermCatalog(scopeKey)
+        if (sequence !== catalogSequence) return
+        if (cached) {
+          catalog.value = cached.terms; catalogLoaded.value = true
+        }
+      } catch (reason) {
+        if (sequence !== catalogSequence) return
+        catalogError.value = `读取本机术语缓存失败：${(reason as Error).message}`
+      }
+    }
+    if (!force && catalogLoaded.value) return
+    if (!props.editor.connected || !props.editor.sessionInfo.authenticated) {
+      if (!catalogLoaded.value) catalogError.value = '尚无本机术语缓存，请连接 ParaTranz 后重试'
+      return
+    }
     const rows: Term[] = []
-    let nextPage = 1, lastPage = 1
+    let nextPage = 1, lastPage = 1, expectedRowCount = 0
     do {
       const result = await props.editor.api<TermPage>('projectTerms', { projectId, page: nextPage, pageSize: 800 })
       if (sequence !== catalogSequence) return
-      if (!Array.isArray(result.results) || !Number.isInteger(result.pageCount) || result.pageCount < 0 || result.pageCount > 100000) throw new Error('术语列表格式无效')
+      if (!Array.isArray(result.results) || !Number.isInteger(result.pageCount) || result.pageCount < 0 || result.pageCount > 100000 || !Number.isInteger(result.rowCount) || result.rowCount < 0) throw new Error('术语列表格式无效')
+      if (nextPage === 1) {
+        lastPage = Math.max(1, result.pageCount)
+        expectedRowCount = result.rowCount
+      } else if (result.pageCount !== lastPage || result.rowCount !== expectedRowCount) {
+        throw new Error('术语列表在同步期间发生变化，请重试')
+      }
+      if (result.results.some(term => !term || !Number.isInteger(term.id) || typeof term.term !== 'string' || typeof term.translation !== 'string')) throw new Error('术语列表包含无效记录')
       rows.push(...result.results); loadCount.value = rows.length
-      lastPage = Math.max(1, result.pageCount); nextPage++
+      nextPage++
     } while (nextPage <= lastPage)
     if (sequence !== catalogSequence) return
-    catalog.value = [...new Map(rows.map(term => [term.id, term])).values()]; catalogLoaded.value = true
+    const unique = new Map(rows.map(term => [term.id, term]))
+    if (unique.size !== rows.length || unique.size !== expectedRowCount) throw new Error('术语分页结果不完整，保留现有缓存并请重试')
+    const terms = [...unique.values()]
+    catalog.value = terms; catalogLoaded.value = true
+    await syncProjectTermCatalog(scopeKey, terms)
+    if (sequence !== catalogSequence) return
+    catalogError.value = ''
   } catch (reason) { if (sequence === catalogSequence) catalogError.value = (reason as Error).message }
   finally { if (sequence === catalogSequence) catalogBusy.value = false }
 }
-function setScope(value: 'matched' | 'all') { scope.value = value; search.value = ''; page.value = 1; if (value === 'all') loadCatalog() }
-function refresh() { if (scope.value === 'all') loadCatalog(true); else props.editor.loadTerms(true) }
+function setScope(value: TermScope) {
+  scope.value = value; search.value = ''; page.value = 1
+  if (value === 'all') {
+    void loadCatalog()
+    if (communityProject.value && !communityFetchedAt.value) void loadCommunityCandidates()
+  }
+}
+function refresh() {
+  if (scope.value === 'all') {
+    void loadCatalog(true)
+    if (communityProject.value) {
+      communityFetchedAt.value = ''
+      void loadCommunityCandidates()
+    }
+  }
+  else props.editor.loadTerms(true)
+}
+function openForum(url: string) {
+  if (props.editor.desktop) void window.scKit?.openExternal(url)
+  else window.open(url, '_blank', 'noopener,noreferrer')
+}
+async function loadCommunityCandidates() {
+  if (!communityProject.value || communityBusy.value) return
+  const sequence = ++communitySequence
+  communityBusy.value = true; communityError.value = ''; communityWarnings.value = []
+  try {
+    const result = await window.scKit?.fetchCommunityTranslationCandidates()
+    if (sequence !== communitySequence) return
+    if (!result) throw new Error('请在 ScTranslateKit 桌面应用中打开译名讨论页')
+    if (!result.ok || !result.data) throw new Error(result.message || '译名讨论页暂时无法读取')
+    communityEntries.value = result.data.entries
+    communityWarnings.value = result.data.warnings
+    communityFetchedAt.value = result.data.fetchedAt
+    try {
+      localTerms.value = mergeLocalUnresolvedTerms(props.editor.project.id, result.data.entries)
+      localError.value = ''
+    } catch (reason) {
+      localError.value = `已自动获取未定译名，但无法保存到本机术语库：${(reason as Error).message}`
+    }
+  } catch (reason) {
+    if (sequence === communitySequence) communityError.value = (reason as Error).message
+  } finally {
+    if (sequence === communitySequence) communityBusy.value = false
+  }
+}
 function closeForm() { if (operation.value) return; formOpen.value = false; snapshot.value = null; confirmDelete.value = false; error.value = '' }
 function formKeydown(event: KeyboardEvent) {
   if ((event.ctrlKey || event.metaKey) && (event.key.toLowerCase() === 's' || event.key === 'Enter')) {
@@ -99,7 +235,10 @@ async function save() {
       const saved = await props.editor.api<Term>(previous ? 'updateTerm' : 'createTerm', { projectId, ...body, ...(previous ? { termId: previous.id, expected: previous } : {}) })
       if (!saved || !saved.id || typeof saved.term !== 'string') throw new Error('术语已提交，但返回格式无效，请刷新列表核对')
     if (sequence !== operationSequence) return
-    if (catalogLoaded.value) catalog.value = [...catalog.value.filter(term => term.id !== saved.id), saved]
+    if (catalogLoaded.value) {
+      catalog.value = [...catalog.value.filter(term => term.id !== saved.id), saved]
+      void upsertProjectTerm(projectTermCatalogScope(projectId, props.editor.sessionInfo.user?.id, props.editor.sessionInfo.mode), saved).catch(() => undefined)
+    }
     formOpen.value = false; snapshot.value = null; confirmDelete.value = false; focusedId.value = saved.id
     notice.value = '术语已保存'
     await props.editor.loadTerms(true)
@@ -114,6 +253,7 @@ async function remove() {
     await props.editor.api('deleteTerm', { projectId, termId: term.id, expected: term })
     if (sequence !== operationSequence) return
     catalog.value = catalog.value.filter(value => value.id !== term.id)
+    if (catalogLoaded.value) void deleteProjectTerm(projectTermCatalogScope(projectId, props.editor.sessionInfo.user?.id, props.editor.sessionInfo.mode), term.id).catch(() => undefined)
     formOpen.value = false; snapshot.value = null; confirmDelete.value = false
     notice.value = '术语已删除'
     await props.editor.loadTerms(true)
@@ -134,15 +274,24 @@ watch(() => [props.editor.project.id, props.editor.connected, props.editor.sessi
   operation.value = ''; formOpen.value = false; snapshot.value = null; confirmDelete.value = false; error.value = ''; notice.value = ''; search.value = ''; page.value = 1; focusedId.value = null
   if (scope.value === 'all' && props.editor.panel === 'terms') loadCatalog()
 })
-watch(() => props.editor.panel, value => { if (value === 'terms' && scope.value === 'all') loadCatalog() })
-onBeforeUnmount(() => { ++catalogSequence; ++operationSequence })
+watch(() => props.editor.project.id, () => {
+  ++communitySequence; communityBusy.value = false; communityEntries.value = []; communityError.value = ''; communityWarnings.value = []; communityFetchedAt.value = ''
+  localError.value = ''
+  localTerms.value = communityProject.value ? readLocalUnresolvedTerms(props.editor.project.id) : []
+  if (communityProject.value) void loadCommunityCandidates()
+}, { immediate: true })
+watch(() => props.editor.panel, value => {
+  if (value === 'terms' && scope.value === 'all') loadCatalog()
+  if (value === 'terms' && communityProject.value) void loadCommunityCandidates()
+})
+onBeforeUnmount(() => { ++catalogSequence; ++communitySequence; ++operationSequence })
 </script>
 
 <template>
   <section ref="root" class="term-manager" aria-label="术语管理">
-    <div class="panel-heading"><span>项目术语</span><div class="term-manager-actions"><button class="icon-button small" aria-label="刷新术语" :disabled="busy || blocked" @click="refresh"><RotateCw :size="14" /></button><button class="button compact" :disabled="blocked || formOpen" @click="beginCreate"><Plus :size="14" />新增术语</button></div></div>
-    <div class="term-scope" role="group" aria-label="术语范围"><button :class="{ active: scope === 'matched' }" :aria-pressed="scope === 'matched'" @click="setScope('matched')">当前词条 <span>{{ editor.terms.length }}</span></button><button :class="{ active: scope === 'all' }" :aria-pressed="scope === 'all'" @click="setScope('all')">全部术语 <span v-if="catalogLoaded">{{ catalog.length }}</span></button></div>
-    <div class="term-search"><Search :size="15" /><input v-model="search" :placeholder="scope === 'all' ? '搜索项目术语' : '筛选当前词条术语'" aria-label="搜索术语" /><button v-if="search" class="icon-button small" aria-label="清除术语搜索" @click="search = ''"><X :size="13" /></button></div>
+    <div class="panel-heading"><span>项目术语</span><div class="term-manager-actions"><div v-if="communityProject" class="term-community-links" aria-label="社区译名活动"><button class="button compact" @click="openForum(translationVoteUrl)">投票</button><button class="button compact" @click="openForum(translationCollectionUrl)">征集</button></div><button class="icon-button small" aria-label="刷新术语" :disabled="busy || blocked" @click="refresh"><RotateCw :size="14" /></button><button class="button compact" :disabled="blocked || formOpen" @click="beginCreate"><Plus :size="14" />新增术语</button></div></div>
+    <div class="term-scope" role="group" aria-label="术语范围"><button :class="{ active: scope === 'matched' }" :aria-pressed="scope === 'matched'" @click="setScope('matched')">当前词条 <span>{{ termList.length }}</span></button><button :class="{ active: scope === 'all' }" :aria-pressed="scope === 'all'" @click="setScope('all')">全部词条 <span v-if="catalogLoaded">{{ termItems.length }}</span></button></div>
+    <div class="term-search"><Search :size="15" /><input v-model="search" :placeholder="scope === 'all' ? '搜索全部词条' : '筛选当前词条术语'" aria-label="搜索术语" /><button v-if="search" class="icon-button small" aria-label="清除术语搜索" @click="search = ''"><X :size="13" /></button></div>
     <div v-if="operation === 'load'" class="term-operation" role="status"><LoadingIndicator :size="14" label="正在载入术语" />正在载入术语…</div>
     <p v-if="error" class="form-error" role="alert">{{ error }}</p><p v-if="notice" class="term-notice" role="status">{{ notice }}</p>
     <Transition name="panel"><form v-if="formOpen" class="term-edit-form" aria-label="术语编辑表单" @submit.prevent="save" @keydown="formKeydown">
@@ -156,11 +305,21 @@ onBeforeUnmount(() => { ++catalogSequence; ++operationSequence })
       <div class="term-form-actions"><button v-if="snapshot" type="button" class="icon-button small term-delete" aria-label="删除此术语" :title="canDelete ? '删除术语' : '仅创建者或管理员可删除'" :disabled="blocked || !canDelete" @click="confirmDelete = !confirmDelete"><Trash2 :size="15" /></button><button v-if="snapshot && error" type="button" class="button compact" :disabled="blocked" @click="beginEdit(snapshot, true)">重新载入</button><span></span><button type="button" class="button compact" :disabled="!!operation" @click="closeForm">取消</button><button class="button primary compact" :disabled="!canSave"><LoadingIndicator v-if="operation === 'save'" :size="13" label="正在保存术语" />{{ operation === 'save' ? '保存中…' : '保存术语' }}</button></div>
       <div v-if="confirmDelete && snapshot" class="term-delete-confirm" role="group" aria-label="确认删除术语"><strong>删除「{{ snapshot.term }}」？</strong><div><button type="button" class="button compact" :disabled="!!operation" @click="confirmDelete = false">取消</button><button type="button" class="button compact danger" :disabled="blocked || !canDelete" @click="remove"><LoadingIndicator v-if="operation === 'delete'" :size="13" label="正在删除术语" />确认删除</button></div></div>
     </form></Transition>
-    <LoadingRegion :busy="busy" :initial="!termList.length" :label="scope === 'all' && loadCount ? `正在加载术语（${loadCount}）…` : '正在加载术语…'">
+    <p v-if="scope === 'all' && catalogError && catalog.length" class="community-feed-warning" role="status">术语同步失败，继续显示本机缓存：{{ catalogError }}</p>
+    <p v-if="scope === 'all' && communityWarnings.length" class="community-feed-warning" role="status">部分讨论帖读取失败：{{ communityWarnings.join('；') }}</p>
+    <p v-if="scope === 'all' && catalogError && mergedCandidates.length" class="community-feed-warning" role="status">项目术语加载失败，仍显示已合并的候选内容：{{ catalogError }}</p>
+    <p v-if="scope === 'all' && communityError" class="community-feed-warning" role="status">社区候选同步失败，仍显示本机已缓存的内容：{{ communityError }}</p>
+    <p v-if="scope === 'all' && localError" class="community-feed-warning" role="status">{{ localError }}</p>
+    <LoadingRegion :busy="busy" :initial="!filteredCount" :label="scope === 'all' && loadCount ? `${catalogLoaded ? '正在同步' : '正在加载'}术语（${loadCount}）…` : '正在加载术语…'">
       <div v-if="loadError" class="panel-error" role="alert"><p>{{ loadError }}</p><button class="button compact" :disabled="busy" @click="refresh">重新获取</button></div>
-      <div v-else-if="!filtered.length" class="empty-state"><BookOpen :size="34" :stroke-width="1.25" /><h3>{{ search ? '没有搜索结果' : scope === 'all' ? '暂无项目术语' : '没有匹配的术语' }}</h3></div>
-      <article v-for="term in visibleTerms" :key="term.id" class="term-card" :class="{ 'focused-term': focusedId === term.id }" :data-term-id="term.id" tabindex="-1"><div class="term-header"><strong>{{ term.term }}</strong><span class="term-pos">{{ posLabels[term.pos || ''] || term.pos }}</span><button class="icon-button small" :disabled="blocked || formOpen" :aria-label="`编辑术语 ${term.term}`" title="编辑术语" @click="beginEdit(term)"><Pencil :size="15" /></button><button class="icon-button small" :disabled="editor.locked || editor.listBusy || editor.reloadBusy" :aria-label="`插入术语 ${term.term}`" @mousedown.prevent @click="emit('insert', term.translation)"><Copy :size="15" /></button></div><div class="term-translation">{{ term.translation }}</div><div v-if="term.variants?.length" class="term-variants"><span v-for="variant in term.variants" :key="variant">{{ variant }}</span></div><p v-if="term.note" class="term-note">{{ term.note }}</p></article>
+      <div v-else-if="!filteredCount" class="empty-state"><BookOpen :size="34" :stroke-width="1.25" /><h3>{{ search ? '没有搜索结果' : scope === 'all' ? '暂无项目术语' : '没有匹配的术语' }}</h3></div>
+      <template v-else>
+        <article v-for="item in visibleTerms" :key="item.key" class="term-card" :class="{ 'community-term-card': item.kind === 'candidate', 'focused-term': item.kind === 'term' && focusedId === item.term.id }" :data-term-id="item.kind === 'term' ? item.term.id : undefined" tabindex="-1">
+          <template v-if="item.kind === 'term'"><div class="term-header"><strong>{{ item.term.term }}</strong><span class="term-pos">{{ posLabels[item.term.pos || ''] || item.term.pos }}</span><button class="icon-button small" :disabled="blocked || formOpen" :aria-label="`编辑术语 ${item.term.term}`" title="编辑术语" @click="beginEdit(item.term)"><Pencil :size="15" /></button><button class="icon-button small" :disabled="editor.locked || editor.listBusy || editor.reloadBusy" :aria-label="`插入术语 ${item.term.term}`" @mousedown.prevent @click="emit('insert', item.term.translation)"><Copy :size="15" /></button></div><div class="term-translation">{{ item.term.translation }}</div><div v-if="item.term.variants?.length" class="term-variants"><span v-for="variant in item.term.variants" :key="variant">{{ variant }}</span></div><p v-if="item.term.note" class="term-note">{{ item.term.note }}</p><template v-if="item.candidate"><div class="community-candidates" aria-label="相关候选译名"><strong>候选 · {{ item.candidate.category }}</strong><span v-for="candidate in item.candidate.candidates" :key="candidate">{{ candidate }}</span><button class="text-button" @click="openForum(item.candidate!.topicUrl)">讨论帖</button></div></template></template>
+          <template v-else><div class="term-header"><strong>{{ item.entry.source }}</strong><span class="term-pos">{{ item.entry.category }}</span><span class="community-term-status">候选 · {{ item.entry.sourceType }}</span><button class="button compact" @click="openForum(item.entry.topicUrl)">讨论帖</button></div><div v-if="item.entry.candidates.length" class="community-candidates" aria-label="候选译名"><span v-for="candidate in item.entry.candidates" :key="candidate">{{ candidate }}</span></div><p v-else class="term-note">尚未发现候选译名</p><p class="term-note">{{ item.entry.topicTitle }}</p></template>
+        </article>
+      </template>
     </LoadingRegion>
-    <div v-if="filtered.length > 50" class="term-pagination"><span>{{ filtered.length }} 条术语</span><button class="icon-button small" aria-label="上一页术语" :disabled="page === 1" @click="page--"><ChevronLeft :size="15" /></button><span>{{ page }} / {{ pageCount }}</span><button class="icon-button small" aria-label="下一页术语" :disabled="page === pageCount" @click="page++"><ChevronRight :size="15" /></button></div>
+    <div v-if="filteredCount > 50" class="term-pagination"><span>{{ filteredCount }} 条术语</span><button class="icon-button small" aria-label="上一页术语" :disabled="page === 1" @click="page--"><ChevronLeft :size="15" /></button><span>{{ page }} / {{ pageCount }}</span><button class="icon-button small" aria-label="下一页术语" :disabled="page === pageCount" @click="page++"><ChevronRight :size="15" /></button></div>
   </section>
 </template>

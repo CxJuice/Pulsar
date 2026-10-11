@@ -1,6 +1,7 @@
 // Ports of SCCL/scripts/{merge_and_check,format_consistency_advisory}.py.
 // Game newline escapes are decoded for segment parsing, as in this editor.
 import { tokens } from './text'
+import type { Term } from '~/types/editor'
 import { toEditorText } from './translationText'
 
 export interface QualityIssue {
@@ -131,9 +132,71 @@ function entryNumericIssues(original: string, translation: string): QualityIssue
   }
   return result
 }
-export function qualityIssues(original: string, translation: string, key = ''): QualityIssue[] {
+
+const termProtectedPattern = /<\/?[A-Za-z][^>]*>|~\w+\([^)]*\)|\{\{[^}]+\}\}|\{\w+\}|%(?:\d+\$)?[sdif]/g
+const termWordCharacter = /[\p{Script=Latin}\p{N}_]/u
+const escapeTermPattern = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+interface TermOccurrence { start: number; end: number }
+
+function termSpellingOccurrences(text: string, term: Term, side: 'source' | 'translation', offset = 0): TermOccurrence[] {
+  const spellings = side === 'translation'
+    ? [toEditorText(term.translation)]
+    : [...(term.match || []), ...(term.variants || []), term.term]
+  const occurrences = new Map<string, TermOccurrence>()
+  for (const spelling of spellings) {
+    if (typeof spelling !== 'string' || !spelling.trim()) continue
+    // Look ahead so overlapping occurrences are checked independently too.
+    const pattern = new RegExp(`(?=(${escapeTermPattern(spelling)}))`, term.caseSensitive ? 'gu' : 'giu')
+    for (const match of text.matchAll(pattern)) {
+      const index = match.index!, value = match[1]!, end = index + value.length
+      const before = Array.from(text.slice(Math.max(0, index - 2), index)).at(-1) || ''
+      const after = Array.from(text.slice(end, end + 2))[0] || ''
+      const first = Array.from(value)[0]!, last = Array.from(value).at(-1)!
+      if ((termWordCharacter.test(first) && termWordCharacter.test(before)) ||
+          (termWordCharacter.test(last) && termWordCharacter.test(after))) continue
+      const occurrence = { start: offset + index, end: offset + end }
+      occurrences.set(`${occurrence.start}:${occurrence.end}`, occurrence)
+    }
+  }
+  return [...occurrences.values()]
+}
+
+function termOccurrencesInProse(text: string, term: Term, side: 'source' | 'translation'): TermOccurrence[] {
+  const occurrences: TermOccurrence[] = []
+  let start = 0
+  for (const match of text.matchAll(termProtectedPattern)) {
+    if (match.index! > start) occurrences.push(...termSpellingOccurrences(text.slice(start, match.index), term, side, start))
+    start = match.index! + match[0].length
+  }
+  if (start < text.length) occurrences.push(...termSpellingOccurrences(text.slice(start), term, side, start))
+  return occurrences
+}
+
+function termUsageIssues(original: string, translation: string, terms: Term[]): QualityIssue[] {
+  if (!terms.length) return []
+  const source = toEditorText(original), target = toEditorText(translation)
+  const sourceMatches = terms
+    .filter(term => term.translation.trim())
+    .map(term => ({ term, occurrences: termOccurrencesInProse(source, term, 'source') }))
+    .filter(match => match.occurrences.length)
+  // A phrase's registered translation covers the shorter terms inside that phrase.
+  // Keep a short term required when it also occurs outside any longer matched phrase.
+  const expectedTerms = sourceMatches
+    .filter(({ term, occurrences }) => occurrences.some(occurrence => !sourceMatches.some(({ term: other, occurrences: otherOccurrences }) =>
+      other.id !== term.id && other.translation.trim() && otherOccurrences.some(otherOccurrence =>
+        otherOccurrence.end - otherOccurrence.start > occurrence.end - occurrence.start &&
+        otherOccurrence.start <= occurrence.start && otherOccurrence.end >= occurrence.end))))
+    .map(({ term }) => term)
+  const missing = expectedTerms.filter(term => !termOccurrencesInProse(target, term, 'translation').length)
+  return missing.length
+    ? [issue('term_usage', '译文未使用术语表中的对应译名', missing.map(term => term.term), missing.map(term => toEditorText(term.translation)), '编辑器')]
+    : []
+}
+
+export function qualityIssues(original: string, translation: string, key = '', terms: Term[] = []): QualityIssue[] {
   if (!toEditorText(translation).trim()) return []
-  const target = translation.trim(), result = [...entryNumericIssues(original, translation), ...entryPlaceholderIssues(original, translation)]
+  const target = translation.trim(), result = [...termUsageIssues(original, translation, terms), ...entryNumericIssues(original, translation), ...entryPlaceholderIssues(original, translation)]
   const formal = key !== ignoredKey, advisory = !key.endsWith(',P')
   if (formal) {
     const a = (toEditorText(original).match(/\n/g) || []).length, b = (toEditorText(target).match(/\n/g) || []).length

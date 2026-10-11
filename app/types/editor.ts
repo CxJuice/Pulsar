@@ -26,12 +26,18 @@ export interface StringPage { results: StringItem[]; page: number; pageSize: num
 export interface ProjectInfo { id: number; name: string; source: string; dest: string; desc?: string; tagRules?: Array<{type:number;source?:string;string?:string}> }
 export interface ProjectSummary { id: number; name: string; permission?: number; privacy?: number }
 export interface Suggestion {
-  localMatching?: number
+  localMatching?: number; stage?: number
   id: number; key: string; original: string; translation: string; matching: number; contains?: number
   project?: { id: number; name: string }; file?: { id: number; name: string }; user?: TinyUser; updatedAt?: string
 }
 export interface Term { id: number; term: string; translation: string; note?: string | null; pos?: string | null; match?: string[]; variants?: string[] | null; caseSensitive?: boolean; uid?: number; project?: number; updatedAt?: string | null }
 export interface TermPage { results: Term[]; page: number; pageSize: number; rowCount: number; pageCount: number }
+export interface CommunityTranslationCandidate {
+  id: number; source: string; category: string; candidates: string[]
+  topicTitle: string; topicUrl: string; sourceType: '征集' | '投票'
+}
+export interface LocalUnresolvedTerm extends CommunityTranslationCandidate { syncedAt: string }
+export interface CommunityTranslationFeed { entries: CommunityTranslationCandidate[]; warnings: string[]; fetchedAt: string }
 export interface MemoryEntry {
   id: number; key: string; original: string; translation: string; stage: number
   project: { id: number; name: string }; user?: TinyUser; createdAt: string; updatedAt: string | null
@@ -43,21 +49,33 @@ export interface MemoryPage {
 export interface Draft { translation: string; stage: number; updatedAt: string }
 export interface SessionStatus { authenticated: boolean; mode: string; user?: TinyUser | null }
 export interface ServiceResult<T = unknown> { ok: boolean; data?: T; status?: number; message?: string }
-export type TranslationProvider = 'google' | 'deepl'
+export type TranslationProvider = 'google' | 'deepl' | 'llm'
 export type TranslationMode = 'web' | 'api'
 export type TranslationProxyMode = 'system' | 'direct' | 'http' | 'socks5'
+export interface TranslationLlmContextSettings { key: boolean; recommendations: boolean; recommendationCount: number; terms: boolean; notes: boolean }
 export interface TranslationSettings {
   provider: TranslationProvider; mode: TranslationMode; deeplPlan: 'free' | 'pro'
   proxy: { mode: TranslationProxyMode; host: string; port: number }
   googleConfigured: boolean; deeplConfigured: boolean
+  llmRequestUrl: string; llmModel: string; llmPrefixPrompt: string; llmConfigured: boolean; llmContext: TranslationLlmContextSettings
+  clearAfterSaveNext: boolean; useTermTranslations: boolean
 }
 export interface TranslationSettingsUpdate {
   provider: TranslationProvider; mode: TranslationMode; deeplPlan: 'free' | 'pro'
   proxy: { mode: TranslationProxyMode; host: string; port: number }
   googleApiKey?: string | null; deeplApiKey?: string | null
   clearGoogleApiKey?: boolean; clearDeepLApiKey?: boolean
+  llmRequestUrl: string; llmModel: string; llmPrefixPrompt: string; llmApiKey?: string | null; clearLlmApiKey?: boolean
+  llmContext: TranslationLlmContextSettings
+  clearAfterSaveNext?: boolean; useTermTranslations?: boolean
 }
 export interface TranslationSelectionUpdate { provider?: TranslationProvider; mode?: TranslationMode }
+export interface TranslationPromptContext {
+  key?: string
+  recommendations?: Array<{ original: string; translation: string; similarity?: number }>
+  terms?: Array<{ term: string; translation: string; note?: string }>
+  notes?: { entryContext?: string; comments?: string[] }
+}
 export interface AuxCustomizationOverlayItem { id: string; label: string; checked: boolean; disabled: boolean; first: boolean; last: boolean }
 export interface AuxCustomizationOverlayState {
   visible: boolean
@@ -99,12 +117,14 @@ export interface DesktopBridge {
   disconnect(): Promise<ServiceResult>
   lookupCambridge(query: string): Promise<ServiceResult<CambridgeDictionaryData>>
   openCambridgeOriginal(query: string): Promise<void>
+  fetchCommunityTranslationCandidates(): Promise<ServiceResult<CommunityTranslationFeed>>
   auxCustomizationOverlay(state: AuxCustomizationOverlayState): void
   onAuxCustomizationAction(callback: (action: AuxCustomizationAction) => void): () => void
   getTranslationSettings(): Promise<ServiceResult<TranslationSettings>>
   saveTranslationSettings(settings: TranslationSettingsUpdate): Promise<ServiceResult<TranslationSettings>>
   saveTranslationSelection(selection: TranslationSelectionUpdate): Promise<ServiceResult<TranslationSettings>>
-  translateToChinese(text: string): Promise<ServiceResult<{ text: string; provider: TranslationProvider }>>
+  translateToChinese(text: string, context: TranslationPromptContext | undefined, requestId: string): Promise<ServiceResult<{ text: string; provider: TranslationProvider }>>
+  cancelTranslation(requestId: string): Promise<ServiceResult>
   openExternal(url: string): Promise<void>
   translatorView(state: { visible: boolean; bounds: { x: number; y: number; width: number; height: number } | null; provider?: TranslationProvider; text?: string; forceText?: boolean }): void
   exportData(content: string, defaultName: string): Promise<boolean>

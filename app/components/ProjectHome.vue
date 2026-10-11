@@ -9,6 +9,6 @@ onBeforeRouteLeave(() => !navigation.saving && !navigation.loginBusy)
   <div class="project-home">
   <div v-if="!navigation.guideReady || editor.initializing" class="home-initializing" aria-hidden="true" />
   <StartupGuide v-else-if="navigation.showGuide || !editor.connected || !editor.sessionInfo.authenticated" :editor="editor" />
-  <ProjectManager v-else :editor="editor" @close="navigation.continueEditing" @connect="navigation.showConnection = true" />
+  <ProjectManager v-else :editor="editor" @close="navigation.continueEditing" @connect="navigation.showConnection = true" @pending="navigation.saving = $event" />
   </div>
 </template>

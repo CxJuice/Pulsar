@@ -8,19 +8,20 @@ export interface TypographyPreference {
 
 export interface AppearanceSettings {
   accentColors: Record<AppearanceTheme, string | null>
-  backgroundColor: string | null
+  backgroundColors: Record<AppearanceTheme, string | null>
   typography: Record<AppearanceTextRegion, TypographyPreference>
 }
 
 export const appearanceStorageKey = 'sckit-appearance'
 export const defaultFontFamily = 'Inter, "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif'
 export const defaultAccentColors: Record<AppearanceTheme, string> = { light: '#6151d8', dark: '#a196fb' }
+export const defaultBackgroundColors: Record<AppearanceTheme, string> = { light: '#ffffff', dark: '#202128' }
 const systemFontPrefix = 'system:'
 
 export function defaultAppearanceSettings(): AppearanceSettings {
   return {
     accentColors: { light: null, dark: null },
-    backgroundColor: null,
+    backgroundColors: { light: null, dark: null },
     typography: {
       ui: { fontFamily: defaultFontFamily, fontSize: 13 },
       listSource: { fontFamily: '', fontSize: null },
@@ -71,30 +72,55 @@ function mixColors(base: string, overlay: string, amount: number): string {
   ])
 }
 
-function isLightColor(hex: string): boolean {
+function relativeLuminance(hex: string): number {
   const [red, green, blue] = hexToRgb(hex).map(channel => {
     const value = channel / 255
     return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4
   }) as [number, number, number]
-  return red * 0.2126 + green * 0.7152 + blue * 0.0722 > 0.42
+  return red * 0.2126 + green * 0.7152 + blue * 0.0722
+}
+
+function isLightColor(hex: string): boolean {
+  return contrastRatio(hex, '#000000') >= contrastRatio(hex, '#ffffff')
+}
+
+function contrastRatio(first: string, second: string): number {
+  const firstLuminance = relativeLuminance(first)
+  const secondLuminance = relativeLuminance(second)
+  const lighter = Math.max(firstLuminance, secondLuminance)
+  const darker = Math.min(firstLuminance, secondLuminance)
+  return (lighter + 0.05) / (darker + 0.05)
+}
+
+function accentForeground(accent: string): string {
+  const darkText = '#000000'
+  return contrastRatio(accent, darkText) >= contrastRatio(accent, '#ffffff') ? darkText : '#ffffff'
+}
+
+function accentHover(accent: string): string {
+  const foreground = accentForeground(accent)
+  return mixColors(accent, foreground === '#ffffff' ? '#000000' : '#ffffff', 0.1)
 }
 
 export function appearanceCssVariables(settings: AppearanceSettings, theme: string): Record<string, string> {
-  const background = settings.backgroundColor || (theme === 'dark' ? '#202128' : '#ffffff')
   const accentTheme: AppearanceTheme = theme === 'dark' ? 'dark' : 'light'
+  const customBackground = settings.backgroundColors[accentTheme]
+  const background = customBackground || defaultBackgroundColors[accentTheme]
   const customAccent = settings.accentColors[accentTheme]
   const accent = customAccent || defaultAccentColors[accentTheme]
   const light = isLightColor(background)
-  const foreground = light ? '#292932' : '#f0eff6'
+  const foreground = light ? '#000000' : '#ffffff'
   const muted = light ? '#858691' : '#9b9ca9'
   const ui = settings.typography.ui
   const variables: Record<string, string> = {
     '--accent': accent,
+    '--accent-foreground': accentForeground(accent),
+    '--accent-hover': accentHover(accent),
     '--app-font-family': cssFontFamily(ui.fontFamily, defaultFontFamily),
     '--app-font-size': `${ui.fontSize || 13}px`,
   }
 
-  if (settings.backgroundColor) {
+  if (customBackground) {
     variables['--bg'] = background
     variables['--text'] = foreground
     variables['--secondary'] = mixColors(background, foreground, light ? 0.62 : 0.68)
@@ -137,7 +163,7 @@ export function parseAppearanceSettings(raw: string | null): AppearanceSettings 
   const defaults = defaultAppearanceSettings()
   if (!raw) return defaults
   try {
-    const saved = JSON.parse(raw) as Partial<AppearanceSettings> & { accentColor?: unknown }
+    const saved = JSON.parse(raw) as Partial<AppearanceSettings> & { accentColor?: unknown; backgroundColor?: unknown }
     if (!saved || typeof saved !== 'object') return defaults
     const savedTypography = saved.typography && typeof saved.typography === 'object'
       ? saved.typography as Partial<Record<AppearanceTextRegion, TypographyPreference>>
@@ -146,6 +172,10 @@ export function parseAppearanceSettings(raw: string | null): AppearanceSettings 
     const savedAccentColors = saved.accentColors && typeof saved.accentColors === 'object' && !Array.isArray(saved.accentColors)
       ? saved.accentColors as Partial<Record<AppearanceTheme, unknown>>
       : null
+    const savedBackgroundColors = saved.backgroundColors && typeof saved.backgroundColors === 'object' && !Array.isArray(saved.backgroundColors)
+      ? saved.backgroundColors as Partial<Record<AppearanceTheme, unknown>>
+      : null
+    const legacyBackground = validColor(saved.backgroundColor) ? saved.backgroundColor : null
     const typography = { ...defaults.typography }
     for (const region of Object.keys(typography) as AppearanceTextRegion[]) {
       const preference = savedTypography[region]
@@ -167,7 +197,12 @@ export function parseAppearanceSettings(raw: string | null): AppearanceSettings 
             dark: validColor(savedAccentColors.dark) ? savedAccentColors.dark : null,
           }
         : { light: legacyAccent, dark: legacyAccent },
-      backgroundColor: validColor(saved.backgroundColor) ? saved.backgroundColor : null,
+      backgroundColors: savedBackgroundColors
+        ? {
+            light: validColor(savedBackgroundColors.light) ? savedBackgroundColors.light : null,
+            dark: validColor(savedBackgroundColors.dark) ? savedBackgroundColors.dark : null,
+          }
+        : { light: legacyBackground, dark: legacyBackground },
       typography,
     }
   } catch {

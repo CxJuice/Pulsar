@@ -23,7 +23,7 @@ const emit = defineEmits<{
   dragLeave: [groupId: string]
   dragEnd: []
   dock: [value: { panel: string; groupId: string; zone: AuxDockZone }]
-  resize: [value: { splitId: string; sizes: number[] }]
+  resize: [value: { splitId: string; childIds: string[]; sizes: number[] }]
   customize: []
 }>()
 defineSlots<{ panel(props: { panel: string; groupId: string }): unknown }>()
@@ -117,7 +117,7 @@ function updateResize(event: PointerEvent) {
   const sizes = [...props.node.sizes]
   sizes[resizeStart.value.index] = before
   sizes[resizeStart.value.index + 1] = resizeStart.value.total - before
-  emit('resize', { splitId: props.node.id, sizes })
+  emit('resize', { splitId: props.node.id, childIds: props.node.children.map(child => child.id), sizes })
 }
 function endResize() { resizeStart.value = null }
 function keyboardResize(event: KeyboardEvent, index: number) {
@@ -132,7 +132,7 @@ function keyboardResize(event: KeyboardEvent, index: number) {
   const min = Math.min(18, total / 2)
   sizes[index] = Math.max(min, Math.min(total - min, (sizes[index] || 50) + delta))
   sizes[index + 1] = total - sizes[index]!
-  emit('resize', { splitId: props.node.id, sizes })
+  emit('resize', { splitId: props.node.id, childIds: props.node.children.map(child => child.id), sizes })
 }
 </script>
 
