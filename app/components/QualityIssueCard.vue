@@ -7,6 +7,7 @@ const expanded = ref(false)
 watch(() => props.issue, () => { expanded.value = false })
 const numeric = computed(() => ['number', 'percentage'].includes(props.issue.type))
 const placeholder = computed(() => props.issue.type === 'key_placeholder')
+const termUsage = computed(() => props.issue.type === 'term_usage')
 const newlineDifference = computed(() => Number(props.issue.target[0]) - Number(props.issue.source[0]))
 const newlineMessage = computed(() => `译文${newlineDifference.value > 0 ? '多' : '少'} ${Math.abs(newlineDifference.value)} 次换行`)
 const contexts = computed(() => [
@@ -30,8 +31,8 @@ function values(rows: string[]) {
         <dl class="qa-counts"><div><dt>原文</dt><dd>{{ issue.source[0] }}<small>次</small></dd></div><div class="qa-count-changed"><dt>译文</dt><dd>{{ issue.target[0] }}<small>次</small></dd></div></dl>
       </template>
       <dl v-else-if="issue.source.length || issue.target.length" class="qa-values">
-        <template v-if="issue.source.length"><dt>{{ numeric || placeholder ? '原文未对应' : issue.type === 'tag_structure' ? '原文顺序' : '原文要求' }}</dt><dd><span v-for="(item, index) in values(issue.source)" :key="index" class="qa-value qa-source-value"><span>{{ item.value }}</span><small v-if="item.count > 1">×{{ item.count }}</small></span></dd></template>
-        <template v-if="issue.target.length"><dt>{{ numeric ? '译文未对应' : placeholder ? '译文多出或不符' : issue.type === 'tag_structure' ? '译文顺序' : '译文出现' }}</dt><dd><span v-for="(item, index) in values(issue.target)" :key="index" class="qa-value qa-target-value"><span>{{ item.value }}</span><small v-if="item.count > 1">×{{ item.count }}</small></span></dd></template>
+        <template v-if="issue.source.length"><dt>{{ termUsage ? '原文命中术语' : numeric || placeholder ? '原文未对应' : issue.type === 'tag_structure' ? '原文顺序' : '原文要求' }}</dt><dd><span v-for="(item, index) in values(issue.source)" :key="index" class="qa-value qa-source-value"><span>{{ item.value }}</span><small v-if="item.count > 1">×{{ item.count }}</small></span></dd></template>
+        <template v-if="issue.target.length"><dt>{{ termUsage ? '术语表要求译名' : numeric ? '译文未对应' : placeholder ? '译文多出或不符' : issue.type === 'tag_structure' ? '译文顺序' : '译文出现' }}</dt><dd><span v-for="(item, index) in values(issue.target)" :key="index" class="qa-value qa-target-value"><span>{{ item.value }}</span><small v-if="item.count > 1">×{{ item.count }}</small></span></dd></template>
       </dl>
       <div v-if="contexts.length" class="qa-context-list">
         <div v-for="context in visibleContexts" :key="`${context.side}-${context.location.start}`" class="qa-context" :class="`qa-context-${context.side}`">

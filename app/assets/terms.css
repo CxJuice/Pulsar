@@ -2,6 +2,8 @@
 .term-manager-actions,.term-form-heading,.term-form-actions,.term-delete-confirm>div,.term-pagination { display:flex;align-items:center;gap:6px; }
 .term-form-heading { justify-content:space-between;margin-bottom:14px; }
 .term-manager-actions { margin-left:auto; }
+.term-community-links { display:flex;align-items:center;gap:5px; }
+.term-community-links .button { min-height:26px;padding:4px 8px;font-size:10px; }
 .term-scope { display:flex;gap:4px;margin:12px var(--term-control-inset) 12px;padding:3px;background:var(--soft);border:1px solid var(--border);border-radius:7px; }
 .term-scope button { display:flex;align-items:center;justify-content:center;gap:4px;flex:1 1 0;min-width:0;min-height:32px;padding:7px 4px;color:var(--secondary);font-size:11px;border-radius:4px; }
 .term-scope button.active { background:var(--bg);color:var(--accent);box-shadow:0 1px 3px #0000000d; }
@@ -27,6 +29,11 @@
 .term-delete-confirm .danger { color:#b84242;border-color:#b8424260; }
 .term-variants { display:flex;flex-wrap:wrap;gap:5px;margin-top:8px; }
 .term-variants>span { font-size:10px;padding:2px 6px;background:var(--soft);border:1px solid var(--border);border-radius:4px;overflow-wrap:anywhere; }
+.community-term-status { flex-shrink:0;color:var(--warning);font-size:10px;padding:2px 6px;border:1px solid color-mix(in srgb,var(--warning) 35%,transparent);border-radius:4px; }
+.community-candidates { display:flex;flex-wrap:wrap;gap:6px;margin-top:10px; }
+.community-candidates>span { color:var(--secondary);font-size:11px;line-height:1.5;padding:4px 8px;background:var(--soft);border:1px solid var(--border);border-radius:5px;overflow-wrap:anywhere; }
+.community-feed-updated { margin:8px 16px 0;color:var(--muted);font-size:10px; }
+.community-feed-warning { margin:8px 16px;color:var(--warning);font-size:10px;line-height:1.6;overflow-wrap:anywhere; }
 .term-pagination { padding:12px 18px;color:var(--muted);font-size:10px; }
 .term-pagination>span:first-child { margin-right:auto; }
 .term-manager .term-header strong { min-width:0;overflow-wrap:anywhere;flex:1; }
@@ -47,8 +54,7 @@
 .translation-area .translation-editor textarea { position:relative;z-index:1;background:transparent; }
 .translated-term-highlight {
   font:inherit;line-height:inherit;white-space:inherit;color:transparent;
-  padding:0;margin:0;border:0;border-radius:2px;background:#e7dffb;
-  box-shadow:inset 0 -1px #8d6bd1;
+  padding:0;margin:0;border:0;border-radius:2px;background:var(--accent-soft);
+  box-shadow:inset 0 -1px var(--accent);
 }
-.app-shell[data-theme=dark] .translated-term-highlight { background:#47395d;box-shadow:inset 0 -1px #b29bd8; }
 .translation-area .translation-editor textarea,.translation-highlights { font-family:var(--font-editor-translation,inherit);font-size:var(--size-editor-translation,14px);line-height:1.7; }

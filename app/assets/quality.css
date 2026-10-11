@@ -8,6 +8,8 @@
 }
 .qa-panel .quality-summary h3 { font-size: 12px; }
 .qa-panel .quality-summary.has-issues > svg { color: var(--warning); }
+.qa-term-check-status { margin: 0; padding: 9px 18px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 11px; line-height: 1.6; }
+.qa-term-check-status.error { color: var(--warning); }
 .qa-panel .quality-card {
   margin: 0;
   padding: 16px 18px;
