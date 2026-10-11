@@ -65,7 +65,7 @@ const visibleTabs = computed(() => props.compact ? [{ id: 'context' as const, la
           <LoadingRegion :busy="panelBusy" :initial="!editor.suggestions.length" label="正在获取建议…">
           <div v-if="panelError && !panelBusy" class="panel-error" role="alert"><TriangleAlert :size="22" /><p>{{ panelError }}</p><button class="button" @click="retryPanel"><RotateCw :size="14" />重新获取</button></div>
           <template v-else>
-        <div v-if="!editor.suggestions.length" class="empty-state"><Lightbulb :size="34" :stroke-width="1.25" /><h3>暂无翻译建议</h3></div>
+        <div v-if="!editor.suggestions.length" class="empty-state"><Lightbulb :size="34" :stroke-width="1.25" /><h3>暂无相似文本</h3></div>
         <article v-for="(suggestion, index) in editor.suggestions" :key="suggestion.id" class="suggestion-card">
           <div class="match-badge" title="本地计算的完整原文 Levenshtein 相似度"><strong>{{ matching(suggestion.localMatching ?? 0) }}</strong><span>匹配</span></div>
           <div class="suggestion-body">
