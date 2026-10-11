@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { appearanceCssVariables, appearanceStorageKey, defaultAppearanceSettings, parseAppearanceSettings } from '~/utils/appearance'
+import { compileTermExemptionRules, defaultTermExemptionRules } from '~/utils/termHighlights'
 
 const editor = reactive(useEditor())
 const navigation = reactive(useWorkspaceNavigation(editor))
@@ -7,9 +8,23 @@ const theme = ref('light')
 const translationLayout = ref<'horizontal' | 'vertical'>('horizontal')
 const appearance = ref(defaultAppearanceSettings())
 const termRecognitionEnabled = ref(true)
+const termExemptionRules = ref([...defaultTermExemptionRules])
+const defaultTermExemptionPatterns = compileTermExemptionRules(defaultTermExemptionRules).patterns
+const termExemptionPatterns = shallowRef(defaultTermExemptionPatterns)
 if (import.meta.client) {
   try { termRecognitionEnabled.value = localStorage.getItem('sckit-term-recognition-enabled') !== '0' }
   catch { /* Keep term recognition enabled when local storage is unavailable. */ }
+  try {
+    const savedRules = JSON.parse(localStorage.getItem('sckit-term-exemption-rules') || 'null')
+    if (Array.isArray(savedRules) && savedRules.every((rule): rule is string => typeof rule === 'string')) {
+      const cleanedRules = savedRules.map(rule => rule.trim()).filter(Boolean)
+      const compiledRules = compileTermExemptionRules(cleanedRules)
+      if (!compiledRules.error) {
+        termExemptionRules.value = cleanedRules
+        termExemptionPatterns.value = compiledRules.patterns
+      }
+    }
+  } catch { /* Use the default exemption rules when storage is unavailable or invalid. */ }
 }
 const appearanceStyle = computed(() => appearanceCssVariables(appearance.value, theme.value))
 const route = useRoute()
@@ -32,6 +47,8 @@ provide('workspace-theme', theme)
 provide('workspace-translation-layout', translationLayout)
 provide('workspace-appearance', appearance)
 provide('workspace-term-recognition', termRecognitionEnabled)
+provide('workspace-term-exemption-rules', termExemptionRules)
+provide('workspace-term-exemption-patterns', termExemptionPatterns)
 onMounted(() => {
   theme.value = localStorage.getItem('sckit-theme') || 'light'
   try {

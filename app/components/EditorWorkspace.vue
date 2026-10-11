@@ -6,7 +6,7 @@ import type { StringItem, StringPage, Term, TranslationSettings } from '~/types/
 import { saveModes, type SaveMode } from '~/utils/saveModes'
 import { toEditorText } from '~/utils/translationText'
 import { searchHighlightParts } from '~/utils/searchHighlight'
-import { highlightTranslatedTerms, replaceSourceTerms, splitTranslationAlternatives } from '~/utils/termHighlights'
+import { highlightTranslatedTerms, replaceSourceTerms, termTranslationAlternatives } from '~/utils/termHighlights'
 import type { QualityLocation } from '~/utils/quality'
 const props = defineProps<{ editor: UnwrapNestedRefs<ReturnType<typeof useEditor>> }>()
 const e = props.editor
@@ -22,6 +22,7 @@ const pageSizeOptions = [50, 100, 200, 500].map(value => ({ value, label: `${val
 const saveStageOptions = [0, 1, 2, 3, 5].map(value => ({ value, label: stageLabels[value]! }))
 const theme = inject<Ref<string>>('workspace-theme')!, showBreaks = ref(true), saveMode = ref<SaveMode>('next'), clearAfterSaveNext = ref(true)
 const termRecognitionEnabled = inject<Ref<boolean>>('workspace-term-recognition')!
+const termExemptionPatterns = inject<Ref<RegExp[]>>('workspace-term-exemption-patterns')!
 const translationLayout = inject<Ref<'horizontal' | 'vertical'>>('workspace-translation-layout')!
 watch(saveMode, value => { try { localStorage.setItem('sckit-save-mode', value) } catch { /* Keep the choice for this session. */ } })
 function changeSaveStage(stage: number) {
@@ -49,7 +50,7 @@ watch(termRecognitionEnabled, enabled => { if (!enabled) closeTermTranslationPic
 const translationText = computed(() => toEditorText(e.text))
 const originalSearchQuery = computed(() => ['text', 'original'].includes(e.searchMode) ? e.search : '')
 const translationSearchQuery = computed(() => ['text', 'translation'].includes(e.searchMode) ? e.search : '')
-const translationHighlights = computed(() => highlightTranslatedTerms(translationText.value, termRecognitionEnabled.value ? e.terms : []).map(piece => ({ ...piece, searchParts: searchHighlightParts(piece.text, translationSearchQuery.value) })))
+const translationHighlights = computed(() => highlightTranslatedTerms(translationText.value, termRecognitionEnabled.value ? e.terms : [], termExemptionPatterns.value).map(piece => ({ ...piece, searchParts: searchHighlightParts(piece.text, translationSearchQuery.value) })))
 const translationHighlightOffset = ref({ top: 0, left: 0 })
 function syncTranslationHighlightScroll() {
   translationHighlightOffset.value = { top: translationInput.value?.scrollTop || 0, left: translationInput.value?.scrollLeft || 0 }
@@ -88,7 +89,7 @@ const batchPrefillScope = ref<'selected' | 'untranslated'>('selected'), batchPre
 const batchPrefillProgress = ref(0), batchPrefillTotal = ref(0), batchPrefillSkipped = ref(0)
 let batchPrefillRun = 0
 const selectionContextMenu = ref<{ x: number; y: number; text: string; selected: string; word: string } | null>(null)
-const preservedSelection = computed(() => selectionContextMenu.value ? replaceSourceTerms(selectionContextMenu.value.text, e.terms) : null)
+const preservedSelection = computed(() => selectionContextMenu.value ? replaceSourceTerms(selectionContextMenu.value.text, e.terms, termExemptionPatterns.value) : null)
 function closeTermTranslationPicker() { termTranslationOptions.value = [] }
 function positionTermTranslationPicker(position: TermTranslationPosition) {
   termTranslationPopupStyle.value = { left: `${position.x + 10}px`, top: `${position.y + 10}px` }
@@ -108,7 +109,7 @@ function positionTermTranslationPicker(position: TermTranslationPosition) {
 function insertTerm(terms: Term[], position: TermTranslationPosition) {
   const options = new Map<string, TermTranslationOption>()
   for (const term of terms) {
-    for (const translation of splitTranslationAlternatives(toEditorText(term.translation))) {
+    for (const translation of termTranslationAlternatives(term, termExemptionPatterns.value)) {
       const key = translation.toLocaleLowerCase(), previous = options.get(key)
       if (previous) {
         if (!previous.terms.includes(term.term)) previous.terms.push(term.term)
@@ -180,7 +181,7 @@ function runSelectionContextAction(preserveTerms = false) {
   selectionContextMenu.value = null
   if (action.word) auxiliaryPanel.value?.lookupDictionary(action.word)
   else {
-    const source = preserveTerms ? replaceSourceTerms(action.text, e.terms).text : action.text
+    const source = preserveTerms ? replaceSourceTerms(action.text, e.terms, termExemptionPatterns.value).text : action.text
     void auxiliaryPanel.value?.translateSelectedText(source)
   }
 }
