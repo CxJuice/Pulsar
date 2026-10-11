@@ -5,6 +5,7 @@ import type { UnwrapNestedRefs } from 'vue'
 import type { Term } from '~/types/editor'
 import { saveModes, type SaveMode } from '~/utils/saveModes'
 import { toEditorText } from '~/utils/translationText'
+import type { QualityLocation } from '~/utils/quality'
 const props = defineProps<{ editor: UnwrapNestedRefs<ReturnType<typeof useEditor>> }>()
 const e = props.editor
 const navigation = inject<import('~/composables/useWorkspaceNavigation').WorkspaceNavigation>('workspace-navigation')!
@@ -59,6 +60,30 @@ function insert(value: string) {
   nextTick(() => { field?.focus(); field?.setSelectionRange(start + inserted.length, start + inserted.length) })
 }
 function replace(value: string) { if (!e.locked && !e.saving && !e.listBusy && !e.initializing && !e.reloadBusy) { e.input(value); nextTick(() => translationInput.value?.focus()) } }
+async function locateQuality(location: QualityLocation) {
+  if (e.locked || e.saving || e.listBusy || e.initializing || e.reloadBusy) return
+  const selectedId = e.selected?.id, content = translationText.value
+  if (content.slice(location.start, location.end) !== location.text) return
+  await nextTick()
+  const field = translationInput.value
+  if (!field || field.disabled || e.selected?.id !== selectedId || field.value !== content) return
+  field.focus({ preventScroll: true })
+  field.setSelectionRange(location.start, location.end)
+  const scroller = narrow.value ? editingContent.value : editorPanel.value?.querySelector<HTMLElement>('.editor-scroll')
+  if (!scroller) return
+  // Measure the selected span with the textarea's wrapping and typography.
+  const mirror = document.createElement('div'), marker = document.createElement('span'), style = getComputedStyle(field)
+  mirror.style.cssText = 'position:fixed;top:0;left:0;visibility:hidden;pointer-events:none;white-space:pre-wrap;overflow-wrap:break-word;'
+  for (const property of ['font-family', 'font-size', 'font-weight', 'font-style', 'line-height', 'letter-spacing', 'word-spacing', 'tab-size', 'text-indent', 'padding', 'box-sizing', 'border-width', 'border-style', 'word-break', 'direction']) mirror.style.setProperty(property, style.getPropertyValue(property))
+  mirror.style.width = `${field.getBoundingClientRect().width}px`
+  marker.textContent = content.slice(location.start, location.end)
+  mirror.append(document.createTextNode(content.slice(0, location.start)), marker, document.createTextNode(content.slice(location.end)))
+  document.body.append(mirror)
+  try {
+    const top = field.getBoundingClientRect().top + marker.getBoundingClientRect().top - mirror.getBoundingClientRect().top
+    scroller.scrollTop += top - scroller.getBoundingClientRect().top - scroller.clientHeight / 3
+  } finally { mirror.remove() }
+}
 function toggleAll() { e.selectedIds = selectedAll.value ? [] : e.visibleItems.map(item => item.id) }
 function toggleSelected(id: number) { e.selectedIds = e.selectedIds.includes(id) ? e.selectedIds.filter(value => value !== id) : [...e.selectedIds, id] }
 function toggleTheme() { theme.value = theme.value === 'light' ? 'dark' : 'light'; localStorage.setItem('sckit-theme', theme.value); showMenu.value = false }
@@ -174,7 +199,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', keydown); cancelAn
         </template><div v-else class="empty-state editor-empty"><TextCursorInput :size="38" :stroke-width="1.2" /><h3>选一条字符串，开始翻译</h3></div>
       </section>
       <div class="resize-handle aux-resize-handle" role="separator" aria-label="调整辅助面板宽度" aria-orientation="vertical" @pointerdown="resize($event, 'right')"></div>
-      <AuxPanel ref="auxiliaryPanel" :editor="e" :compact="narrow" @insert="insert" @replace="replace"><template #context><StringDetails :editor="e" /></template></AuxPanel>
+      <AuxPanel ref="auxiliaryPanel" :editor="e" :compact="narrow" @insert="insert" @replace="replace" @locate="locateQuality"><template #context><StringDetails :editor="e" /></template></AuxPanel>
       </div>
       <EditorNavigation v-if="e.selected" :editor="e" class="compact-editor-footer" @open="openString" />
       </div>

@@ -6,6 +6,10 @@ import { toEditorText } from './translationText'
 export interface QualityIssue {
   type: string; message: string; rule: 'SCCL' | 'SCCL 格式提示' | '编辑器'
   source: string[]; target: string[]; tokens: string[]; insertable: boolean
+  locations?: { source: QualityLocation[]; target: QualityLocation[] }
+}
+export interface QualityLocation {
+  start: number; end: number; line: number; before: string; text: string; after: string
 }
 const ignoredKey = 'item_NameFood_bar_snaggle_01_pepper_a'
 const pairs = (text: string) => [...text.matchAll(/~\s*([\p{L}\p{N}_]+)\s*[(（](.*?)[)）]/gsu)].map(match => [match[1]!, match[2]!] as const)
@@ -52,26 +56,55 @@ function issue(type: string, message: string, source: string[] = [], target: str
 }
 // Check all visible numbers, independently of SCCL's key and segment restrictions.
 function entryNumbers(value: string) {
-  const plain = toEditorText(value).normalize('NFKC').replaceAll('−', '-')
-    .replace(/https?:\/\/[^\s<>]+|<\/?[A-Za-z][^>]*>|~\s*[\p{L}\p{N}_]+\s*\([^)]*\)|\{\{[^}]+\}\}|\{\w+\}|%(?:\d+\$)?[sdif]/giu, ' ')
-  const values: string[] = [], percentages: string[] = []
+  const decoded = toEditorText(value), starts: number[] = [], ends: number[] = []
+  let normalizedText = '', offset = 0
+  // Keep offsets into the displayed text when normalization expands a character.
+  for (const character of decoded) {
+    const normalizedCharacter = character.normalize('NFKC').replaceAll('−', '-')
+    normalizedText += normalizedCharacter
+    for (let index = 0; index < normalizedCharacter.length; index++) { starts.push(offset); ends.push(offset + character.length) }
+    offset += character.length
+  }
+  const plain = normalizedText.replace(/https?:\/\/[^\s<>]+|<\/?[A-Za-z][^>]*>|~\s*[\p{L}\p{N}_]+\s*\([^)]*\)|\{\{[^}]+\}\}|\{\w+\}|%(?:\d+\$)?[sdif]/giu, match => match.replace(/[^\n]/g, ' '))
+  const values: Array<{ value: string; location: QualityLocation }> = [], percentages: typeof values = []
   for (const match of plain.matchAll(/(?:(?<![\p{L}\p{N}_])[+-])?(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|\.\d+)(?:\s*%)?/gu)) {
     const raw = match[0].replaceAll(',', ''), absolute = canonicalNumber(raw)
     const number = raw.startsWith('-') && absolute !== '0' ? `-${absolute}` : absolute
-    if (raw.endsWith('%')) percentages.push(number + '%')
-    else values.push(number)
+    const start = starts[match.index!]!, end = ends[match.index! + match[0].length - 1]!
+    const lineStart = decoded.lastIndexOf('\n', start - 1) + 1, nextBreak = decoded.indexOf('\n', end)
+    const lineEnd = nextBreak < 0 ? decoded.length : nextBreak
+    const beforeStart = Math.max(lineStart, start - 48), afterEnd = Math.min(lineEnd, end + 48)
+    const location: QualityLocation = { start, end, line: decoded.slice(0, start).split('\n').length,
+      before: (beforeStart > lineStart ? '…' : '') + decoded.slice(beforeStart, start), text: decoded.slice(start, end),
+      after: decoded.slice(end, afterEnd) + (afterEnd < lineEnd ? '…' : '') }
+    if (raw.endsWith('%')) percentages.push({ value: number + '%', location })
+    else values.push({ value: number, location })
   }
   return { values, percentages }
 }
 function entryNumericIssues(original: string, translation: string): QualityIssue[] {
   const source = entryNumbers(original), target = entryNumbers(translation), result: QualityIssue[] = []
-  if (!equalBag(source.values, target.values)) result.push(issue('number', '数字不一致', source.values, target.values, '编辑器'))
-  if (!equalBag(source.percentages, target.percentages)) result.push(issue('percentage', '百分比不一致', source.percentages, target.percentages, '编辑器'))
+  function unmatched(rows: typeof source.values, other: typeof source.values) {
+    const counts = new Map<string, number>()
+    for (const row of other) counts.set(row.value, (counts.get(row.value) || 0) + 1)
+    return rows.filter(row => {
+      const count = counts.get(row.value) || 0
+      if (!count) return true
+      counts.set(row.value, count - 1); return false
+    })
+  }
+  for (const [kind, message] of [['values', '数字不一致'], ['percentages', '百分比不一致']] as const) {
+    const missing = unmatched(source[kind], target[kind]), extra = unmatched(target[kind], source[kind])
+    if (missing.length || extra.length) result.push({
+      ...issue(kind === 'values' ? 'number' : 'percentage', message, missing.map(row => row.value), extra.map(row => row.value), '编辑器'),
+      locations: { source: missing.map(row => row.location), target: extra.map(row => row.location) },
+    })
+  }
   return result
 }
 export function qualityIssues(original: string, translation: string, key = ''): QualityIssue[] {
   if (!translation.trim()) return [issue('empty', '译文为空', [], [], '编辑器')]
-  const target = translation.trim(), result = entryNumericIssues(original, target)
+  const target = translation.trim(), result = entryNumericIssues(original, translation)
   const formal = key !== ignoredKey, advisory = !key.endsWith(',P')
   if (formal) {
     const sourcePairs = pairs(original), targetPairs = pairs(target)

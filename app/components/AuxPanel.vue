@@ -4,8 +4,9 @@ import type { UnwrapNestedRefs } from 'vue'
 import type { useEditor } from '~/composables/useEditor'
 import type { HistoryEntry, Suggestion } from '~/types/editor'
 import { displayDate, stageLabels } from '~/utils/text'
+import type { QualityLocation } from '~/utils/quality'
 const props = defineProps<{ editor: UnwrapNestedRefs<ReturnType<typeof useEditor>>; compact?: boolean }>()
-const emit = defineEmits<{ insert: [text: string]; replace: [text: string] }>()
+const emit = defineEmits<{ insert: [text: string]; replace: [text: string]; locate: [location: QualityLocation] }>()
 const termPanel = ref<{ focusTerm: (id: number) => void }>()
 const memorySearch = ref<{ focus: () => void }>()
 function openHistorySearch() { props.editor.panel = 'suggestions'; nextTick(() => memorySearch.value?.focus()) }
@@ -53,7 +54,7 @@ const visibleTabs = computed(() => props.compact ? [{ id: 'context' as const, la
       <button v-for="tab in visibleTabs" :key="tab.id" :class="{ active: editor.panel === tab.id }" :aria-pressed="editor.panel === tab.id" @click="editor.panel = tab.id"><span>{{ tab.label }}</span><span v-if="tab.id === 'suggestions' && editor.panel === 'suggestions' && editor.suggestions.length" class="tab-count">{{ editor.suggestions.length }}</span><span v-if="tab.id === 'terms' && editor.terms.length" class="tab-count">{{ editor.terms.length }}</span><span v-if="tab.id === 'quality' && editor.text && editor.issues.length" class="tab-count warning">{{ editor.issues.length }}</span></button>
     </nav>
       <TermPanel ref="termPanel" v-show="editor.panel === 'terms'" :editor="editor" @insert="emit('insert', $event)" />
-      <QualityPanel v-show="editor.panel === 'quality'" :editor="editor" @insert="emit('insert', $event)" />
+      <QualityPanel v-show="editor.panel === 'quality'" :editor="editor" @insert="emit('insert', $event)" @locate="emit('locate', $event)" />
       <Transition name="panel" mode="out-in"><div v-show="!['terms', 'quality'].includes(editor.panel)" :key="editor.panel" class="aux-content">
       <template v-if="editor.panel === 'context'"><slot name="context" /></template>
       <div v-else-if="panelBusy && !panelHasData && editor.panel === 'history'" class="panel-loading"><LoadingIndicator :size="24" label="正在获取辅助信息" /><span>正在获取{{ tabs.find(tab => tab.id === editor.panel)?.label }}…</span></div>
