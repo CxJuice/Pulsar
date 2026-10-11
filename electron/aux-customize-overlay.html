@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>自定义右侧栏</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; }
+    body { color: var(--text, #292932); font: var(--font-size, 13px)/1.55 var(--font-family, "Segoe UI", "Microsoft YaHei UI", sans-serif); }
+    .popover { width: 100%; height: 100%; overflow: auto; padding: 11px; background: var(--bg, #fff); border: 1px solid var(--border, #e7e7ed); border-radius: 6px; box-shadow: var(--shadow, 0 18px 64px #17172f24); }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    header strong { font-size: 12px; font-weight: 600; }
+    button { color: inherit; font: inherit; cursor: pointer; }
+    .close, .move { border: 0; background: transparent; }
+    .close { width: 24px; height: 24px; padding: 0; color: var(--muted, #92939d); font-size: 18px; line-height: 1; }
+    p { margin: 2px 0 9px; color: var(--muted, #92939d); font-size: 10px; line-height: 1.6; }
+    ol { list-style: none; padding: 0; margin: 0; }
+    li { display: grid; grid-template-columns: 16px minmax(0, 1fr) 26px 26px; align-items: center; gap: 2px; min-height: 36px; padding: 2px 3px; border-top: 1px solid var(--border, #e7e7ed); border-radius: 3px; }
+    li.drop-target { background: var(--accent-soft, #f0edfc); }
+    .grip { color: var(--muted, #92939d); cursor: grab; text-align: center; }
+    label { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 11px; cursor: pointer; }
+    label input { margin: 0; accent-color: var(--accent, #6151d8); }
+    .move { width: 24px; height: 24px; padding: 0; color: var(--secondary, #6d6e7b); border-radius: 3px; font-size: 15px; }
+    button:hover:not(:disabled) { color: var(--accent, #6151d8); background: var(--accent-soft, #f0edfc); }
+    button:disabled { opacity: .4; cursor: default; }
+    :focus-visible { outline: 2px solid var(--accent, #6151d8); outline-offset: 1px; }
+    .dock-overlay { display: none; width: 100%; height: 100%; grid-template-columns: minmax(0, 1fr) minmax(44px, 1.15fr) minmax(0, 1fr); grid-template-rows: minmax(0, .8fr) minmax(0, 1fr) minmax(0, .8fr); gap: 5px; }
+    body[data-mode="dock"] { padding: 0; }
+    body[data-mode="dock"] .popover { display: none; }
+    body[data-mode="dock"] .dock-overlay { display: grid; }
+    .dock-overlay[hidden] { display: none !important; }
+    .dock-zone { display: flex; min-width: 0; min-height: 0; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 3px; border: 1px solid color-mix(in srgb, var(--accent, #6151d8) 56%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--bg, #fff) 92%, var(--accent, #6151d8)); box-shadow: 0 2px 8px #17172f22; color: var(--accent, #6151d8); font-size: 10px; line-height: 1.3; user-select: none; }
+    .dock-zone .arrow { font-size: 18px; line-height: 1; }
+    .dock-zone.drag-over, .dock-zone:hover { background: var(--accent-soft, #f0edfc); }
+    .dock-zone.center { grid-area: 2 / 2; }
+    .dock-zone.left { grid-area: 2 / 1; }
+    .dock-zone.right { grid-area: 2 / 3; }
+    .dock-zone.top { grid-area: 1 / 2; }
+    .dock-zone.bottom { grid-area: 3 / 2; }
+  </style>
+</head>
+<body>
+  <section class="popover" role="dialog" aria-label="自定义右侧栏">
+    <header><strong>自定义右侧栏</strong><button class="close" type="button" aria-label="关闭自定义面板" title="关闭">×</button></header>
+    <p>勾选要显示的模块；拖动标签到分栏边缘可左右或上下拆分。</p>
+    <ol aria-label="右侧栏模块"></ol>
+  </section>
+  <section class="dock-overlay" aria-label="翻译分栏停靠位置" hidden>
+    <button class="dock-zone top" type="button" data-zone="top" aria-label="在上方新建分栏"><span class="arrow" aria-hidden="true">↑</span><span>上方</span></button>
+    <button class="dock-zone left" type="button" data-zone="left" aria-label="在左侧新建分栏"><span class="arrow" aria-hidden="true">←</span><span>左侧</span></button>
+    <button class="dock-zone center" type="button" data-zone="center" aria-label="放入此分栏"><span class="arrow" aria-hidden="true">↕</span><span>放入此分栏</span></button>
+    <button class="dock-zone right" type="button" data-zone="right" aria-label="在右侧新建分栏"><span class="arrow" aria-hidden="true">→</span><span>右侧</span></button>
+    <button class="dock-zone bottom" type="button" data-zone="bottom" aria-label="在下方新建分栏"><span class="arrow" aria-hidden="true">↓</span><span>下方</span></button>
+  </section>
+  <script src="aux-customize-overlay.js"></script>
+</body>
+</html>

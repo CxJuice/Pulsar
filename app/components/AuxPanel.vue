@@ -1,28 +1,46 @@
 <script setup lang="ts">
-import { Lightbulb, History, BookOpen, ShieldCheck, MessageSquare, ArrowDownToLine, Search, TriangleAlert, RotateCw, GitCompareArrows } from 'lucide-vue-next'
+import { Lightbulb, History, BookOpen, ShieldCheck, MessageSquare, ArrowDownToLine, Search, TriangleAlert, RotateCw, GitCompareArrows, Languages, GripVertical, ChevronUp, ChevronDown, ExternalLink, X } from 'lucide-vue-next'
+import AuxDockLayout, { type AuxDockNode, type AuxDockTab, type AuxDockZone } from './AuxDockLayout.vue'
 import type { UnwrapNestedRefs } from 'vue'
 import type { useEditor } from '~/composables/useEditor'
-import type { HistoryEntry, Suggestion } from '~/types/editor'
+import type { AuxCustomizationAction, AuxCustomizationOverlayState, CambridgeDictionaryData, HistoryEntry, Suggestion, TranslationMode, TranslationProvider, TranslationSettings } from '~/types/editor'
 import { displayDate, stageLabels } from '~/utils/text'
+import { toEditorText } from '~/utils/translationText'
 import type { QualityLocation } from '~/utils/quality'
 const props = defineProps<{ editor: UnwrapNestedRefs<ReturnType<typeof useEditor>>; compact?: boolean }>()
-const emit = defineEmits<{ insert: [text: string]; replace: [text: string]; locate: [location: QualityLocation] }>()
+const emit = defineEmits<{ insert: [text: string]; replace: [text: string]; locate: [location: QualityLocation]; selectionContextMenu: [event: MouseEvent] }>()
+const layoutPreview = import.meta.dev && useRoute().path === '/layout-preview'
 const termPanel = ref<{ focusTerm: (id: number) => void }>()
 const memorySearch = ref<{ focus: () => void }>()
+const translatorHost = ref<HTMLElement>(), cambridgeSearch = ref<HTMLInputElement>()
+const customizationBounds = ref<HTMLElement>()
+const dictionarySelection = useState('cambridge-selected-word', () => '')
+const dictionaryTerm = ref(dictionarySelection.value), dictionaryError = ref('')
+const dictionaryQueried = ref(false), dictionaryBusy = ref(false)
+const dictionaryData = ref<CambridgeDictionaryData | null>(null)
+const translationMode = ref<'translate' | 'dictionary'>('translate')
+const translationSource = ref(''), translationResult = ref(''), translationError = ref('')
+const translationBusy = ref(false)
+const translationProvider = ref<TranslationProvider>('google'), translationAccessMode = ref<TranslationMode>('web')
+const translationApiProvider = ref<TranslationProvider | null>(null), translationWebQueried = ref(false)
+let translationRequest = 0, dictionaryRequest = 0
+let dictionaryObserver: ResizeObserver | undefined, dictionaryFrame = 0
+let modalObserver: MutationObserver | undefined
+let blockingModalPresent = false
+let removeAuxCustomizationActionListener: (() => void) | undefined
 function openHistorySearch() { props.editor.panel = 'suggestions'; nextTick(() => memorySearch.value?.focus()) }
 const auxRoot = ref<HTMLElement>()
-const panelBusy = computed(() => props.editor.panel === 'terms' ? props.editor.termsBusy : props.editor.auxBusy)
-const panelHasData = computed(() => props.editor.panel === 'terms' ? props.editor.terms.length > 0 : props.editor.panel === 'history' ? props.editor.history.length > 0 : props.editor.suggestions.length > 0)
-const panelError = computed(() => props.editor.panel === 'terms' ? props.editor.termsError : props.editor.auxError)
-function retryPanel() { if (props.editor.panel === 'terms') props.editor.loadTerms(true); else props.editor.loadAux() }
+const activeDockPanels = ref<string[]>([props.editor.panel])
+function panelBusyFor(panel: string) { return panel === 'terms' ? props.editor.termsBusy : panel === 'suggestions' ? props.editor.suggestionsBusy : panel === 'history' ? props.editor.historyBusy : false }
+function panelHasDataFor(panel: string) { return panel === 'terms' ? props.editor.terms.length > 0 : panel === 'history' ? props.editor.history.length > 0 : props.editor.suggestions.length > 0 }
+function panelErrorFor(panel: string) { return panel === 'terms' ? props.editor.termsError : panel === 'suggestions' ? props.editor.suggestionsError : panel === 'history' ? props.editor.historyError : '' }
+function retryPanel(panel: string) { if (panel === 'terms') props.editor.loadTerms(true); else props.editor.loadAux() }
 function searchKeydown(event: KeyboardEvent) {
   if (props.editor.panel !== 'suggestions' || !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'f') return
   event.preventDefault(); event.stopPropagation()
   openHistorySearch()
 }
-function focusTerm(id: number) { nextTick(() => termPanel.value?.focusTerm(id)) }
-
-defineExpose({ focusTerm, openHistorySearch })
+function focusTerm(id: number) { props.editor.panel = 'terms'; nextTick(() => termPanel.value?.focusTerm(id)) }
 const plainSources = ref<number[]>([])
 const concordance = ref<{ original: string; projectId: number; projectName: string } | null>(null)
 watch(() => props.editor.selected?.id, () => { plainSources.value = [] })
@@ -35,6 +53,273 @@ function openSuggestion(suggestion: Suggestion) { window.scKit?.openExternal(`ht
 function matching(value: number) { return Number.isFinite(value) ? `${Math.floor(Math.min(1, Math.max(0, value)) * 100)}%` : '—' }
 
 function openComments() { const e = props.editor; if (e.selected) window.scKit?.openExternal(`https://paratranz.cn/projects/${e.project.id}/strings?id=${e.selected.id}`) }
+watch(dictionarySelection, value => { if (value && document.activeElement !== cambridgeSearch.value) dictionaryTerm.value = value })
+watch([activeDockPanels, translationMode, translationAccessMode, translationProvider], () => nextTick(scheduleDictionaryBounds))
+watch(translatorHost, host => {
+  dictionaryObserver?.disconnect()
+  if (host) {
+    dictionaryObserver = new ResizeObserver(scheduleDictionaryBounds)
+    dictionaryObserver.observe(host)
+    const scrollport = host.closest<HTMLElement>('.aux-dock-pane-content')
+    if (scrollport) dictionaryObserver.observe(scrollport)
+  }
+  nextTick(scheduleDictionaryBounds)
+})
+function hostBounds(host?: HTMLElement) {
+  const rect = host?.getBoundingClientRect()
+  if (!rect || !host) return null
+  let left = rect.left + host.clientLeft
+  let top = rect.top + host.clientTop
+  let right = left + host.clientWidth
+  let bottom = top + host.clientHeight
+  for (let ancestor = host.parentElement; ancestor; ancestor = ancestor.parentElement) {
+    const style = getComputedStyle(ancestor)
+    const clipX = style.overflowX !== 'visible'
+    const clipY = style.overflowY !== 'visible'
+    if (!clipX && !clipY) continue
+    const bounds = ancestor.getBoundingClientRect()
+    const clipLeft = bounds.left + ancestor.clientLeft
+    const clipTop = bounds.top + ancestor.clientTop
+    if (clipX) {
+      left = Math.max(left, clipLeft)
+      right = Math.min(right, clipLeft + ancestor.clientWidth)
+    }
+    if (clipY) {
+      top = Math.max(top, clipTop)
+      bottom = Math.min(bottom, clipTop + ancestor.clientHeight)
+    }
+  }
+  left = Math.max(left, 0)
+  top = Math.max(top, 0)
+  right = Math.min(right, window.innerWidth)
+  bottom = Math.min(bottom, window.innerHeight)
+  const width = right - left
+  const height = bottom - top
+  if (width < 120 || height < 120) return null
+  return { x: left, y: top, width, height }
+}
+const blockingModalSelector = '.modal-backdrop'
+function hasBlockingModal() { return Boolean(document.querySelector(blockingModalSelector)) }
+function observeBlockingModals() {
+  const root = document.querySelector('.app-shell') || document.body
+  blockingModalPresent = hasBlockingModal()
+  modalObserver = new MutationObserver(() => {
+    const present = hasBlockingModal()
+    if (present === blockingModalPresent) return
+    blockingModalPresent = present
+    scheduleDictionaryBounds()
+  })
+  modalObserver.observe(root, { childList: true, subtree: true })
+}
+function syncEmbeddedViews(query?: string) {
+  const bridge = window.scKit
+  if (!bridge) return
+  const showTranslator = activeDockPanels.value.includes('dictionary') && translationMode.value === 'translate' && translationAccessMode.value === 'web' && !hasBlockingModal()
+  const translatorBounds = showTranslator ? hostBounds(translatorHost.value) : null
+  bridge.translatorView({ visible: Boolean(translatorBounds), bounds: translatorBounds, provider: translationProvider.value, text: query ?? (translationWebQueried.value ? translationSource.value : ''), forceText: query !== undefined })
+  syncAuxCustomizationOverlay()
+}
+function syncAuxCustomizationOverlay() {
+  const bridge = window.scKit
+  if (!bridge?.auxCustomizationOverlay) return
+  const rect = customizationBounds.value?.getBoundingClientRect()
+  const translationVisible = activeDockPanels.value.includes('dictionary') && translationMode.value === 'translate' && translationAccessMode.value === 'web' && !hasBlockingModal()
+  const translationBounds = translationVisible ? hostBounds(translatorHost.value) : null
+  const dictionaryGroup = translationBounds ? findPanelGroup(dockLayout.value, 'dictionary') : null
+  const showDockZones = Boolean(draggedTab.value && translationBounds && dictionaryGroup)
+  let mode: AuxCustomizationOverlayState['mode'] = showDockZones ? 'dock' : 'customize'
+  let bounds: AuxCustomizationOverlayState['bounds'] = null
+  if (showDockZones && translationBounds) {
+    const width = Math.min(280, translationBounds.width)
+    const height = Math.min(168, translationBounds.height)
+    if (width >= 120 && height >= 120) bounds = {
+      x: translationBounds.x + (translationBounds.width - width) / 2,
+      y: translationBounds.y + (translationBounds.height - height) / 2,
+      width, height,
+    }
+    else mode = 'customize'
+  }
+  const showCustomize = !showDockZones && customizationOpen.value && !hasBlockingModal() && rect && rect.width >= 120 && rect.height >= 120
+  if (!bounds && showCustomize && rect) bounds = { x: rect.left, y: rect.top, width: rect.width, height: rect.height }
+  const visible = Boolean(bounds && (mode === 'dock' || showCustomize))
+  const shell = document.querySelector<HTMLElement>('.app-shell')
+  const style = shell ? getComputedStyle(shell) : undefined
+  const theme: Record<string, string> = style ? {
+    bg: style.getPropertyValue('--bg').trim(), text: style.getPropertyValue('--text').trim(), border: style.getPropertyValue('--border').trim(),
+    accent: style.getPropertyValue('--accent').trim(), 'accent-soft': style.getPropertyValue('--accent-soft').trim(), muted: style.getPropertyValue('--muted').trim(),
+    secondary: style.getPropertyValue('--secondary').trim(), shadow: style.getPropertyValue('--shadow').trim(),
+    'font-family': style.fontFamily, 'font-size': getComputedStyle(document.body).fontSize,
+  } : {}
+  const state: AuxCustomizationOverlayState = {
+    visible, mode, bounds, theme,
+    draggedPanel: mode === 'dock' ? draggedTab.value : null,
+    groupId: mode === 'dock' ? dictionaryGroup?.id ?? null : null,
+    items: mode === 'dock' ? [] : orderedTabs.value.map((tab, index) => ({
+      id: tab.id, label: tab.label, checked: visibleTabIds.value.includes(tab.id),
+      disabled: visibleTabIds.value.includes(tab.id) && visibleTabIds.value.length <= 1,
+      first: index === 0, last: index === orderedTabs.value.length - 1,
+    })),
+  }
+  bridge.auxCustomizationOverlay(state)
+}
+function scheduleDictionaryBounds() {
+  if (dictionaryFrame) cancelAnimationFrame(dictionaryFrame)
+  dictionaryFrame = requestAnimationFrame(() => { dictionaryFrame = 0; syncEmbeddedViews() })
+}
+async function loadTranslationSelection() {
+  if (!window.scKit) return
+  try {
+    const result = await window.scKit.getTranslationSettings()
+    if (!result.ok || !result.data) throw new Error(result.message || '无法读取翻译设置')
+    applyTranslationSettings(result.data)
+  } catch (reason) { translationError.value = (reason as Error).message || '无法读取翻译设置' }
+}
+function applyTranslationSettings(settings: TranslationSettings) {
+  const changed = settings.provider !== translationProvider.value || settings.mode !== translationAccessMode.value
+  translationProvider.value = settings.provider
+  translationAccessMode.value = settings.mode
+  if (changed) {
+    translationRequest++
+    translationBusy.value = false
+    translationResult.value = ''
+    translationApiProvider.value = null
+  }
+  nextTick(scheduleDictionaryBounds)
+}
+function onTranslationSettingsUpdated(event: Event) {
+  const settings = (event as CustomEvent<TranslationSettings>).detail
+  if (settings) applyTranslationSettings(settings)
+}
+function normalizeDictionaryTerm(value: string) {
+  const term = value.replace(/\s+/g, ' ').trim()
+  if (term.length > 100 || !/^[\p{Script=Latin}\p{M}\p{N}'’.,!?;:()\- ]+$/u.test(term) || !/\p{Script=Latin}/u.test(term)) return ''
+  return term.replace(/^[^\p{Script=Latin}\p{N}]+|[^\p{Script=Latin}\p{N}]+$/gu, '')
+}
+function resetCambridgeResult() {
+  dictionaryRequest++
+  dictionaryBusy.value = false
+  dictionaryData.value = null
+  dictionaryQueried.value = false
+  dictionaryError.value = ''
+}
+async function queryCambridge(value = dictionaryTerm.value) {
+  const term = normalizeDictionaryTerm(value)
+  if (!term) { dictionaryError.value = '请输入英文单词或短语'; return }
+  dictionaryTerm.value = term
+  dictionaryError.value = ''
+  dictionaryQueried.value = true
+  dictionaryData.value = null
+  props.editor.panel = 'dictionary'
+  translationMode.value = 'dictionary'
+  if (!window.scKit?.lookupCambridge) { dictionaryError.value = '剑桥词典页面读取功能仅在桌面应用中可用'; return }
+  const request = ++dictionaryRequest
+  dictionaryBusy.value = true
+  try {
+    const result = await window.scKit.lookupCambridge(term)
+    if (request !== dictionaryRequest) return
+    if (!result.ok || !result.data) throw new Error(result.message || '剑桥词典暂时不可用')
+    dictionaryData.value = result.data
+    if (!result.data.entries.length) dictionaryError.value = `剑桥词典没有找到“${term}”的词条`
+  } catch (reason) {
+    if (request === dictionaryRequest) dictionaryError.value = (reason as Error).message || '读取剑桥词典失败'
+  } finally {
+    if (request === dictionaryRequest) dictionaryBusy.value = false
+  }
+}
+async function openCambridgeOriginal() {
+  const term = normalizeDictionaryTerm(dictionaryTerm.value)
+  if (!term || !window.scKit) return
+  try { await window.scKit.openCambridgeOriginal(term) }
+  catch (reason) { dictionaryError.value = (reason as Error).message || '无法打开剑桥词典原网页' }
+}
+function openCambridge() {
+  props.editor.panel = 'dictionary'
+  translationMode.value = 'dictionary'
+  const term = normalizeDictionaryTerm(dictionarySelection.value) || normalizeDictionaryTerm(dictionaryTerm.value)
+  if (term) { dictionaryTerm.value = term; void queryCambridge(term) }
+  else nextTick(scheduleDictionaryBounds)
+}
+function lookupDictionary(value: string) {
+  const term = normalizeDictionaryTerm(value)
+  if (!term || /\s/.test(term)) return
+  dictionaryTerm.value = term
+  void queryCambridge(term)
+}
+function openTranslation() {
+  props.editor.panel = 'dictionary'
+  const selection = dictionarySelection.value.trim()
+  const word = normalizeDictionaryTerm(selection)
+  if (word && !/\s/.test(word)) { lookupDictionary(word); return }
+  translationMode.value = 'translate'
+  translationSource.value = toEditorText(selection || props.editor.selected?.original || '')
+  translationWebQueried.value = false
+  nextTick(scheduleDictionaryBounds)
+}
+async function translateSelectedText(value = translationSource.value) {
+  const source = toEditorText(value)
+  if (!source.trim()) { translationError.value = '请输入要翻译的文本'; return }
+  props.editor.panel = 'dictionary'
+  translationMode.value = 'translate'
+  translationSource.value = source
+  translationResult.value = ''
+  translationError.value = ''
+  translationApiProvider.value = null
+  if (translationAccessMode.value === 'web') {
+    if (!window.scKit?.translatorView) { translationError.value = '翻译网页仅在桌面应用中嵌入显示。'; return }
+    translationWebQueried.value = true
+    await nextTick()
+    syncEmbeddedViews(source)
+    return
+  }
+  const request = ++translationRequest
+  translationBusy.value = true
+  try {
+    const result = await window.scKit?.translateToChinese(source)
+    if (request !== translationRequest) return
+    if (!result?.ok || !result.data?.text) throw new Error(result?.message || '翻译服务不可用')
+    translationResult.value = result.data.text
+    translationApiProvider.value = result.data.provider
+  } catch (reason) {
+    if (request === translationRequest) translationError.value = (reason as Error).message || '翻译失败'
+  } finally {
+    if (request === translationRequest) translationBusy.value = false
+  }
+}
+defineExpose({ focusTerm, openHistorySearch, lookupDictionary, translateSelectedText })
+function listenDictionaryLayout() {
+  window.addEventListener('resize', scheduleDictionaryBounds)
+  document.addEventListener('scroll', scheduleDictionaryBounds, true)
+}
+onMounted(() => {
+  listenDictionaryLayout()
+  observeBlockingModals()
+  removeAuxCustomizationActionListener = window.scKit?.onAuxCustomizationAction(handleAuxCustomizationAction)
+  window.addEventListener('sckit:translation-settings-updated', onTranslationSettingsUpdated)
+  window.addEventListener('dragend', endDockDrag, true)
+  window.addEventListener('blur', endDockDrag)
+  document.addEventListener('visibilitychange', endDockDrag)
+  document.addEventListener('keydown', cancelDockDragOnEscape)
+  loadTranslationSelection()
+  loadAuxTabPreferences()
+  document.addEventListener('pointerdown', closeAuxCustomizationOnOutside)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('sckit:translation-settings-updated', onTranslationSettingsUpdated)
+  window.removeEventListener('dragend', endDockDrag, true)
+  window.removeEventListener('blur', endDockDrag)
+  document.removeEventListener('visibilitychange', endDockDrag)
+  document.removeEventListener('keydown', cancelDockDragOnEscape)
+  window.removeEventListener('resize', scheduleDictionaryBounds)
+  document.removeEventListener('scroll', scheduleDictionaryBounds, true)
+  document.removeEventListener('pointerdown', closeAuxCustomizationOnOutside)
+  if (dictionaryFrame) cancelAnimationFrame(dictionaryFrame)
+  dictionaryObserver?.disconnect()
+  modalObserver?.disconnect()
+  removeAuxCustomizationActionListener?.()
+  dictionaryRequest++
+  window.scKit?.translatorView({ visible: false, bounds: null })
+  window.scKit?.auxCustomizationOverlay({ visible: false, bounds: null, items: [], theme: {} })
+})
 function historyTranslation(entry: HistoryEntry) {
   let target = entry.target
   if (typeof target === 'string') { try { target = JSON.parse(target) } catch { target = undefined } }
@@ -44,31 +329,433 @@ function historyTranslation(entry: HistoryEntry) {
 const tabs = [
   { id: 'suggestions', label: '建议', icon: Lightbulb }, { id: 'history', label: '历史', icon: History },
   { id: 'terms', label: '术语', icon: BookOpen }, { id: 'quality', label: 'QA', icon: ShieldCheck }, { id: 'comments', label: '评论', icon: MessageSquare },
+  { id: 'dictionary', label: '翻译', icon: BookOpen },
 ] as const
-const visibleTabs = computed(() => props.compact ? [{ id: 'context' as const, label: '上下文' }, ...tabs] : tabs)
+type AuxTabId = typeof tabs[number]['id']
+type DockPanelId = AuxTabId | 'context'
+const defaultTabOrder: AuxTabId[] = tabs.map(tab => tab.id)
+const tabPreferencesKey = 'sckit-aux-panel-preferences'
+const tabOrder = ref<AuxTabId[]>([...defaultTabOrder])
+const visibleTabIds = ref<AuxTabId[]>([...defaultTabOrder])
+const customizationOpen = ref(false)
+watch([customizationOpen, tabOrder, visibleTabIds], () => nextTick(scheduleDictionaryBounds), { deep: true })
+const draggedTab = ref<string | null>(null)
+const dropTargetGroupId = ref<string | null>(null)
+watch(draggedTab, () => nextTick(scheduleDictionaryBounds))
+const customizeDraggedTab = ref<AuxTabId | null>(null)
+const dropTargetTab = ref<AuxTabId | null>(null)
+const preferencesLoaded = ref(false)
+const focusedGroupId = ref('aux-group-root')
+const dockLayout = ref<AuxDockNode>({ kind: 'group', id: 'aux-group-root', tabs: [...defaultTabOrder], active: 'suggestions' })
+const orderedTabs = computed(() => tabOrder.value.map(id => tabs.find(tab => tab.id === id)!))
+const configuredTabs = computed(() => tabOrder.value.filter(id => visibleTabIds.value.includes(id)).map(id => tabs.find(tab => tab.id === id)!))
+const dockTabs = computed<AuxDockTab[]>(() => [
+  ...(props.compact ? [{ id: 'context', label: '上下文', draggable: false }] : []),
+  ...configuredTabs.value.map(tab => ({
+    id: tab.id,
+    label: tab.label,
+    draggable: true,
+    showCount: tab.id === 'suggestions',
+    count: tab.id === 'suggestions' ? props.editor.suggestions.length : tab.id === 'terms' ? props.editor.terms.length : tab.id === 'quality' && props.editor.text ? props.editor.issues.length : 0,
+    warning: tab.id === 'quality',
+  })),
+])
+const orderedDockIds = computed<DockPanelId[]>(() => [...(props.compact ? ['context' as const] : []), ...configuredTabs.value.map(tab => tab.id)])
+function isAuxTabId(value: unknown): value is AuxTabId { return typeof value === 'string' && tabs.some(tab => tab.id === value) }
+function isDockPanelId(value: unknown): value is DockPanelId { return isAuxTabId(value) ? visibleTabIds.value.includes(value) : props.compact && value === 'context' }
+function freshDockId(prefix: string) { return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}` }
+function normalizeDockSizes(values: number[], count: number) {
+  const usable = Array.from({ length: count }, (_, index) => Number.isFinite(values[index]) && values[index]! > 0 ? values[index]! : 1)
+  const total = usable.reduce((sum, value) => sum + value, 0) || count
+  return usable.map(value => value / total * 100)
+}
+function normalizeDockNode(raw: any, seenPanels: Set<string>, seenGroups: Set<string>, depth = 0): AuxDockNode | null {
+  if (!raw || typeof raw !== 'object' || depth > 10) return null
+  let id = typeof raw.id === 'string' && raw.id ? raw.id : freshDockId(raw.kind === 'split' ? 'split' : 'group')
+  if (seenGroups.has(id)) id = freshDockId('group')
+  seenGroups.add(id)
+  if (raw.kind === 'group') {
+    const groupTabs: string[] = []
+    if (Array.isArray(raw.tabs)) for (const value of raw.tabs) {
+      if (isDockPanelId(value) && !seenPanels.has(value)) { groupTabs.push(value); seenPanels.add(value) }
+    }
+    if (!groupTabs.length) return null
+    return { kind: 'group', id, tabs: groupTabs, active: groupTabs.includes(raw.active) ? raw.active : groupTabs[0]! }
+  }
+  if (raw.kind !== 'split' || !['horizontal', 'vertical'].includes(raw.direction) || !Array.isArray(raw.children)) return null
+  const children: AuxDockNode[] = [], sizes: number[] = []
+  raw.children.slice(0, 8).forEach((child: unknown, index: number) => {
+    const normalized = normalizeDockNode(child, seenPanels, seenGroups, depth + 1)
+    if (normalized) { children.push(normalized); sizes.push(Array.isArray(raw.sizes) ? Number(raw.sizes[index]) : 1) }
+  })
+  if (!children.length) return null
+  if (children.length === 1) return children[0]!
+  return { kind: 'split', id, direction: raw.direction, children, sizes: normalizeDockSizes(sizes, children.length) }
+}
+function makeDefaultDockLayout(): AuxDockNode {
+  const ids = orderedDockIds.value
+  const active = ids.includes(props.editor.panel as DockPanelId) ? props.editor.panel as DockPanelId : ids[0] || 'suggestions'
+  return { kind: 'group', id: freshDockId('group'), tabs: [...ids], active }
+}
+function sortDockNode(node: AuxDockNode): AuxDockNode {
+  if (node.kind === 'group') {
+    const order = orderedDockIds.value
+    return { ...node, tabs: [...node.tabs].sort((left, right) => order.indexOf(left as DockPanelId) - order.indexOf(right as DockPanelId)) }
+  }
+  return { ...node, children: node.children.map(sortDockNode) }
+}
+function appendPanelToGroup(node: AuxDockNode, groupId: string, panel: DockPanelId, activate = false): boolean {
+  if (node.kind === 'group') {
+    if (node.id !== groupId) return false
+    if (!node.tabs.includes(panel)) node.tabs.push(panel)
+    if (activate) node.active = panel
+    return true
+  }
+  for (const child of node.children) if (appendPanelToGroup(child, groupId, panel, activate)) return true
+  return false
+}
+function appendPanelToFirstGroup(node: AuxDockNode, panel: DockPanelId): boolean {
+  if (node.kind === 'group') { if (!node.tabs.includes(panel)) node.tabs.push(panel); return true }
+  return node.children.length ? appendPanelToFirstGroup(node.children[0]!, panel) : false
+}
+function findDockGroup(node: AuxDockNode, groupId: string): Extract<AuxDockNode, { kind: 'group' }> | null {
+  if (node.kind === 'group') return node.id === groupId ? node : null
+  for (const child of node.children) { const found = findDockGroup(child, groupId); if (found) return found }
+  return null
+}
+function findPanelGroup(node: AuxDockNode, panel: string): Extract<AuxDockNode, { kind: 'group' }> | null {
+  if (node.kind === 'group') return node.tabs.includes(panel) ? node : null
+  for (const child of node.children) { const found = findPanelGroup(child, panel); if (found) return found }
+  return null
+}
+function setGroupActive(node: AuxDockNode, groupId: string, panel: DockPanelId): boolean {
+  const group = findDockGroup(node, groupId)
+  if (!group || !group.tabs.includes(panel)) return false
+  group.active = panel
+  return true
+}
+function removePanelFromDock(node: AuxDockNode, panel: string): AuxDockNode | null {
+  if (node.kind === 'group') {
+    const remaining = node.tabs.filter(id => id !== panel)
+    if (!remaining.length) return null
+    return { ...node, tabs: remaining, active: node.active === panel ? remaining[0]! : node.active }
+  }
+  const children: AuxDockNode[] = [], sizes: number[] = []
+  node.children.forEach((child, index) => {
+    const next = removePanelFromDock(child, panel)
+    if (next) { children.push(next); sizes.push(node.sizes[index] || 1) }
+  })
+  if (!children.length) return null
+  if (children.length === 1) return children[0]!
+  return { ...node, children, sizes: normalizeDockSizes(sizes, children.length) }
+}
+function splitGroupAt(node: AuxDockNode, groupId: string, added: Extract<AuxDockNode, { kind: 'group' }>, zone: AuxDockZone): { node: AuxDockNode; found: boolean } {
+  if (node.kind === 'group') {
+    if (node.id !== groupId) return { node, found: false }
+    const horizontal = zone === 'left' || zone === 'right'
+    const before = zone === 'left' || zone === 'top'
+    return { node: { kind: 'split', id: freshDockId('split'), direction: horizontal ? 'horizontal' : 'vertical', sizes: [50, 50], children: before ? [added, node] : [node, added] }, found: true }
+  }
+  for (let index = 0; index < node.children.length; index++) {
+    const result = splitGroupAt(node.children[index]!, groupId, added, zone)
+    if (result.found) {
+      const children = [...node.children]
+      children[index] = result.node
+      return { node: { ...node, children }, found: true }
+    }
+  }
+  return { node, found: false }
+}
+function refreshActiveDockPanels() {
+  const active: string[] = []
+  const visit = (node: AuxDockNode) => { if (node.kind === 'group') active.push(node.active); else node.children.forEach(visit) }
+  visit(dockLayout.value)
+  activeDockPanels.value = active
+}
+function appendMissingDockPanels() {
+  for (const panel of orderedDockIds.value) if (!findPanelGroup(dockLayout.value, panel)) appendPanelToFirstGroup(dockLayout.value, panel)
+  dockLayout.value = sortDockNode(dockLayout.value)
+}
+function loadAuxTabPreferences() {
+  if (layoutPreview) {
+    try {
+      const saved = JSON.parse(localStorage.getItem(tabPreferencesKey) || 'null')
+      if (saved?.layout?.id === 'layout-preview-root') localStorage.removeItem(tabPreferencesKey)
+    } catch { /* Preview layout does not depend on browser storage. */ }
+    tabOrder.value = [...defaultTabOrder]
+    visibleTabIds.value = [...defaultTabOrder]
+    dockLayout.value = {
+      kind: 'split', id: 'layout-preview-root', direction: 'horizontal', sizes: [50, 50],
+      children: [
+        { kind: 'group', id: 'layout-preview-left', tabs: ['suggestions', 'history', 'terms'], active: 'suggestions' },
+        { kind: 'group', id: 'layout-preview-right', tabs: ['quality', 'comments', 'dictionary'], active: 'quality' },
+      ],
+    }
+    appendMissingDockPanels()
+    preferencesLoaded.value = true
+    refreshActiveDockPanels()
+    return
+  }
+  let saved: any = null
+  try {
+    saved = JSON.parse(localStorage.getItem(tabPreferencesKey) || 'null')
+    if (saved?.layout?.id === 'layout-preview-root') {
+      localStorage.removeItem(tabPreferencesKey)
+      saved = null
+    }
+    if (saved?.version === 1) {
+      const order: AuxTabId[] = []
+      if (Array.isArray(saved.order)) for (const value of saved.order) if (isAuxTabId(value) && !order.includes(value)) order.push(value)
+      tabOrder.value = [...order, ...defaultTabOrder.filter(id => !order.includes(id))]
+      const visible: AuxTabId[] = []
+      if (Array.isArray(saved.visible)) for (const value of saved.visible) if (isAuxTabId(value) && !visible.includes(value)) visible.push(value)
+      visibleTabIds.value = Array.isArray(saved.visible) ? visible : [...defaultTabOrder]
+      if (!visibleTabIds.value.length) visibleTabIds.value = [...defaultTabOrder]
+    }
+  } catch { /* Keep the default tabs when browser storage is unavailable or invalid. */ }
+  const seenPanels = new Set<string>(), seenGroups = new Set<string>()
+  dockLayout.value = normalizeDockNode(saved?.layout, seenPanels, seenGroups) || makeDefaultDockLayout()
+  appendMissingDockPanels()
+  if (props.editor.panel !== 'context' && !visibleTabIds.value.includes(props.editor.panel as AuxTabId)) props.editor.panel = configuredTabs.value[0]?.id || 'suggestions'
+  if (props.editor.panel === 'context' && !props.compact) props.editor.panel = configuredTabs.value[0]?.id || 'suggestions'
+  const currentGroup = findPanelGroup(dockLayout.value, props.editor.panel)
+  if (currentGroup) { currentGroup.active = props.editor.panel; focusedGroupId.value = currentGroup.id }
+  else if (props.editor.panel !== 'context') { appendPanelToFirstGroup(dockLayout.value, props.editor.panel); const group = findPanelGroup(dockLayout.value, props.editor.panel); if (group) { group.active = props.editor.panel; focusedGroupId.value = group.id } }
+  if (!findDockGroup(dockLayout.value, focusedGroupId.value)) focusedGroupId.value = findPanelGroup(dockLayout.value, props.editor.panel)?.id || 'aux-group-root'
+  preferencesLoaded.value = true
+  refreshActiveDockPanels()
+  saveAuxTabPreferences()
+}
+function saveAuxTabPreferences() {
+  if (layoutPreview) return
+  try { localStorage.setItem(tabPreferencesKey, JSON.stringify({ version: 1, order: tabOrder.value, visible: visibleTabIds.value, layout: dockLayout.value })) }
+  catch { /* Keep tab preferences for this session when browser storage is unavailable. */ }
+}
+function toggleAuxTab(id: AuxTabId) {
+  if (visibleTabIds.value.includes(id)) {
+    if (visibleTabIds.value.length <= 1) return
+    visibleTabIds.value = visibleTabIds.value.filter(value => value !== id)
+    dockLayout.value = removePanelFromDock(dockLayout.value, id) || makeDefaultDockLayout()
+    if (props.editor.panel === id) props.editor.panel = configuredTabs.value[0]?.id || 'suggestions'
+  } else {
+    visibleTabIds.value = [...visibleTabIds.value, id]
+    if (!appendPanelToGroup(dockLayout.value, focusedGroupId.value, id)) appendPanelToFirstGroup(dockLayout.value, id)
+  }
+  appendMissingDockPanels()
+  refreshActiveDockPanels()
+  saveAuxTabPreferences()
+}
+function reorderAuxTab(id: AuxTabId, targetId: AuxTabId) {
+  if (id === targetId) return
+  const next = [...tabOrder.value]
+  const fromIndex = next.indexOf(id), targetIndex = next.indexOf(targetId)
+  if (fromIndex < 0 || targetIndex < 0) return
+  next.splice(fromIndex, 1)
+  next.splice(fromIndex < targetIndex ? targetIndex - 1 : targetIndex, 0, id)
+  tabOrder.value = next
+  dockLayout.value = sortDockNode(dockLayout.value)
+  saveAuxTabPreferences()
+}
+function moveAuxTab(id: AuxTabId, direction: -1 | 1) {
+  const index = tabOrder.value.indexOf(id), nextIndex = index + direction
+  if (index < 0 || nextIndex < 0 || nextIndex >= tabOrder.value.length) return
+  const next = [...tabOrder.value]
+  ;[next[index], next[nextIndex]] = [next[nextIndex]!, next[index]!]
+  tabOrder.value = next
+  dockLayout.value = sortDockNode(dockLayout.value)
+  saveAuxTabPreferences()
+}
+function startCustomizeDrag(event: DragEvent, id: AuxTabId) {
+  customizeDraggedTab.value = id
+  if (event.dataTransfer) { event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', id) }
+}
+function dropCustomizeTab(event: DragEvent, targetId: AuxTabId) {
+  event.preventDefault()
+  const sourceId = customizeDraggedTab.value || (event.dataTransfer?.getData('text/plain') as AuxTabId | undefined)
+  if (sourceId && isAuxTabId(sourceId)) reorderAuxTab(sourceId, targetId)
+  customizeDraggedTab.value = null
+  dropTargetTab.value = null
+}
+function handleDockDrop(value: { panel: string; groupId: string; zone: AuxDockZone }) {
+  const panel = value.panel
+  if (!isAuxTabId(panel) || !visibleTabIds.value.includes(panel)) return
+  const source = findPanelGroup(dockLayout.value, panel)
+  if (!source) return
+  if (value.zone === 'center') {
+    if (source.id === value.groupId) setGroupActive(dockLayout.value, value.groupId, panel)
+    else {
+      const remaining = removePanelFromDock(dockLayout.value, panel)
+      if (!remaining || !appendPanelToGroup(remaining, value.groupId, panel, true)) return
+      dockLayout.value = remaining
+    }
+    focusedGroupId.value = value.groupId
+  } else {
+    if (source.id === value.groupId && source.tabs.length <= 1) return
+    const remaining = removePanelFromDock(dockLayout.value, panel)
+    if (!remaining) return
+    const group: Extract<AuxDockNode, { kind: 'group' }> = { kind: 'group', id: freshDockId('group'), tabs: [panel], active: panel }
+    const result = splitGroupAt(remaining, value.groupId, group, value.zone)
+    if (!result.found) return
+    dockLayout.value = result.node
+    focusedGroupId.value = group.id
+  }
+  props.editor.panel = panel
+  dockLayout.value = sortDockNode(dockLayout.value)
+  refreshActiveDockPanels()
+  saveAuxTabPreferences()
+}
+function selectDockPanel(panel: string, groupId: string) {
+  if (!isDockPanelId(panel) || !setGroupActive(dockLayout.value, groupId, panel)) return
+  focusedGroupId.value = groupId
+  props.editor.panel = panel
+  refreshActiveDockPanels()
+  saveAuxTabPreferences()
+}
+function resizeDockSplit(value: { splitId: string; sizes: number[] }) {
+  const visit = (node: AuxDockNode): boolean => {
+    if (node.kind === 'group') return false
+    if (node.id === value.splitId) { node.sizes = normalizeDockSizes(value.sizes, node.children.length); return true }
+    return node.children.some(visit)
+  }
+  visit(dockLayout.value)
+  saveAuxTabPreferences()
+}
+function syncEditorPanel(panel: string) {
+  if (panel === 'context' && !props.compact) { props.editor.panel = configuredTabs.value[0]?.id || 'suggestions'; return }
+  if (isAuxTabId(panel) && !visibleTabIds.value.includes(panel)) visibleTabIds.value = [...visibleTabIds.value, panel]
+  if (!isDockPanelId(panel)) return
+  let group = findPanelGroup(dockLayout.value, panel)
+  if (!group) {
+    if (!appendPanelToGroup(dockLayout.value, focusedGroupId.value, panel)) appendPanelToFirstGroup(dockLayout.value, panel)
+    group = findPanelGroup(dockLayout.value, panel)
+  }
+  if (group) { group.active = panel; focusedGroupId.value = group.id }
+  appendMissingDockPanels()
+  refreshActiveDockPanels()
+  saveAuxTabPreferences()
+}
+watch(() => props.editor.panel, panel => { if (preferencesLoaded.value) syncEditorPanel(panel) }, { flush: 'sync' })
+watch(() => props.compact, () => {
+  if (!preferencesLoaded.value) return
+  if (!props.compact) dockLayout.value = removePanelFromDock(dockLayout.value, 'context') || makeDefaultDockLayout()
+  appendMissingDockPanels()
+  if (props.editor.panel === 'context' && !props.compact) props.editor.panel = configuredTabs.value[0]?.id || 'suggestions'
+  refreshActiveDockPanels()
+  saveAuxTabPreferences()
+})
+function beginDockDrag(panel: string, groupId: string) {
+  if (!isAuxTabId(panel)) return
+  draggedTab.value = panel
+  dropTargetGroupId.value = groupId
+  customizationOpen.value = false
+}
+function updateDockDropTarget(groupId: string) {
+  if (draggedTab.value) dropTargetGroupId.value = groupId
+}
+function clearDockDropTarget(groupId: string) {
+  if (dropTargetGroupId.value === groupId) dropTargetGroupId.value = null
+}
+function endDockDrag() {
+  draggedTab.value = null
+  dropTargetGroupId.value = null
+}
+function cancelDockDragOnEscape(event: KeyboardEvent) {
+  if (event.key === 'Escape' && draggedTab.value) endDockDrag()
+}
+function updateDockFocus(groupId: string) {
+  focusedGroupId.value = groupId
+  const group = findDockGroup(dockLayout.value, groupId)
+  if (group && isDockPanelId(group.active) && props.editor.panel !== group.active) props.editor.panel = group.active
+}
+function closeAuxCustomizationOnOutside(event: PointerEvent) {
+  if (customizationOpen.value && !auxRoot.value?.contains(event.target as Node)) customizationOpen.value = false
+}
+function handleAuxCustomizationAction(action: AuxCustomizationAction) {
+  if (action.type === 'dock') {
+    if (isAuxTabId(action.panel) && visibleTabIds.value.includes(action.panel)) handleDockDrop({ panel: action.panel, groupId: action.groupId, zone: action.zone })
+    endDockDrag()
+    return
+  }
+  if (!customizationOpen.value) return
+  if (action.type === 'close') { customizationOpen.value = false; return }
+  if (!isAuxTabId(action.id)) return
+  if (action.type === 'toggle') toggleAuxTab(action.id)
+  else if (action.type === 'move') moveAuxTab(action.id, action.direction)
+  else if (action.type === 'reorder' && isAuxTabId(action.targetId)) reorderAuxTab(action.id, action.targetId)
+}
 </script>
 <template>
   <aside ref="auxRoot" class="aux-panel" aria-label="翻译辅助面板" @keydown="searchKeydown">
-    <div class="aux-scroll">
-    <nav class="aux-tabs" aria-label="辅助面板标签">
-      <button v-for="tab in visibleTabs" :key="tab.id" :class="{ active: editor.panel === tab.id }" :aria-pressed="editor.panel === tab.id" @click="editor.panel = tab.id"><span>{{ tab.label }}</span><span v-if="tab.id === 'suggestions' && editor.panel === 'suggestions' && editor.suggestions.length" class="tab-count">{{ editor.suggestions.length }}</span><span v-if="tab.id === 'terms' && editor.terms.length" class="tab-count">{{ editor.terms.length }}</span><span v-if="tab.id === 'quality' && editor.text && editor.issues.length" class="tab-count warning">{{ editor.issues.length }}</span></button>
-    </nav>
-      <TermPanel ref="termPanel" v-show="editor.panel === 'terms'" :editor="editor" @insert="emit('insert', $event)" />
-      <QualityPanel v-show="editor.panel === 'quality'" :editor="editor" @insert="emit('insert', $event)" @locate="emit('locate', $event)" />
-      <Transition name="panel" mode="out-in"><div v-show="!['terms', 'quality'].includes(editor.panel)" :key="editor.panel" class="aux-content">
-      <template v-if="editor.panel === 'context'"><slot name="context" /></template>
-      <div v-else-if="panelBusy && !panelHasData && editor.panel === 'history'" class="panel-loading"><LoadingIndicator :size="24" label="正在获取辅助信息" /><span>正在获取{{ tabs.find(tab => tab.id === editor.panel)?.label }}…</span></div>
-      <div v-else-if="panelError && !panelBusy && editor.panel === 'history'" class="panel-error" role="alert"><TriangleAlert :size="22" /><p>{{ panelError }}</p><button class="button" @click="retryPanel"><RotateCw :size="14" />重新获取</button></div>
-      <template v-else-if="editor.panel === 'suggestions'">
+    <AuxDockLayout class="aux-dock-layout" :node="dockLayout" :tabs="dockTabs" :focused-group-id="focusedGroupId" :dragging-tab="draggedTab" :drop-target-group-id="dropTargetGroupId" :customization-open="customizationOpen" @select="selectDockPanel" @focus="updateDockFocus" @drag-start="beginDockDrag" @drag-enter="updateDockDropTarget" @drag-leave="clearDockDropTarget" @drag-end="endDockDrag" @dock="handleDockDrop" @resize="resizeDockSplit" @customize="customizationOpen = !customizationOpen">
+      <template #panel="{ panel }">
+      <section v-if="panel === 'dictionary'" class="cambridge-panel" :class="{ 'translation-web-panel': translationMode === 'translate' && translationAccessMode === 'web', 'translation-api-panel': translationMode === 'translate' && translationAccessMode !== 'web' }" aria-label="翻译模块">
+        <nav class="translation-mode-tabs" aria-label="翻译方式"><button :class="{ active: translationMode === 'translate' }" :aria-pressed="translationMode === 'translate'" @click="translationMode = 'translate'">文本翻译</button><button :class="{ active: translationMode === 'dictionary' }" :aria-pressed="translationMode === 'dictionary'" @click="openCambridge()">剑桥字典</button></nav>
+        <template v-if="translationMode === 'dictionary'">
+          <form class="cambridge-search" @submit.prevent="queryCambridge()">
+            <div><input id="cambridge-word" ref="cambridgeSearch" v-model="dictionaryTerm" aria-label="剑桥字典查询" maxlength="100" autocomplete="off" placeholder="例如 example" @input="resetCambridgeResult" /><button class="button compact primary" :disabled="!dictionaryTerm.trim()" type="submit"><Search :size="13" />查询</button></div>
+          </form>
+          <div class="cambridge-result-list" aria-label="剑桥词典释义">
+            <div v-if="dictionaryQueried" class="cambridge-result-toolbar">
+              <div><strong>{{ dictionaryData?.word || dictionaryTerm.trim() }}</strong><div class="cambridge-pronunciations"><span v-if="dictionaryData?.ukPronunciation">英 {{ dictionaryData.ukPronunciation }}</span><span v-if="dictionaryData?.usPronunciation">美 {{ dictionaryData.usPronunciation }}</span></div></div>
+              <button class="button compact cambridge-original-button" type="button" title="在浏览器中打开剑桥词典原网页" @click="openCambridgeOriginal"><ExternalLink :size="13" />原网页</button>
+            </div>
+            <p v-if="dictionaryBusy" class="cambridge-result-note" role="status"><span class="cambridge-loading-status"><LoadingIndicator :size="18" label="正在读取剑桥词典" />正在读取剑桥词典…</span></p>
+            <p v-else-if="dictionaryError" class="sidebar-message error cambridge-result-error" role="alert">{{ dictionaryError }}</p>
+            <template v-else-if="dictionaryData?.entries.length">
+              <section v-for="(entry, entryIndex) in dictionaryData.entries" :key="`${entry.headword}-${entryIndex}`" class="cambridge-entry">
+                <header class="cambridge-entry-heading"><strong>{{ entry.partOfSpeech || '词条' }}</strong><span v-if="entry.grammar">{{ entry.grammar }}</span></header>
+                <section v-for="(sense, senseIndex) in entry.senses" :key="`${sense.guideWord}-${senseIndex}`" class="cambridge-sense">
+                  <h3 v-if="sense.guideWord" class="cambridge-guideword">{{ sense.guideWord }}</h3>
+                  <div v-for="(definition, definitionIndex) in sense.definitions" :key="`${definition.definition}-${definitionIndex}`" class="cambridge-definition">
+                    <div class="cambridge-definition-label"><span v-if="definition.level" class="cambridge-level">{{ definition.level }}</span><span class="cambridge-definition-english">{{ definition.definition }}</span></div>
+                    <strong v-if="definition.translation" class="cambridge-definition-translation">{{ definition.translation }}</strong>
+                    <div v-if="definition.examples.length" class="cambridge-examples"><div v-for="(example, exampleIndex) in definition.examples" :key="exampleIndex" class="cambridge-example"><span>{{ example.english }}</span><small v-if="example.chinese">{{ example.chinese }}</small></div></div>
+                  </div>
+                </section>
+              </section>
+            </template>
+            <p v-else-if="dictionaryQueried && dictionaryData" class="cambridge-result-note">没有找到可展示的释义。</p>
+            <p v-else-if="!editor.desktop" class="cambridge-result-note">词典页面读取和展示仅在桌面应用中可用。</p>
+            <p v-else class="cambridge-result-note">输入英文单词或短语后查询简体中文释义。</p>
+          </div>
+        </template>
+        <template v-else>
+          <div v-if="translationAccessMode === 'web'" class="translation-web-content">
+            <p class="translation-web-note">在编辑区选中文本后右键选择“翻译”，文本会自动发送到 {{ translationProvider === 'google' ? 'Google' : 'DeepL' }} 网页。</p>
+            <div ref="translatorHost" class="cambridge-view-host translation-web-host" :aria-label="translationProvider === 'google' ? 'Google 翻译网页' : 'DeepL 网页翻译'"><p v-if="!editor.desktop" class="cambridge-preview-note">内嵌翻译网页仅在桌面应用中显示。</p></div>
+          </div>
+          <template v-else>
+            <form class="translation-form" @submit.prevent="translateSelectedText()">
+              <label for="translation-source">当前句子或选中的文本</label>
+              <textarea id="translation-source" v-model="translationSource" rows="5" placeholder="输入或从编辑区右键选择文本" />
+              <button class="button compact primary" :disabled="translationBusy || !translationSource.trim()" type="submit"><LoadingIndicator v-if="translationBusy" :size="13" label="正在翻译" /><Languages v-else :size="14" />{{ translationBusy ? '翻译中…' : '通过 API 翻译' }}</button>
+            </form>
+          <section class="translation-result" aria-live="polite">
+            <div class="translation-result-heading"><strong>中文译文</strong><span v-if="translationApiProvider" class="subtle">{{ translationApiProvider === 'google' ? 'Google API' : 'DeepL API' }}</span></div>
+            <div v-if="translationBusy" class="panel-loading"><LoadingIndicator :size="20" label="正在翻译文本" /><span>正在翻译到简体中文…</span></div>
+            <p v-else-if="translationError" class="sidebar-message error" role="alert">{{ translationError }}</p>
+            <p v-else-if="translationResult" class="translation-result-text">{{ translationResult }}</p>
+            <p v-else class="subtle translation-placeholder">右键编辑区中的选中文本，可在此通过 API 翻译成简体中文。单个英文单词会打开剑桥英汉词典；API 密钥和代理在「设置 → 翻译服务」中配置。</p>
+          </section>
+          </template>
+        </template>
+      </section>
+      <TermPanel v-if="panel === 'terms'" ref="termPanel" :editor="editor" @insert="emit('insert', $event)" />
+      <QualityPanel v-if="panel === 'quality'" :editor="editor" @insert="emit('insert', $event)" @locate="emit('locate', $event)" />
+      <Transition name="panel" mode="out-in"><div v-if="!['terms', 'quality', 'dictionary'].includes(panel)" :key="panel" class="aux-content">
+      <template v-if="panel === 'context'"><slot name="context" /></template>
+      <div v-else-if="panelBusyFor(panel) && !panelHasDataFor(panel) && panel === 'history'" class="panel-loading"><LoadingIndicator :size="24" label="正在获取辅助信息" /><span>正在获取{{ tabs.find(tab => tab.id === panel)?.label }}…</span></div>
+      <div v-else-if="panelErrorFor(panel) && !panelBusyFor(panel) && panel === 'history'" class="panel-error" role="alert"><TriangleAlert :size="22" /><p>{{ panelErrorFor(panel) }}</p><button class="button" @click="retryPanel(panel)"><RotateCw :size="14" />重新获取</button></div>
+      <template v-else-if="panel === 'suggestions'">
         <div class="panel-heading suggestion-heading"><span>{{ editor.suggestions.length }} 可用建议</span><button class="button compact" :disabled="!editor.selected" @click="lookup()">词汇索引</button></div>
         <TranslationMemorySearch ref="memorySearch" :editor="editor" @replace="emit('replace', $event)">
-          <LoadingRegion :busy="panelBusy" :initial="!editor.suggestions.length" label="正在获取建议…">
-          <div v-if="panelError && !panelBusy" class="panel-error" role="alert"><TriangleAlert :size="22" /><p>{{ panelError }}</p><button class="button" @click="retryPanel"><RotateCw :size="14" />重新获取</button></div>
+          <LoadingRegion :busy="panelBusyFor(panel)" :initial="!editor.suggestions.length" label="正在获取建议…">
+          <div v-if="panelErrorFor(panel) && !panelBusyFor(panel)" class="panel-error" role="alert"><TriangleAlert :size="22" /><p>{{ panelErrorFor(panel) }}</p><button class="button" @click="retryPanel(panel)"><RotateCw :size="14" />重新获取</button></div>
           <template v-else>
         <div v-if="!editor.suggestions.length" class="empty-state"><Lightbulb :size="34" :stroke-width="1.25" /><h3>暂无相似文本</h3></div>
         <article v-for="(suggestion, index) in editor.suggestions" :key="suggestion.id" class="suggestion-card">
           <div class="match-badge" title="本地计算的完整原文 Levenshtein 相似度"><strong>{{ matching(suggestion.localMatching ?? 0) }}</strong><span>匹配</span></div>
-          <div class="suggestion-body">
+          <div class="suggestion-body" @contextmenu="emit('selectionContextMenu', $event)">
             <div class="suggestion-translation">{{ suggestion.translation.replaceAll('\\n', '\n') }}</div>
             <SuggestionSource :original="suggestion.original" :current="editor.selected?.original || ''" :show-diff="!plainSources.includes(suggestion.id)" />
             <div class="suggestion-meta"><span v-if="suggestion.updatedAt">于 {{ displayDate(suggestion.updatedAt) }} </span><span v-if="suggestion.user">由 {{ suggestion.user.nickname || suggestion.user.username }} </span><span>来自 </span><button class="suggestion-origin" :disabled="!editor.desktop" :title="suggestion.key" @click="openSuggestion(suggestion)">{{ suggestion.project?.name || editor.project.name }}<span v-if="suggestion.file?.name"> / {{ suggestion.file.name }}</span></button><span> · {{ editor.project.dest }}</span><div v-if="!suggestion.file?.name" class="suggestion-key" :title="suggestion.key">{{ suggestion.key }}</div><button class="suggestion-occurrences" @click="lookup(suggestion)">显示所有出现的情况</button></div>
@@ -80,7 +767,7 @@ const visibleTabs = computed(() => props.compact ? [{ id: 'context' as const, la
           </LoadingRegion>
         </TranslationMemorySearch>
       </template>
-      <template v-else-if="editor.panel === 'history'">
+      <template v-else-if="panel === 'history'">
         <div class="panel-heading"><span>词条历史</span><span class="subtle">{{ editor.history.length }} 条记录</span></div>
         <div v-if="!editor.history.length" class="empty-state"><History :size="34" :stroke-width="1.25" /><h3>还没有修改记录</h3></div>
         <article v-for="(entry, index) in editor.history" :key="entry.id || index" class="history-card"><div class="history-dot"></div><div class="history-body"><div class="history-heading"><strong>{{ entry.user?.nickname || entry.user?.username || '项目成员' }}</strong><time>{{ displayDate(entry.createdAt) }}</time></div><p class="subtle">{{ entry.operation || '更新词条' }}<span v-if="entry.stage !== undefined"> · {{ stageLabels[entry.stage] }}</span></p><div v-if="historyTranslation(entry)" class="history-text">{{ historyTranslation(entry) }}</div></div></article>
@@ -92,7 +779,20 @@ const visibleTabs = computed(() => props.compact ? [{ id: 'context' as const, la
         <button v-if="editor.selected" class="button comment-link" :disabled="!editor.desktop" @click="openComments">在 ParaTranz 中查看 <MessageSquare :size="14" /></button>
       </template>
       </div></Transition>
-    </div>
+      </template>
+    </AuxDockLayout>
+    <section v-if="customizationOpen" ref="customizationBounds" class="aux-customize-popover" :style="editor.desktop ? { visibility: 'hidden', pointerEvents: 'none' } : undefined" :aria-hidden="editor.desktop ? 'true' : undefined" :inert="editor.desktop" role="dialog" aria-label="自定义右侧栏" @click.stop @keydown.esc.stop="customizationOpen = false">
+      <header><strong>自定义右侧栏</strong><button class="icon-button small" aria-label="关闭自定义面板" @click="customizationOpen = false"><X :size="15" /></button></header>
+      <p>勾选要显示的模块；拖动标签到分栏边缘可左右或上下拆分。</p>
+      <ol class="aux-customize-list">
+        <li v-for="(tab, index) in orderedTabs" :key="tab.id" :class="{ dragging: customizeDraggedTab === tab.id, 'drop-target': dropTargetTab === tab.id }" draggable="true" @dragstart="startCustomizeDrag($event, tab.id)" @dragover.prevent="dropTargetTab = tab.id" @dragleave="dropTargetTab === tab.id && (dropTargetTab = null)" @drop="dropCustomizeTab($event, tab.id)" @dragend="customizeDraggedTab = null; dropTargetTab = null">
+          <span class="aux-customize-grip" aria-hidden="true"><GripVertical :size="14" /></span>
+          <label><input type="checkbox" :checked="visibleTabIds.includes(tab.id)" :disabled="visibleTabIds.includes(tab.id) && visibleTabIds.length <= 1" @change="toggleAuxTab(tab.id)" /><span>{{ tab.label }}</span></label>
+          <button class="icon-button small" :aria-label="`将${tab.label}移到上方`" :disabled="index === 0" @click="moveAuxTab(tab.id, -1)"><ChevronUp :size="14" /></button>
+          <button class="icon-button small" :aria-label="`将${tab.label}移到下方`" :disabled="index === tabOrder.length - 1" @click="moveAuxTab(tab.id, 1)"><ChevronDown :size="14" /></button>
+        </li>
+      </ol>
+    </section>
     <div class="aux-bottom"><span class="online-dot" :class="{ offline: !editor.connected || !editor.sessionInfo.authenticated }"></span>{{ editor.connected && editor.sessionInfo.authenticated ? '来自 ParaTranz' : '未连接' }}</div>
     <Teleport to=".app-shell"><Transition name="dialog"><ConcordanceDialog v-if="concordance" :editor="editor" v-bind="concordance" @close="concordance = null" @use="emit('replace', $event)" /></Transition></Teleport>
   </aside>

@@ -2,6 +2,7 @@ import type { Term } from '~/types/editor'
 import { toEditorText } from '~/utils/translationText'
 
 export interface TermTextPart { text: string; terms?: Term[] }
+export interface SourceTermReplacement { source: string; translation: string; term: Term }
 const wordCharacter = /[\p{Script=Latin}\p{N}_]/u
 const escapePattern = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
@@ -36,6 +37,27 @@ export function highlightTerms(text: string, terms: Term[], side: 'source' | 'tr
   }
   if (start < text.length) result.push({ text: text.slice(start) })
   return result.length ? result : [{ text }]
+}
+
+export function replaceSourceTerms(text: string, terms: Term[]) {
+  const replacements: SourceTermReplacement[] = []
+  const replacePlainText = (value: string) => highlightTerms(value, terms).map(part => {
+    const term = part.terms?.[0]
+    if (!term?.translation.trim()) return part.text
+    const translation = toEditorText(term.translation)
+    replacements.push({ source: part.text, translation, term })
+    return translation
+  }).join('')
+  const result: string[] = []
+  const protectedPattern = /<\/?[A-Za-z][^>]*>|~\w+\([^)]*\)|\\n|\{\{[^}]+\}\}|\{\w+\}|%(?:\d+\$)?[sdif]/g
+  let start = 0
+  for (const match of text.matchAll(protectedPattern)) {
+    if (match.index! > start) result.push(replacePlainText(text.slice(start, match.index)))
+    result.push(match[0])
+    start = match.index! + match[0].length
+  }
+  if (start < text.length) result.push(replacePlainText(text.slice(start)))
+  return { text: result.join(''), replacements }
 }
 
 export function highlightTranslatedTerms(text: string, terms: Term[]): TermTextPart[] {

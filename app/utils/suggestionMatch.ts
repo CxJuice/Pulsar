@@ -1,8 +1,6 @@
 import leven from 'leven'
 import type { Suggestion } from '~/types/editor'
 
-const MIN_SCORE = 0.7
-
 // Standard normalized Levenshtein, with unit insertion/deletion/substitution costs.
 // https://rapidfuzz.github.io/RapidFuzz/Usage/distance/Levenshtein.html
 // Distance implementation: https://github.com/sindresorhus/leven
@@ -13,10 +11,9 @@ export function sourceSimilarity(original: string, current: string): number {
 }
 
 export function prepareSuggestions(candidates: Suggestion[], current: string): Suggestion[] {
-  return candidates.flatMap(suggestion => {
-    if (!current.trim() || typeof suggestion.original !== 'string' || !suggestion.original.trim() ||
-      typeof suggestion.translation !== 'string' || !suggestion.translation.trim()) return []
-    return [{ ...suggestion, localMatching: sourceSimilarity(suggestion.original, current) }]
-  }).filter(suggestion => suggestion.localMatching >= MIN_SCORE)
+  return candidates.map(suggestion => ({
+    ...suggestion,
+    localMatching: sourceSimilarity(typeof suggestion.original === 'string' ? suggestion.original : '', current),
+  }))
     .sort((a, b) => b.localMatching - a.localMatching || a.id - b.id)
 }

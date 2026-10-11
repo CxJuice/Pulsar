@@ -6,9 +6,8 @@
 .loading-indicator svg { width:100%;height:100%;animation:loading-rotate 1.4s linear infinite; }
 .loading-indicator circle { fill:none;stroke:currentColor;stroke-width:2.5; }
 .loading-track { opacity:.12; }
-.loading-arc { stroke-linecap:round;stroke-dasharray:36 57;animation:loading-sweep 1.4s ease-in-out infinite; }
+.loading-arc { stroke-linecap:round;stroke-dasharray:36 57; }
 @keyframes loading-rotate { to { transform:rotate(360deg); } }
-@keyframes loading-sweep { 0%,100% { stroke-dasharray:8 57;stroke-dashoffset:0; } 50% { stroke-dasharray:42 57;stroke-dashoffset:-14; } }
 .loading-region { position:relative;min-height:0; }
 .loading-region-content { transition:opacity var(--motion-fast-effects-duration) var(--motion-fast-effects-easing); }
 .loading-retained { opacity:.64; }

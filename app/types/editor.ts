@@ -43,6 +43,51 @@ export interface MemoryPage {
 export interface Draft { translation: string; stage: number; updatedAt: string }
 export interface SessionStatus { authenticated: boolean; mode: string; user?: TinyUser | null }
 export interface ServiceResult<T = unknown> { ok: boolean; data?: T; status?: number; message?: string }
+export type TranslationProvider = 'google' | 'deepl'
+export type TranslationMode = 'web' | 'api'
+export type TranslationProxyMode = 'system' | 'direct' | 'http' | 'socks5'
+export interface TranslationSettings {
+  provider: TranslationProvider; mode: TranslationMode; deeplPlan: 'free' | 'pro'
+  proxy: { mode: TranslationProxyMode; host: string; port: number }
+  googleConfigured: boolean; deeplConfigured: boolean
+}
+export interface TranslationSettingsUpdate {
+  provider: TranslationProvider; mode: TranslationMode; deeplPlan: 'free' | 'pro'
+  proxy: { mode: TranslationProxyMode; host: string; port: number }
+  googleApiKey?: string | null; deeplApiKey?: string | null
+  clearGoogleApiKey?: boolean; clearDeepLApiKey?: boolean
+}
+export interface TranslationSelectionUpdate { provider?: TranslationProvider; mode?: TranslationMode }
+export interface AuxCustomizationOverlayItem { id: string; label: string; checked: boolean; disabled: boolean; first: boolean; last: boolean }
+export interface AuxCustomizationOverlayState {
+  visible: boolean
+  mode?: 'customize' | 'dock'
+  bounds: { x: number; y: number; width: number; height: number } | null
+  items: AuxCustomizationOverlayItem[]
+  theme: Record<string, string>
+  draggedPanel?: string | null
+  groupId?: string | null
+}
+export type AuxCustomizationAction =
+  | { type: 'close' }
+  | { type: 'toggle'; id: string }
+  | { type: 'move'; id: string; direction: -1 | 1 }
+  | { type: 'reorder'; id: string; targetId: string }
+  | { type: 'dock'; panel: string; groupId: string; zone: 'center' | 'left' | 'right' | 'top' | 'bottom' }
+export interface LocalFontData { family: string; fullName?: string; postscriptName?: string; style?: string }
+export interface CambridgeDictionaryData {
+  word: string; url: string; ukPronunciation: string; usPronunciation: string
+  entries: Array<{
+    headword: string; partOfSpeech: string; grammar: string
+    senses: Array<{
+      guideWord: string; partOfSpeech: string; grammar: string
+      definitions: Array<{
+        level: string; definition: string; translation: string
+        examples: Array<{ english: string; chinese: string }>
+      }>
+    }>
+  }>
+}
 export type RequestAction = 'session' | 'projects' | 'project' | 'updateProject' | 'files' | 'file' | 'renameFile' | 'strings' | 'string' | 'suggestions' | 'memory' | 'terms' | 'projectTerms' | 'term' | 'createTerm' | 'updateTerm' | 'deleteTerm' | 'history' | 'save' | 'drafts' | 'draft'
 export interface DesktopBridge {
   presence(target: { projectId: number; stringId: number | null }): Promise<ServiceResult<PresenceState>>
@@ -52,8 +97,17 @@ export interface DesktopBridge {
   connect(token: string, remember: boolean, project: number): Promise<ServiceResult<SessionStatus>>
   login(project: number): Promise<ServiceResult<SessionStatus>>
   disconnect(): Promise<ServiceResult>
+  lookupCambridge(query: string): Promise<ServiceResult<CambridgeDictionaryData>>
+  openCambridgeOriginal(query: string): Promise<void>
+  auxCustomizationOverlay(state: AuxCustomizationOverlayState): void
+  onAuxCustomizationAction(callback: (action: AuxCustomizationAction) => void): () => void
+  getTranslationSettings(): Promise<ServiceResult<TranslationSettings>>
+  saveTranslationSettings(settings: TranslationSettingsUpdate): Promise<ServiceResult<TranslationSettings>>
+  saveTranslationSelection(selection: TranslationSelectionUpdate): Promise<ServiceResult<TranslationSettings>>
+  translateToChinese(text: string): Promise<ServiceResult<{ text: string; provider: TranslationProvider }>>
   openExternal(url: string): Promise<void>
+  translatorView(state: { visible: boolean; bounds: { x: number; y: number; width: number; height: number } | null; provider?: TranslationProvider; text?: string; forceText?: boolean }): void
   exportData(content: string, defaultName: string): Promise<boolean>
   window(action: 'minimize' | 'maximize' | 'close'): void
 }
-declare global { interface Window { scKit?: DesktopBridge } }
+declare global { interface Window { scKit?: DesktopBridge; queryLocalFonts?: () => Promise<LocalFontData[]> } }

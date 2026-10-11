@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { ArrowRight, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Copy, Undo2, Search, Filter, Check, CheckCheck, Circle, TriangleAlert, Settings2, Keyboard, BarChart3, BookOpen, ExternalLink, RefreshCw, Download, X, Minus, Square, Link, MoreHorizontal, TextCursorInput, WrapText, ShieldCheck, Cloud, Monitor, FolderOpen, Files } from 'lucide-vue-next'
+import { ArrowRight, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Copy, Undo2, Search, Filter, Check, CheckCheck, Circle, TriangleAlert, Settings2, Keyboard, BarChart3, BookOpen, ExternalLink, RefreshCw, Download, X, Minus, Square, Link, MoreHorizontal, TextCursorInput, WrapText, Cloud, Monitor, FolderOpen, Files } from 'lucide-vue-next'
 import { stageLabels, displayDate, tokens } from '~/utils/text'
 import type { UnwrapNestedRefs } from 'vue'
 import type { Term } from '~/types/editor'
 import { saveModes, type SaveMode } from '~/utils/saveModes'
 import { toEditorText } from '~/utils/translationText'
+import { replaceSourceTerms } from '~/utils/termHighlights'
 import { highlightTranslatedTerms } from '~/utils/termHighlights'
 import type { QualityLocation } from '~/utils/quality'
 const props = defineProps<{ editor: UnwrapNestedRefs<ReturnType<typeof useEditor>> }>()
@@ -15,11 +16,12 @@ async function openManager() { await navigation.goHome() }
 function changeFile(id: number) { const file = e.files.find(f => f.id === id); if (file) navigation.chooseFile(file) }
 const fileOptions = computed(() => e.sortedFiles.map(file => ({ value: file.id, label: file.name })))
 const searchOptions = [{ value: 'text', label: '文本与键值' }, { value: 'original', label: '原文' }, { value: 'translation', label: '译文' }, { value: 'key', label: '键值' }, { value: 'context', label: '上下文' }]
-const stageOptions = [{ value: 'all', label: '所有状态' }, ...Object.entries(stageLabels).map(([value, label]) => ({ value: Number(value), label }))]
+const stageOptions = [{ value: 'all' as const, label: '所有状态' }, ...Object.entries(stageLabels).map(([value, label]) => ({ value: Number(value), label }))]
 const sortOptions = [{ value: 'default', label: '默认' }, { value: 'key', label: '键值 A–Z' }, { value: 'length', label: '原文长度' }, { value: 'updated', label: '最近更新' }]
 const pageSizeOptions = [50, 100, 200, 500].map(value => ({ value, label: `${value} / 页` }))
 const saveStageOptions = [0, 1, 2, 3, 5].map(value => ({ value, label: stageLabels[value]! }))
 const theme = inject<Ref<string>>('workspace-theme')!, showBreaks = ref(true), saveMode = ref<SaveMode>('next')
+const translationLayout = inject<Ref<'horizontal' | 'vertical'>>('workspace-translation-layout')!
 watch(saveMode, value => { try { localStorage.setItem('sckit-save-mode', value) } catch { /* Keep the choice for this session. */ } })
 function changeSaveStage(stage: number) {
   if (e.locked || e.listBusy || e.initializing || e.reloadBusy) return
@@ -32,7 +34,9 @@ function submitSelectedMode() {
   const mode = saveModes.find(option => option.id === saveMode.value) || saveModes[0]!
   return e.save(mode.next, mode.stage)
 }
-const translationInput = ref<HTMLTextAreaElement>(), workspace = ref<HTMLElement>(), editorPanel = ref<HTMLElement>()
+const translationInput = ref<HTMLTextAreaElement>(), workspace = ref<HTMLElement>(), editorPanel = ref<HTMLElement>(), sourceContent = ref<HTMLElement>()
+const dictionarySelection = useState('cambridge-selected-word', () => '')
+watch(() => [e.project.id, e.selected?.id], () => { dictionarySelection.value = '' })
 const translationText = computed(() => toEditorText(e.text))
 const translationHighlights = computed(() => highlightTranslatedTerms(translationText.value, e.terms))
 const translationHighlightOffset = ref({ top: 0, left: 0 })
@@ -66,8 +70,56 @@ function rememberPanelLayout() {
 }
 watch([leftWidth, rightWidth, narrowLeftWidth], () => { clearTimeout(panelLayoutTimer); panelLayoutTimer = setTimeout(rememberPanelLayout, 200) })
 const editingContent = ref<HTMLElement>()
-const auxiliaryPanel = ref<{ focusTerm: (id: number) => void; openHistorySearch: () => void }>()
+const auxiliaryPanel = ref<{ focusTerm: (id: number) => void; openHistorySearch: () => void; lookupDictionary: (word: string) => void; translateSelectedText: (text?: string) => Promise<void> }>()
+const selectionContextMenu = ref<{ x: number; y: number; text: string; selected: string; word: string } | null>(null)
+const preservedSelection = computed(() => selectionContextMenu.value ? replaceSourceTerms(selectionContextMenu.value.text, e.terms) : null)
 function insertTerm(term: Term) { if (term.translation.trim()) insert(term.translation) }
+function singleEnglishWord(value: string) {
+  const term = value.trim().replace(/^[^\p{Script=Latin}\p{M}]+|[^\p{Script=Latin}\p{M}]+$/gu, '')
+  return /^[\p{Script=Latin}\p{M}]+(?:['’\-][\p{Script=Latin}\p{M}]+)*$/u.test(term) ? term : ''
+}
+function selectedSourceText(selection: Selection): string | undefined {
+  if (!selection.rangeCount) return
+  const range = selection.getRangeAt(0), source = sourceContent.value
+  if (!source?.contains(range.startContainer) || !source.contains(range.endContainer)) return
+  const textFromNode = (node: Node): string => {
+    if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || ''
+    if (node.nodeType !== Node.ELEMENT_NODE && node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) return ''
+    if (node instanceof HTMLBRElement) return '\n'
+    return Array.from(node.childNodes, textFromNode).join('')
+  }
+  return toEditorText(textFromNode(range.cloneContents()))
+}
+function openSelectedTextMenu(event: MouseEvent) {
+  const field = event.target === translationInput.value ? translationInput.value : undefined
+  let selected = ''
+  if (field && field.selectionStart !== field.selectionEnd) selected = field.value.slice(field.selectionStart, field.selectionEnd)
+  else {
+    const selection = window.getSelection()
+    const selectionZone = event.currentTarget instanceof HTMLElement ? event.currentTarget : sourceContent.value
+    if (selection && !selection.isCollapsed && selection.rangeCount && selectionZone?.contains(selection.getRangeAt(0).commonAncestorContainer)) selected = selectedSourceText(selection) ?? selection.toString()
+  }
+  const trimmed = toEditorText(selected).trim()
+  const word = trimmed ? singleEnglishWord(trimmed) : ''
+  const text = toEditorText(trimmed ? selected : e.selected?.original || '')
+  if (!text.trim()) return
+  event.preventDefault()
+  selectionContextMenu.value = { x: event.clientX, y: event.clientY, text, selected: trimmed, word }
+}
+function selectionMenuStyle(menu: { x: number; y: number; word: string }) {
+  const menuHeight = !menu.word && (e.termsBusy || (preservedSelection.value?.replacements.length || 0) > 0) ? 136 : 100
+  return { left: `${Math.max(8, Math.min(menu.x, window.innerWidth - 240))}px`, top: `${Math.max(8, Math.min(menu.y, window.innerHeight - menuHeight))}px` }
+}
+function runSelectionContextAction(preserveTerms = false) {
+  const action = selectionContextMenu.value
+  if (!action) return
+  selectionContextMenu.value = null
+  if (action.word) auxiliaryPanel.value?.lookupDictionary(action.word)
+  else {
+    const source = preserveTerms ? replaceSourceTerms(action.text, e.terms).text : action.text
+    void auxiliaryPanel.value?.translateSelectedText(source)
+  }
+}
 let active = true
 function updateCompactLayout() {
   if (!active || !workspace.value?.clientWidth) return
@@ -214,6 +266,21 @@ function endTranslationComposition(event: CompositionEvent) {
   recordTranslationEdit(before, translationSnapshot(), 'composition')
   pendingInput = undefined; typingGroupOpen = false
 }
+function syncDictionarySelection() {
+  const input = translationInput.value
+  let selected = ''
+  if (input && document.activeElement === input) {
+    if (input.selectionStart !== input.selectionEnd) selected = input.value.slice(input.selectionStart, input.selectionEnd)
+  } else {
+    const selection = window.getSelection()
+    if (selection && !selection.isCollapsed && selection.rangeCount && sourceContent.value?.contains(selection.getRangeAt(0).commonAncestorContainer)) {
+      selected = selection.toString()
+    }
+  }
+  selected = selected.replace(/\s+/g, ' ').trim()
+  dictionarySelection.value = selected.length <= 100 && /^[\p{Script=Latin}\p{M}\p{N}'’.,!?;:()\- ]+$/u.test(selected) && /\p{Script=Latin}/u.test(selected)
+    ? selected.replace(/^[^\p{Script=Latin}\p{N}]+|[^\p{Script=Latin}\p{N}]+$/gu, '') : ''
+}
 async function locateQuality(location: QualityLocation) {
   if (e.locked || e.listBusy || e.initializing || e.reloadBusy) return
   const selectedId = e.selected?.id, content = translationText.value
@@ -246,6 +313,7 @@ function openString() { if (e.selected) window.scKit?.openExternal(`https://para
 function keydown(event: KeyboardEvent) {
   if (document.querySelector('.concordance-dialog')) { if ((event.ctrlKey || event.metaKey) && ['s', 'Enter'].includes(event.key)) event.preventDefault(); return }
   if (showConnection.value || showShortcuts.value || showOverview.value) { if (event.key === 'Escape') { showShortcuts.value = false; showOverview.value = false } return }
+  if (event.key === 'Escape' && selectionContextMenu.value) { selectionContextMenu.value = null; return }
   const key = event.key.toLowerCase(), target = event.target instanceof Element ? event.target : null
   const otherInput = target?.closest('input, textarea, [contenteditable]:not([contenteditable="false"]), [role="textbox"]') && target !== translationInput.value
   const altUndo = event.altKey && !event.ctrlKey && !event.metaKey && key === 'z' && !otherInput
@@ -264,6 +332,36 @@ function editorKeydown(event: KeyboardEvent) {
   if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key) ||
     ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a')) typingGroupOpen = false
   if (!event.isComposing && event.key === 'Tab' && !event.shiftKey && e.dirty) { event.preventDefault(); e.save(true) }
+}
+function filterEditorCopy(event: ClipboardEvent) {
+  if (!event.clipboardData) return
+  let selectedText = ''
+  if (event.target instanceof HTMLTextAreaElement && event.target.selectionStart !== event.target.selectionEnd) {
+    selectedText = event.target.value.slice(event.target.selectionStart, event.target.selectionEnd)
+    selectedText = selectedText.replace(/\r/g, '')
+    event.preventDefault()
+    event.clipboardData.clearData()
+    event.clipboardData.setData('text/plain', selectedText)
+    return
+  } else {
+    const selection = window.getSelection()
+    if (selection && !selection.isCollapsed) {
+      const sourceText = selectedSourceText(selection)
+      if (sourceText !== undefined) {
+        selectedText = sourceText.replace(/\r/g, '')
+        event.preventDefault()
+        event.clipboardData.clearData()
+        event.clipboardData.setData('text/plain', selectedText)
+        return
+      }
+      selectedText = selection.toString()
+    }
+  }
+  const clipboardText = selectedText.replace(/\r/g, '')
+  if (clipboardText === selectedText) return
+  event.preventDefault()
+  event.clipboardData.clearData()
+  event.clipboardData.setData('text/plain', clipboardText)
 }
 function fitTranslation() {
   if (!active || CSS.supports('field-sizing', 'content')) return
@@ -301,6 +399,7 @@ let layoutObserver: ResizeObserver | undefined
 function activate() {
   active = true
   window.addEventListener('keydown', keydown)
+  document.addEventListener('selectionchange', syncDictionarySelection)
   nextTick(() => {
     updateCompactLayout()
     for (const [selector, top] of savedScroll) workspace.value?.querySelector(selector)?.scrollTo({ top })
@@ -310,7 +409,9 @@ function deactivate() {
   active = false
   stopResizing?.()
   rememberPanelLayout()
+  dictionarySelection.value = ''
   window.removeEventListener('keydown', keydown)
+  document.removeEventListener('selectionchange', syncDictionarySelection)
   showMenu.value = false
 }
 function rememberScroll() {
@@ -338,21 +439,21 @@ onMounted(() => {
 })
 onActivated(activate)
 onDeactivated(deactivate)
-onBeforeUnmount(() => { stopResizing?.(); rememberPanelLayout(); window.removeEventListener('keydown', keydown); cancelAnimationFrame(fitFrame); editorObserver?.disconnect(); layoutObserver?.disconnect() })
+onBeforeUnmount(() => { stopResizing?.(); rememberPanelLayout(); window.removeEventListener('keydown', keydown); document.removeEventListener('selectionchange', syncDictionarySelection); cancelAnimationFrame(fitFrame); editorObserver?.disconnect(); layoutObserver?.disconnect() })
 </script>
 <template>
-  <div class="editor-workspace">
+  <div class="editor-workspace" @click="selectionContextMenu = null">
     <header class="workspace-header">
       <div class="project-navigation"><button class="project-name" :title="e.project.name" @click="openManager">{{ e.project.name }}<ChevronDown :size="13" /></button><span class="breadcrumb-divider">/</span><div class="file-picker"><AppSelect :model-value="e.fileId" :options="fileOptions" label="翻译文件" :disabled="navigation.blocked" @update:model-value="changeFile" /></div></div>
-      <div class="header-actions"><div v-if="e.connected && !['connected', 'idle'].includes(e.presence.state.status)" class="presence-status" :class="e.presence.state.status" role="status"><LoadingIndicator v-if="['connecting', 'reconnecting'].includes(e.presence.state.status)" :size="12" label="正在同步占用" /><span v-else class="online-dot" :class="{ offline: e.presence.state.status !== 'connected' }"></span><span :title="e.presence.state.message || e.presence.state.editors.map(user => `${user.username} · 词条 ${user.editing}`).join('\n')">{{ e.presence.state.status === 'connected' ? `${e.presence.onlineCount} 人正在编辑` : e.presence.state.message || '正在同步占用…' }}</span><button v-if="e.presence.state.status === 'unavailable'" class="text-button" :disabled="e.presenceLoginBusy" @click="e.loginPresence()">{{ e.presenceLoginBusy ? '登录中…' : '网页登录' }}</button></div><button class="button compact" title="实时检查当前译文中的数字、百分比、标签和变量" @click="e.panel = 'quality'"><ShieldCheck :size="15" /><span>QA 检查</span></button><button class="button compact" @click="showOverview = true"><BarChart3 :size="15" /><span>概览</span></button><button class="button compact" @click="e.panel = 'terms'"><BookOpen :size="15" /><span>术语</span></button><button class="connection-button" :class="{ live: e.connected }" @click="showConnection = true"><span class="online-dot" :class="{ offline: !e.connected }"></span>{{ e.connected ? (e.sessionInfo.authenticated ? '已连接' : '登录已过期') : '连接 ParaTranz' }}</button><div class="menu-anchor"><button class="icon-button" aria-label="工作台设置" @click="showMenu = !showMenu"><MoreHorizontal :size="19" /></button><Transition name="menu"><div v-if="showMenu" class="dropdown-menu"><button @click="toggleTheme"><Settings2 :size="15" />{{ theme === 'light' ? '切换到深色模式' : '切换到浅色模式' }}</button><button @click="showShortcuts = true; showMenu = false"><Keyboard :size="15" />快捷键</button><button :disabled="e.exportBusy" @click="e.exportPage(); showMenu = false"><Download :size="15" />导出当前页 / 选中词条</button><button v-if="e.connected" @click="disconnect"><Link :size="15" />断开连接</button></div></Transition></div></div>
+      <div class="header-actions"><div v-if="e.connected && !['connected', 'idle'].includes(e.presence.state.status)" class="presence-status" :class="e.presence.state.status" role="status"><LoadingIndicator v-if="['connecting', 'reconnecting'].includes(e.presence.state.status)" :size="12" label="正在同步占用" /><span v-else class="online-dot" :class="{ offline: e.presence.state.status !== 'connected' }"></span><span :title="e.presence.state.message || e.presence.state.editors.map(user => `${user.username} · 词条 ${user.editing}`).join('\n')">{{ e.presence.state.status === 'connected' ? `${e.presence.onlineCount} 人正在编辑` : e.presence.state.message || '正在同步占用…' }}</span><button v-if="e.presence.state.status === 'unavailable'" class="text-button" :disabled="e.presenceLoginBusy" @click="e.loginPresence()">{{ e.presenceLoginBusy ? '登录中…' : '网页登录' }}</button></div><button class="connection-button" :class="{ live: e.connected }" @click="showConnection = true"><span class="online-dot" :class="{ offline: !e.connected }"></span>{{ e.connected ? (e.sessionInfo.authenticated ? '已连接' : '登录已过期') : '连接 ParaTranz' }}</button><div class="menu-anchor"><button class="icon-button" aria-label="工作台设置" @click="showMenu = !showMenu"><MoreHorizontal :size="19" /></button><Transition name="menu"><div v-if="showMenu" class="dropdown-menu"><button @click="toggleTheme"><Settings2 :size="15" />{{ theme === 'light' ? '切换到深色模式' : '切换到浅色模式' }}</button><button @click="showShortcuts = true; showMenu = false"><Keyboard :size="15" />快捷键</button><button :disabled="e.exportBusy" @click="e.exportPage(); showMenu = false"><Download :size="15" />导出当前页 / 选中词条</button><button v-if="e.connected" @click="disconnect"><Link :size="15" />断开连接</button></div></Transition></div></div>
     </header>
     <Transition name="banner"><div v-if="e.error" class="error-banner" role="alert"><TriangleAlert :size="16" /><span>{{ e.error }}</span><button v-if="e.connected" @click="e.reloadSelected()">重新载入词条</button><button class="icon-button" aria-label="关闭错误提示" @click="e.error = ''"><X :size="15" /></button></div></Transition>
-    <div class="workspace-shell">
+    <div class="workspace-shell" @copy="filterEditorCopy">
     <main ref="workspace" class="workspace" :style="{ '--list-width': `${narrow ? layoutWidths.narrowLeft : layoutWidths.left}%`, '--aux-share': `${layoutWidths.right / (100 - layoutWidths.left) * 100}%` }">
       <section class="list-panel" aria-label="字符串列表">
         <nav class="status-tabs" aria-label="词条筛选"><button :class="{ active: e.stageFilter === null }" @click="e.filter(null)"><strong>{{ e.file.total }}</strong><span>全部</span></button><button :class="{ active: e.stageFilter === 0 }" @click="e.filter(0)"><strong>{{ e.untranslated }}</strong><span>未翻译</span></button><button :class="{ active: e.stageFilter === 2 }" @click="e.filter(2)"><strong>{{ e.file.disputed }}</strong><span>有疑问</span></button></nav>
         <div class="filters"><div class="search-bar"><span class="filter-label"><Filter :size="13" />过滤器</span><Search :size="15" /><input id="string-search" v-model="e.search" placeholder="按文本或键值搜索" aria-label="搜索字符串" /><button v-if="e.search" class="icon-button small" aria-label="清除搜索" @click="e.search = ''"><X :size="14" /></button></div><div class="filter-controls"><AppSelect v-model="e.searchMode" :options="searchOptions" label="搜索范围" /><AppSelect :model-value="e.stageFilter ?? 'all'" :options="stageOptions" label="词条状态" @update:model-value="value => e.filter(value === 'all' ? null : Number(value))" /><span class="filter-spacer"></span><span class="sort-label">本页排序</span><AppSelect v-model="e.sort" :options="sortOptions" label="本页排序" /><input type="checkbox" :checked="selectedAll" aria-label="选择当前页全部词条" @change="toggleAll" /></div></div>
-        <div class="string-list" role="listbox" aria-label="待翻译字符串" :aria-busy="e.listBusy">
+        <div class="string-list" :class="`translation-layout-${translationLayout}`" role="listbox" aria-label="待翻译字符串" :aria-busy="e.listBusy">
           <LoadingRegion :busy="e.listBusy || e.initializing" :initial="!e.items.length" label="正在加载词条…">
           <div v-if="!e.visibleItems.length" class="empty-state"><Search :size="32" /><h3>没有符合条件的词条</h3><button class="button" @click="e.search = ''; e.filter(null)">清除筛选</button></div>
           <template v-else><div v-for="(item, index) in e.visibleItems" :key="item.id" class="string-row" :class="{ selected: e.selected?.id === item.id }" role="option" :aria-selected="e.selected?.id === item.id" @click="e.select(item)"><div class="row-status"><CheckCheck v-if="item.stage === 5 || item.stage === 3" :size="15" /><Check v-else-if="item.stage === 1" :size="15" /><TriangleAlert v-else-if="item.stage === 2" :size="14" /><Circle v-else :size="11" :fill="item.stage === 0 ? 'currentColor' : 'none'" /><span>{{ (e.page - 1) * e.pageSize + index + 1 }}</span></div><button type="button" class="row-content" :title="item.key" :aria-label="`打开词条 ${item.key}`" :disabled="e.listBusy || e.initializing || e.reloadBusy"><span class="row-source"><ProtectedText :text="item.original" :terms="e.selected?.id === item.id ? e.terms : []" /></span><span class="row-translation">{{ item.translation }}</span><OccupancyBadge :users="e.presence.byString.get(item.id) || []" :user-id="e.presence.state.userId" compact icon-only /></button><input type="checkbox" :checked="e.selectedIds.includes(item.id)" :aria-label="`选择词条 ${item.key}`" @click.stop @change="toggleSelected(item.id)" /></div></template>
@@ -364,9 +465,9 @@ onBeforeUnmount(() => { stopResizing?.(); rememberPanelLayout(); window.removeEv
       <div class="editing-columns">
       <div ref="editingContent" class="editing-content">
       <section ref="editorPanel" class="editor-panel" aria-label="译文编辑器" :aria-busy="e.reloadBusy">
-        <template v-if="e.selected"><div class="editor-scroll"><div class="source-area"><div class="source-heading"><div class="source-heading-title"><span>待翻译的字符串</span><span class="current-occupancy" :title="e.presence.occupied ? '其他用户正在编辑此词条，你仍可编辑和提交。' : undefined"><OccupancyBadge :users="e.presence.current" :user-id="e.presence.state.userId" /></span></div><span class="source-metadata"><span v-if="e.termsBusy" class="source-term-status"><LoadingIndicator :size="12" label="正在获取术语" />正在获取术语…</span><button v-else-if="e.termsError" class="source-term-status term-error" :title="e.termsError" @click="e.loadTerms(true)">术语获取失败 · 重试</button><button v-else-if="e.terms.length" class="source-term-status" @click="e.panel = 'terms'">{{ e.terms.length }} 条术语</button><span class="stage-badge" :class="`stage-${e.selected.stage}`">{{ stageLabels[e.selected.stage] }}</span></span></div><div class="source-content"><ProtectedText :text="e.selected.original" :breaks="showBreaks" :terms="e.terms" interactive :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @insert="insert" @term="insertTerm" /></div></div>
+        <template v-if="e.selected"><div class="editor-scroll"><div class="source-area"><div class="source-heading"><div class="source-heading-title"><span>待翻译的字符串</span><span class="current-occupancy" :title="e.presence.occupied ? '其他用户正在编辑此词条，你仍可编辑和提交。' : undefined"><OccupancyBadge :users="e.presence.current" :user-id="e.presence.state.userId" /></span></div><span class="source-metadata"><span v-if="e.termsBusy" class="source-term-status"><LoadingIndicator :size="12" label="正在获取术语" />正在获取术语…</span><button v-else-if="e.termsError" class="source-term-status term-error" :title="e.termsError" @click="e.loadTerms(true)">术语获取失败 · 重试</button><button v-else-if="e.terms.length" class="source-term-status" @click="e.panel = 'terms'">{{ e.terms.length }} 条术语</button><span class="stage-badge" :class="`stage-${e.selected.stage}`">{{ stageLabels[e.selected.stage] }}</span></span></div><div ref="sourceContent" class="source-content" @contextmenu="openSelectedTextMenu"><ProtectedText :text="e.selected.original" :breaks="showBreaks" :terms="e.terms" interactive :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @insert="insert" @term="insertTerm" /></div></div>
           <div class="toolbelt"><button class="icon-button" title="复制原文到译文框" aria-label="复制原文到译文框" :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @click="replace(e.selected.original)"><Copy :size="16" /></button><button class="icon-button" title="恢复当前远端译文" aria-label="恢复远端译文" :disabled="!e.dirty" @click="e.discardDraft()"><Undo2 :size="16" /></button><button class="icon-button" :class="{ pressed: showBreaks }" title="显示原文的转义换行" aria-label="切换原文换行显示" @click="showBreaks = !showBreaks"><WrapText :size="17" /></button><button class="icon-button" title="打开术语" aria-label="打开术语面板" @click="e.panel = 'terms'"><BookOpen :size="16" /></button><span class="toolbelt-spacer"></span><span class="character-count">{{ translationText.length }} 字符</span></div>
-          <div class="translation-area"><div class="translation-editor"><div class="translation-highlights" aria-hidden="true"><div :style="{ transform: `translate(${-translationHighlightOffset.left}px, ${-translationHighlightOffset.top}px)` }"><template v-for="(piece, index) in translationHighlights" :key="index"><mark v-if="piece.terms?.length" class="translated-term-highlight">{{ piece.text }}</mark><template v-else>{{ piece.text }}</template></template></div></div><textarea ref="translationInput" :value="translationText" aria-label="译文" placeholder="在此输入翻译" spellcheck="false" :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @beforeinput="beforeTranslationInput" @input="translationChanged" @compositionstart="beginTranslationComposition" @compositionend="endTranslationComposition" @pointerdown="typingGroupOpen = false" @blur="typingGroupOpen = false" @scroll="syncTranslationHighlightScroll" @keydown="editorKeydown"></textarea></div><div v-if="e.locked" class="locked-notice">此词条{{ stageLabels[e.selected.stage] }}，编辑已禁用。</div><div v-if="availableTokens.length" class="token-tray"><span>标记</span><button v-for="token in availableTokens" :key="token" :title="`插入 ${token}`" :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @click="insert(token)">{{ token }}</button></div><div class="save-row"><div class="save-controls"><AppSelect :model-value="e.editStage" :options="saveStageOptions" label="保存为词条状态" :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @update:model-value="changeSaveStage" /><SaveButton v-model:mode="saveMode" :editor="e" @save="submitSelectedMode" /></div></div></div>
+          <div class="translation-area"><div class="translation-editor"><div class="translation-highlights" aria-hidden="true"><div :style="{ transform: `translate(${-translationHighlightOffset.left}px, ${-translationHighlightOffset.top}px)` }"><template v-for="(piece, index) in translationHighlights" :key="index"><mark v-if="piece.terms?.length" class="translated-term-highlight">{{ piece.text }}</mark><template v-else>{{ piece.text }}</template></template></div></div><textarea ref="translationInput" :value="translationText" aria-label="译文" @select="syncDictionarySelection" @keyup="syncDictionarySelection" @mouseup="syncDictionarySelection" @contextmenu="openSelectedTextMenu" placeholder="在此输入翻译" spellcheck="false" :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @beforeinput="beforeTranslationInput" @input="translationChanged" @compositionstart="beginTranslationComposition" @compositionend="endTranslationComposition" @pointerdown="typingGroupOpen = false" @blur="typingGroupOpen = false" @scroll="syncTranslationHighlightScroll" @keydown="editorKeydown"></textarea></div><div v-if="e.locked" class="locked-notice">此词条{{ stageLabels[e.selected.stage] }}，编辑已禁用。</div><div v-if="availableTokens.length" class="token-tray"><span>标记</span><button v-for="token in availableTokens" :key="token" :title="`插入 ${token}`" :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @click="insert(token)">{{ token }}</button></div><div class="save-row"><div class="save-controls"><AppSelect :model-value="e.editStage" :options="saveStageOptions" label="保存为词条状态" :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @update:model-value="changeSaveStage" /><SaveButton v-model:mode="saveMode" :editor="e" @save="submitSelectedMode" /></div></div></div>
           <div class="editor-hint"><span class="draft-status"><LoadingIndicator v-if="e.draftStatus.startsWith('正在')" :size="12" label="正在保存草稿" /><span v-else-if="e.dirty" class="draft-dot"></span>{{ e.draftStatus || (e.notice ? e.notice : 'Tab 提交并下一条') }}</span></div>
           <StringDetails :editor="e" class="desktop-details" />
         </div>
@@ -374,12 +475,13 @@ onBeforeUnmount(() => { stopResizing?.(); rememberPanelLayout(); window.removeEv
         </template><div v-else class="empty-state editor-empty"><TextCursorInput :size="38" :stroke-width="1.2" /><h3>选一条字符串，开始翻译</h3></div>
       </section>
       <div class="resize-handle aux-resize-handle" role="separator" aria-label="调整辅助面板宽度" aria-orientation="vertical" @pointerdown="resize($event, 'right')"></div>
-      <AuxPanel ref="auxiliaryPanel" :editor="e" :compact="narrow" @insert="insert" @replace="replace" @locate="locateQuality"><template #context><StringDetails :editor="e" /></template></AuxPanel>
+      <AuxPanel ref="auxiliaryPanel" :editor="e" :compact="narrow" @insert="insert" @replace="replace" @locate="locateQuality" @selection-context-menu="openSelectedTextMenu"><template #context><StringDetails :editor="e" /></template></AuxPanel>
       </div>
       <EditorNavigation v-if="e.selected" :editor="e" class="compact-editor-footer" @open="openString" />
       </div>
     </main>
     </div>
     <Transition name="dialog"><div v-if="showShortcuts || showOverview" class="modal-backdrop" @click.self="showShortcuts = false; showOverview = false"><section class="info-dialog" role="dialog" aria-modal="true" :aria-label="showShortcuts ? '快捷键' : '文件概览'"><button class="icon-button modal-close" aria-label="关闭窗口" @click="showShortcuts = false; showOverview = false"><X :size="18" /></button><template v-if="showShortcuts"><Keyboard :size="28" class="dialog-icon" /><h2>快捷键</h2><div v-for="[key, label] in shortcuts" :key="key" class="shortcut-row"><span>{{ label }}</span><kbd>{{ key }}</kbd></div></template><template v-else><BarChart3 :size="28" class="dialog-icon" /><h2>文件概览</h2><p class="dialog-description">{{ e.file.name }}<span v-if="!e.connected"> · 7 条样例</span></p><div class="progress-heading"><strong>{{ progress }}<small>%</small></strong><span>{{ e.file.translated }} / {{ e.file.total }} 已翻译</span></div><div class="progress-track"><span :style="{ width: `${progress}%` }"></span></div><div class="overview-stats"><div><span>未翻译</span><strong>{{ e.untranslated }}</strong></div><div><span>有疑问</span><strong>{{ e.file.disputed }}</strong></div><div><span>已检查</span><strong>{{ e.file.checked }}</strong></div><div><span>已审核</span><strong>{{ e.file.reviewed }}</strong></div></div></template></section></div></Transition>
+    <Teleport to=".app-shell"><Transition name="menu"><div v-if="selectionContextMenu" class="selection-context-menu" role="menu" :style="selectionMenuStyle(selectionContextMenu)" @click.stop><button role="menuitem" @click="runSelectionContextAction()">{{ selectionContextMenu.word ? '查询剑桥中文释义' : selectionContextMenu.selected ? '翻译所选内容到英文' : '翻译当前句子到英文' }}</button><button v-if="!selectionContextMenu.word && (e.termsBusy || (preservedSelection?.replacements.length || 0) > 0)" role="menuitem" :disabled="e.termsBusy || !preservedSelection?.replacements.length" @click="runSelectionContextAction(true)">{{ e.termsBusy ? '保留译名翻译（术语加载中…）' : `保留译名翻译（${preservedSelection?.replacements.length} 处）` }}</button><p>{{ selectionContextMenu.text }}</p></div></Transition></Teleport>
   </div>
 </template>

@@ -29,7 +29,7 @@ export function useEditor() {
   let submissionId = 0, processingSubmissions = false
   const requestCount = ref(0), reloadBusy = ref(false), exportBusy = ref(false)
   const selectedIds = ref<number[]>([]), drafts = ref<Record<string, Draft>>({})
-  const panel = ref<'context' | 'suggestions' | 'history' | 'terms' | 'quality' | 'comments'>('suggestions')
+  const panel = ref<'context' | 'suggestions' | 'history' | 'terms' | 'quality' | 'comments' | 'dictionary'>('suggestions')
   const suggestions = ref<Suggestion[]>([]), terms = ref<Term[]>([]), history = ref<HistoryEntry[]>([])
   const termsBusy = ref(false), termsError = ref('')
   const suggestionsBusy = ref(false), suggestionsError = ref(''), historyBusy = ref(false), historyError = ref('')
@@ -512,6 +512,6 @@ export function useEditor() {
     initializing.value = false
   })
   onBeforeUnmount(() => { disposed = true; clearAuxiliaryCache(); clearTimeout(draftTimer); clearTimeout(searchTimer); ++auxSequence; ++historySequence; ++termsSequence; flushDraft() })
-  return { desktop, connected, initializing, workspaceReady, project, file, files, sortedFiles, items, visibleItems, selected, text, editStage, stageFilter, search, searchMode, page, pageSize, pageCount, rowCount, fileId, sort, listBusy, pendingCount, submissionFailures, error, notice, draftStatus, dirty, locked, issues, untranslated, selectedIds, panel, suggestions, terms, history, auxBusy, auxError, termsBusy, termsError, sessionInfo, drafts,
+  return { desktop, connected, initializing, workspaceReady, project, file, files, sortedFiles, items, visibleItems, selected, text, editStage, stageFilter, search, searchMode, page, pageSize, pageCount, rowCount, fileId, sort, listBusy, pendingCount, submissionFailures, error, notice, draftStatus, dirty, locked, issues, untranslated, selectedIds, panel, suggestions, suggestionsBusy, suggestionsError, terms, history, historyBusy, historyError, auxBusy, auxError, termsBusy, termsError, sessionInfo, drafts,
     presence, presenceProjectId, presenceLoginBusy, loginPresence, requestCount, reloadBusy, exportBusy, api, input, select, loadStrings, bootstrap, changeFile, refreshFiles, filter, paginate, changePageSize, loadAux, loadTerms, submissionQueued, dismissSubmission, openSubmission, save, move, reloadSelected, discardDraft, resetWorkspace, restoreSession, flushDraft, exportPage }
 }

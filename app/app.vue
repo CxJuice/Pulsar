@@ -1,9 +1,15 @@
 <script setup lang="ts">
+import { appearanceCssVariables, appearanceStorageKey, defaultAppearanceSettings, parseAppearanceSettings } from '~/utils/appearance'
+
 const editor = reactive(useEditor())
 const navigation = reactive(useWorkspaceNavigation(editor))
 const theme = ref('light')
+const translationLayout = ref<'horizontal' | 'vertical'>('horizontal')
+const appearance = ref(defaultAppearanceSettings())
+const appearanceStyle = computed(() => appearanceCssVariables(appearance.value, theme.value))
 const route = useRoute()
 const loadingLabel = computed(() => {
+  if (route.path === '/layout-preview') return ''
   if (navigation.showConnection || navigation.loginBusy) return ''
   if (!navigation.guideReady) return '正在准备工作台…'
   if (navigation.loadingLabel) return navigation.loadingLabel
@@ -18,11 +24,20 @@ watchEffect(() => {
 })
 provide('workspace-navigation', navigation)
 provide('workspace-theme', theme)
-onMounted(() => { theme.value = localStorage.getItem('sckit-theme') || 'light' })
+provide('workspace-translation-layout', translationLayout)
+provide('workspace-appearance', appearance)
+onMounted(() => {
+  theme.value = localStorage.getItem('sckit-theme') || 'light'
+  try {
+    const savedLayout = localStorage.getItem('sckit-translation-layout')
+    if (savedLayout === 'horizontal' || savedLayout === 'vertical') translationLayout.value = savedLayout
+    appearance.value = parseAppearanceSettings(localStorage.getItem(appearanceStorageKey))
+  } catch { /* Use the default layout when storage is unavailable. */ }
+})
 </script>
 <template>
-  <div class="app-shell" :data-theme="theme">
-    <WorkspaceTitlebar :editor="editor" :caption="route.path === '/editor' ? '翻译工作台' : route.path === '/settings' ? '设置' : '项目主页'" />
+  <div class="app-shell" :data-theme="theme" :style="appearanceStyle">
+    <WorkspaceTitlebar :editor="editor" :caption="route.path === '/layout-preview' ? '本地布局测试' : route.path === '/editor' ? '翻译工作台' : route.path === '/settings' ? '设置' : '项目主页'" />
     <SubmissionNotifications :editor="editor" />
     <div class="application-body">
       <ApplicationSidebar :editor="editor" :navigation="navigation" />
