@@ -1,4 +1,4 @@
-name: Build all desktop versions
+name: Build Windows and macOS desktop versions
 
 on:
   push:
@@ -28,8 +28,6 @@ jobs:
           - { platform: mac, arch: x64, runner: macos-15-intel, rust: x86_64-apple-darwin }
           - { platform: mac, arch: arm64, runner: macos-15, rust: aarch64-apple-darwin }
           - { platform: mac, arch: universal, runner: macos-15, rust: universal }
-          - { platform: linux, arch: x64, runner: ubuntu-24.04, rust: x86_64-unknown-linux-gnu }
-          - { platform: linux, arch: arm64, runner: ubuntu-24.04-arm, rust: aarch64-unknown-linux-gnu }
     defaults:
       run:
         shell: bash
@@ -37,7 +35,6 @@ jobs:
       CI_PLATFORM: ${{ matrix.platform }}
       CI_ARCH: ${{ matrix.arch }}
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-      USE_SYSTEM_FPM: 'true'
       CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -59,17 +56,6 @@ jobs:
               from scripts.publish_release import release_tag
               release_tag(version)
           PY
-      - name: Install Linux packaging tools
-        if: github.event_name == 'workflow_dispatch' && matrix.platform == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential ruby ruby-dev rpm libarchive-tools xvfb
-          sudo gem install fpm --no-document
-      - name: Install Linux smoke test tools
-        if: github.event_name != 'workflow_dispatch' && matrix.platform == 'linux' && matrix.arch == 'x64'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb
       - name: Install dependencies
         run: npm ci
       - name: Check desktop state and proxy behavior
@@ -116,30 +102,22 @@ jobs:
       - name: Build frontend
         run: npm run generate
       - name: Install Chromium for interaction regression
-        if: matrix.platform == 'linux' && matrix.arch == 'x64'
-        run: npx playwright install --with-deps chromium
+        if: matrix.platform == 'mac' && matrix.arch == 'arm64'
+        run: npx playwright install chromium
       - name: Test browser UI flows with local fixture
-        if: matrix.platform == 'linux' && matrix.arch == 'x64'
+        if: matrix.platform == 'mac' && matrix.arch == 'arm64'
         run: python scripts/ui_smoke.py
       - name: Test aggregate editor UI flows with local fixture
-        if: matrix.platform == 'linux' && matrix.arch == 'x64'
+        if: matrix.platform == 'mac' && matrix.arch == 'arm64'
         run: python scripts/check_aggregate.py
       - name: Record build source
         run: node scripts/write-build-info.mjs
-      - name: Smoke test desktop UI and IPC
-        if: matrix.platform == 'linux' && matrix.arch == 'x64'
-        run: |
-          node node_modules/electron/install.js
-          sudo chown root:root node_modules/electron/dist/chrome-sandbox
-          sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
-          xvfb-run -a --server-args='-screen 0 1600x1000x24' npm start -- --smoke
       - name: Package application
         if: github.event_name == 'workflow_dispatch'
         run: |
           case "$CI_PLATFORM" in
             win) npx electron-builder --win nsis portable zip --${{ matrix.arch }} --publish never --config.directories.output=release/ci ;;
             mac) npx electron-builder --mac dmg zip --${{ matrix.arch }} --publish never --config.directories.output=release/ci ;;
-            linux) npx electron-builder --linux AppImage deb rpm tar.gz --${{ matrix.arch }} --publish never --config.directories.output=release/ci ;;
           esac
       - name: Collect packages and checksums
         if: github.event_name == 'workflow_dispatch'
