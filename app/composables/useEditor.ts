@@ -356,7 +356,12 @@ export function useEditor() {
     file.value = refreshed.find(entry => entry.id === fileId.value) || file.value
   }
   function filter(stage: number | null) { stageFilter.value = stage; page.value = 1; loadStrings() }
-  watch([search, searchMode], () => { clearTimeout(searchTimer); if (initializing.value) return; searchTimer = setTimeout(() => { page.value = 1; loadStrings() }, 350) })
+  watch([search, searchMode], ([query], [previousQuery]) => {
+    clearTimeout(searchTimer)
+    if (initializing.value) return
+    const retainedSelection = previousQuery && !query ? selected.value || undefined : undefined
+    searchTimer = setTimeout(() => { page.value = 1; void loadStrings(undefined, retainedSelection) }, 350)
+  })
   watch(sort, () => { page.value = 1; void loadStrings(selected.value?.id) })
   async function paginate(newPage: number, edge: 'first' | 'last' = 'first', clearTranslation = false) { if (listBusy.value) return; page.value = Math.max(1, Math.min(newPage, pageCount.value)); await loadStrings(undefined, undefined, edge, clearTranslation, false) }
   async function changePageSize(size: number) { pageSize.value = size; page.value = 1; await loadStrings(undefined, undefined, 'first', false, false) }

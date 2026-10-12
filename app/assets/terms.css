@@ -37,9 +37,11 @@
 .term-translation-popup { position:fixed;z-index:70;display:flex;flex-wrap:wrap;gap:4px;box-sizing:border-box;width:max-content;max-width:min(260px,calc(100vw - 16px));max-height:min(150px,calc(100vh - 16px));overflow:auto;padding:5px;border:1px solid var(--border);border-radius:10px;background:var(--bg);box-shadow:var(--shadow); }
 .term-fill-pill { max-width:100%;padding:3px 7px;border:1px solid var(--accent-border);border-radius:999px;background:var(--accent-soft);color:var(--accent);font-size:9px;line-height:1.35;overflow-wrap:anywhere;cursor:pointer; }
 .term-fill-pill:hover,.term-fill-pill:focus-visible { border-color:var(--accent);background:var(--hover);outline:none; }
-.community-term-status { flex-shrink:0;color:var(--warning);font-size:10px;padding:2px 6px;border:1px solid color-mix(in srgb,var(--warning) 35%,transparent);border-radius:4px; }
+.community-term-status { flex-shrink:0;color:var(--warning);font-size:10px;padding:2px 6px;background:transparent;border:1px solid color-mix(in srgb,var(--warning) 35%,transparent);border-radius:4px;cursor:pointer; }
+.community-term-status:hover { color:var(--accent);background:var(--accent-soft);border-color:var(--accent-border); }
 .community-candidates { display:flex;flex-wrap:wrap;gap:6px;margin-top:10px; }
-.community-candidates>span { color:var(--secondary);font-size:11px;line-height:1.5;padding:4px 8px;background:var(--soft);border:1px solid var(--border);border-radius:5px;overflow-wrap:anywhere; }
+.community-candidates>.community-candidate-option { color:var(--secondary);font-size:11px;line-height:1.5;padding:4px 8px;background:var(--soft);border:1px solid var(--border);border-radius:5px;overflow-wrap:anywhere;cursor:pointer; }
+.community-candidates>.community-candidate-option:hover { color:var(--accent);background:var(--accent-soft);border-color:var(--accent-border); }
 .community-feed-updated { margin:8px 16px 0;color:var(--muted);font-size:10px; }
 .community-feed-warning { margin:8px 16px;color:var(--warning);font-size:10px;line-height:1.6;overflow-wrap:anywhere; }
 .term-pagination { padding:12px 18px;color:var(--muted);font-size:10px; }

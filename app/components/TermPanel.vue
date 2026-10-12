@@ -22,6 +22,11 @@ const scope = ref<TermScope>('matched'), search = ref(''), page = ref(1)
 const catalog = ref<Term[]>([]), catalogLoaded = ref(false), catalogBusy = ref(false), catalogError = ref(''), loadCount = ref(0)
 const communityEntries = ref<CommunityTranslationCandidate[]>([]), communityBusy = ref(false), communityError = ref(''), communityWarnings = ref<string[]>([]), communityFetchedAt = ref('')
 const localTerms = ref<LocalUnresolvedTerm[]>([]), localError = ref('')
+const sharedUnresolvedTerms = useState<LocalUnresolvedTerm[]>('sckit-community-unresolved-terms', () => [])
+function setLocalTerms(entries: LocalUnresolvedTerm[]) {
+  localTerms.value = entries
+  sharedUnresolvedTerms.value = entries
+}
 const formOpen = ref(false), snapshot = ref<Term | null>(null), operation = ref(''), error = ref(''), notice = ref(''), confirmDelete = ref(false), focusedId = ref<number | null>(null)
 const form = reactive({ term: '', translation: '', pos: 'noun', note: '', variants: '', caseSensitive: false })
 let catalogSequence = 0, communitySequence = 0, operationSequence = 0
@@ -59,7 +64,9 @@ const termItems = computed<TermListItem[]>(() => {
     return firstText.localeCompare(secondText)
   })
 })
-const matchedCandidates = computed(() => termRecognitionEnabled.value ? matchLocalUnresolvedTerms(props.editor.selected?.original || '', mergedCandidates.value) : [])
+// Community unresolved status is editorial metadata, so keep it visible even
+// when automatic glossary recognition is disabled.
+const matchedCandidates = computed(() => matchLocalUnresolvedTerms(props.editor.selected?.original || '', mergedCandidates.value))
 const termList = computed<TermListItem[]>(() => {
   if (scope.value === 'all') return termItems.value
   const candidates = new Map(matchedCandidates.value.map(entry => [entry.source.trim().toLocaleLowerCase(), entry]))
@@ -90,6 +97,7 @@ const visibleTerms = computed(() => filteredTerms.value.slice((page.value - 1) *
 const busy = computed(() => scope.value === 'matched' ? props.editor.termsBusy || (communityProject.value && communityBusy.value) : catalogBusy.value || (communityProject.value && communityBusy.value))
 const loadError = computed(() => scope.value === 'matched' ? props.editor.termsError : catalogError.value && !catalog.value.length && !mergedCandidates.value.length ? catalogError.value : '')
 const posLabels: Record<string, string> = { noun: '名词', verb: '动词', adj: '形容词', adv: '副词' }
+function unresolvedStatus() { return '译名未定 · 正在投票' }
 function translationChoices(term: Term) {
   return termRecognitionEnabled.value ? termTranslationAlternatives(term, termExemptionPatterns.value) : term.translation.trim() ? [term.translation.trim()] : []
 }
@@ -192,7 +200,7 @@ async function loadCommunityCandidates() {
     communityWarnings.value = result.data.warnings
     communityFetchedAt.value = result.data.fetchedAt
     try {
-      localTerms.value = mergeLocalUnresolvedTerms(props.editor.project.id, result.data.entries)
+      setLocalTerms(mergeLocalUnresolvedTerms(props.editor.project.id, result.data.entries))
       localError.value = ''
     } catch (reason) {
       localError.value = `已自动获取未定译名，但无法保存到本机术语库：${(reason as Error).message}`
@@ -283,7 +291,7 @@ watch(() => [props.editor.project.id, props.editor.connected, props.editor.sessi
 watch(() => props.editor.project.id, () => {
   ++communitySequence; communityBusy.value = false; communityEntries.value = []; communityError.value = ''; communityWarnings.value = []; communityFetchedAt.value = ''
   localError.value = ''
-  localTerms.value = communityProject.value ? readLocalUnresolvedTerms(props.editor.project.id) : []
+  setLocalTerms(communityProject.value ? readLocalUnresolvedTerms(props.editor.project.id) : [])
   if (communityProject.value) void loadCommunityCandidates()
 }, { immediate: true })
 watch(() => props.editor.panel, value => {
@@ -321,8 +329,27 @@ onBeforeUnmount(() => { ++catalogSequence; ++communitySequence; ++operationSeque
       <div v-else-if="!filteredCount" class="empty-state"><BookOpen :size="34" :stroke-width="1.25" /><h3>{{ search ? '没有搜索结果' : scope === 'all' ? '暂无项目术语' : '没有匹配的术语' }}</h3></div>
       <template v-else>
         <article v-for="item in visibleTerms" :key="item.key" class="term-card" :class="{ 'community-term-card': item.kind === 'candidate', 'focused-term': item.kind === 'term' && focusedId === item.term.id }" :data-term-id="item.kind === 'term' ? item.term.id : undefined" tabindex="-1">
-          <template v-if="item.kind === 'term'"><div class="term-header"><strong>{{ item.term.term }}</strong><span class="term-pos">{{ posLabels[item.term.pos || ''] || item.term.pos }}</span><button class="icon-button small" :disabled="blocked || formOpen" :aria-label="`编辑术语 ${item.term.term}`" title="编辑术语" @click="beginEdit(item.term)"><Pencil :size="15" /></button><button v-if="translationChoices(item.term).length <= 1" class="icon-button small" :disabled="editor.locked || editor.listBusy || editor.reloadBusy" :aria-label="`插入术语 ${item.term.term}`" @mousedown.prevent @click="emit('insert', item.term.translation)"><Copy :size="15" /></button></div><div v-if="translationChoices(item.term).length > 1" class="term-translation-options" aria-label="多个术语译名"><span>选择译名并点击填入</span><button v-for="translation in translationChoices(item.term)" :key="translation" type="button" class="term-translation-option" :disabled="editor.locked || editor.listBusy || editor.reloadBusy" :aria-label="`填入译名 ${translation}`" @mousedown.prevent @click="emit('insert', translation)">{{ translation }}</button></div><div v-else class="term-translation">{{ item.term.translation }}</div><div v-if="item.term.variants?.length" class="term-variants"><span v-for="variant in item.term.variants" :key="variant">{{ variant }}</span></div><p v-if="item.term.note" class="term-note">{{ item.term.note }}</p><template v-if="item.candidate"><div class="community-candidates" aria-label="相关候选译名"><strong>候选 · {{ item.candidate.sourceType }} · {{ item.candidate.category }}</strong><span v-for="candidate in item.candidate.candidates" :key="candidate">{{ candidate }}</span><button class="text-button" @click="openForum(item.candidate!.topicUrl)">讨论帖</button></div></template></template>
-          <template v-else><div class="term-header"><strong>{{ item.entry.source }}</strong><span class="term-pos">{{ item.entry.category }}</span><span class="community-term-status">候选 · {{ item.entry.sourceType }}</span><button class="button compact" @click="openForum(item.entry.topicUrl)">讨论帖</button></div><div v-if="item.entry.candidates.length" class="community-candidates" aria-label="候选译名"><span v-for="candidate in item.entry.candidates" :key="candidate">{{ candidate }}</span></div><p v-else class="term-note">尚未发现候选译名</p><p class="term-note">{{ item.entry.topicTitle }}</p></template>
+          <template v-if="item.kind === 'term'">
+            <div class="term-header">
+              <strong>{{ item.term.term }}</strong><span class="term-pos">{{ posLabels[item.term.pos || ''] || item.term.pos }}</span>
+              <button class="icon-button small" :disabled="blocked || formOpen" :aria-label="`编辑术语 ${item.term.term}`" title="编辑术语" @click="beginEdit(item.term)"><Pencil :size="15" /></button>
+              <button v-if="item.candidate || translationChoices(item.term).length <= 1" class="icon-button small" :disabled="editor.locked || editor.listBusy || editor.initializing || editor.reloadBusy" :aria-label="item.candidate ? `填入未定译名原文 ${item.term.term}` : `插入术语 ${item.term.term}`" :title="item.candidate ? '论坛译名未定，填入原文' : '插入术语译文'" @mousedown.prevent @click="emit('insert', item.candidate ? item.term.term : item.term.translation)"><Copy :size="15" /></button>
+            </div>
+            <div v-if="!item.candidate && translationChoices(item.term).length > 1" class="term-translation-options" aria-label="多个术语译名"><span>选择译名并点击填入</span><button v-for="translation in translationChoices(item.term)" :key="translation" type="button" class="term-translation-option" :disabled="editor.locked || editor.listBusy || editor.initializing || editor.reloadBusy" :aria-label="`填入译名 ${translation}`" @mousedown.prevent @click="emit('insert', translation)">{{ translation }}</button></div>
+            <div v-else class="term-translation">{{ item.term.translation }}</div>
+            <div v-if="item.term.variants?.length" class="term-variants"><span v-for="variant in item.term.variants" :key="variant">{{ variant }}</span></div>
+            <p v-if="item.term.note" class="term-note">{{ item.term.note }}</p>
+            <template v-if="item.candidate"><div class="community-candidates" aria-label="相关译名未定候选">
+              <button type="button" class="community-term-status" :disabled="editor.locked || editor.listBusy || editor.initializing || editor.reloadBusy" :title="`译名未定，点击填入原文 ${item.term.term}`" @mousedown.prevent @click="emit('insert', item.term.term)">{{ unresolvedStatus() }} · {{ item.candidate.category }}</button>
+              <button v-for="candidate in item.candidate.candidates" :key="candidate" type="button" class="community-candidate-option" :disabled="editor.locked || editor.listBusy || editor.initializing || editor.reloadBusy" :title="`论坛候选「${candidate}」尚未确认，点击填入原文 ${item.term.term}`" @mousedown.prevent @click="emit('insert', item.term.term)">{{ candidate }}</button>
+              <button class="text-button" @click="openForum(item.candidate!.topicUrl)">讨论帖</button>
+            </div></template>
+          </template>
+          <template v-else>
+            <div class="term-header"><strong>{{ item.entry.source }}</strong><span class="term-pos">{{ item.entry.category }}</span><button type="button" class="community-term-status" :disabled="editor.locked || editor.listBusy || editor.initializing || editor.reloadBusy" :title="`译名未定，点击填入原文 ${item.entry.source}`" @mousedown.prevent @click="emit('insert', item.entry.source)">{{ unresolvedStatus() }}</button><button class="button compact" @click="openForum(item.entry.topicUrl)">讨论帖</button></div>
+            <div v-if="item.entry.candidates.length" class="community-candidates" aria-label="论坛候选译名"><button v-for="candidate in item.entry.candidates" :key="candidate" type="button" class="community-candidate-option" :disabled="editor.locked || editor.listBusy || editor.initializing || editor.reloadBusy" :title="`论坛候选「${candidate}」尚未确认，点击填入原文 ${item.entry.source}`" @mousedown.prevent @click="emit('insert', item.entry.source)">{{ candidate }}</button></div>
+            <p v-else class="term-note">尚未发现候选译名</p><p class="term-note">{{ item.entry.topicTitle }}</p>
+          </template>
         </article>
       </template>
     </LoadingRegion>

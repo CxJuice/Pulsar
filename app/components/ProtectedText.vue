@@ -1,13 +1,23 @@
 <script setup lang="ts">
-import type { Term } from '~/types/editor'
+import type { LocalUnresolvedTerm, Term } from '~/types/editor'
 import { highlightTerms, termDescription } from '~/utils/termHighlights'
 import { searchHighlightParts } from '~/utils/searchHighlight'
-const props = defineProps<{ text: string; breaks?: boolean; interactive?: boolean; disabled?: boolean; terms?: Term[]; searchQuery?: string }>()
+const props = defineProps<{ text: string; breaks?: boolean; interactive?: boolean; disabled?: boolean; terms?: Term[]; unresolvedTerms?: LocalUnresolvedTerm[]; searchQuery?: string }>()
 const emit = defineEmits<{ insert: [token: string]; term: [terms: Term[], position: { x: number; y: number; focus: boolean }] }>()
 const termRecognitionEnabled = inject<Ref<boolean>>('workspace-term-recognition')!
 const termExemptionPatterns = inject<Ref<RegExp[]>>('workspace-term-exemption-patterns')!
-const recognizedTerms = computed(() => termRecognitionEnabled.value ? props.terms || [] : [])
+const unresolvedTermIds = computed(() => new Set((props.unresolvedTerms || []).map((_, index) => -index - 1)))
+const recognizedTerms = computed(() => [
+  ...(termRecognitionEnabled.value ? props.terms || [] : []),
+  ...(props.unresolvedTerms || []).map((entry, index): Term => ({
+    id: -index - 1,
+    term: entry.source,
+    translation: '',
+    note: `译名未定 · 正在${entry.sourceType}；候选：${entry.candidates.join('、') || '暂无'}`,
+  })),
+])
 const describeTerms = (terms: Term[]) => termDescription(terms, termExemptionPatterns.value)
+const hasUnresolvedTerm = (terms?: Term[]) => !!terms?.some(term => unresolvedTermIds.value.has(term.id))
 function hasActiveTextSelection() {
   const selection = window.getSelection()
   return !!selection && !selection.isCollapsed
@@ -41,5 +51,5 @@ const pieces = computed(() => {
 })
 </script>
 <template>
-  <span class="protected-text"><template v-for="(piece, index) in pieces" :key="index"><template v-if="piece.token"><template v-if="piece.newline && breaks">{{ '\n' }}</template><button v-else-if="interactive" class="inline-token" :class="{ newline: piece.newline }" :title="`插入 ${piece.text}`" :disabled="disabled" @click="insertToken($event, piece.text)">{{ piece.text }}</button><span v-else class="inline-token" :class="{ newline: piece.newline }">{{ piece.text }}</span></template><template v-else-if="piece.terms?.length"><button v-if="interactive" class="term-highlight" :title="describeTerms(piece.terms)" :aria-label="`选择填入译名：${describeTerms(piece.terms)}`" :disabled="disabled || !piece.terms.some(term => term.translation.trim())" @click="insertTerm($event, piece.terms)"><template v-for="(part, partIndex) in piece.searchParts" :key="partIndex"><mark v-if="part.hit" class="search-match">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></button><mark v-else class="term-highlight" :title="describeTerms(piece.terms)"><template v-for="(part, partIndex) in piece.searchParts" :key="partIndex"><span v-if="part.hit" class="search-match">{{ part.text }}</span><template v-else>{{ part.text }}</template></template></mark></template><template v-else><template v-for="(part, partIndex) in piece.searchParts" :key="partIndex"><mark v-if="part.hit" class="search-match">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></template></template></span>
+  <span class="protected-text"><template v-for="(piece, index) in pieces" :key="index"><template v-if="piece.token"><template v-if="piece.newline && breaks">{{ '\n' }}</template><button v-else-if="interactive" class="inline-token" :class="{ newline: piece.newline }" :title="`插入 ${piece.text}`" :disabled="disabled" @click="insertToken($event, piece.text)">{{ piece.text }}</button><span v-else class="inline-token" :class="{ newline: piece.newline }">{{ piece.text }}</span></template><template v-else-if="piece.terms?.length"><button v-if="interactive" class="term-highlight" :class="{ 'community-unresolved-highlight': hasUnresolvedTerm(piece.terms) }" :title="describeTerms(piece.terms)" :aria-label="`选择填入译名：${describeTerms(piece.terms)}`" :disabled="disabled || !piece.terms.some(term => term.translation.trim())" @click="insertTerm($event, piece.terms)"><template v-for="(part, partIndex) in piece.searchParts" :key="partIndex"><mark v-if="part.hit" class="search-match">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></button><mark v-else class="term-highlight" :class="{ 'community-unresolved-highlight': hasUnresolvedTerm(piece.terms) }" :title="describeTerms(piece.terms)"><template v-for="(part, partIndex) in piece.searchParts" :key="partIndex"><span v-if="part.hit" class="search-match">{{ part.text }}</span><template v-else>{{ part.text }}</template></template></mark></template><template v-else><template v-for="(part, partIndex) in piece.searchParts" :key="partIndex"><mark v-if="part.hit" class="search-match">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></template></template></span>
 </template>
