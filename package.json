@@ -13,6 +13,7 @@
     "dev:web": "nuxt dev --host 127.0.0.1",
     "generate": "nuxt generate",
     "typecheck": "nuxt typecheck",
+    "test:electron": "node --test tests/electron-state.test.cjs",
     "build:service": "cargo build --release --locked --manifest-path service/Cargo.toml",
     "build": "npm run generate && npm run build:service",
     "start": "electron .",
