@@ -8,6 +8,7 @@ import { displayDate, stageLabels } from '~/utils/text'
 import { toEditorText, toTranslationRequestText } from '~/utils/translationText'
 import { replaceSourceTerms } from '~/utils/termHighlights'
 import { matchLocalUnresolvedTerms, readLocalUnresolvedTerms } from '~/utils/localUnresolvedTerms'
+import { BatchTranslationRequests } from '~/utils/batchPrefill'
 import type { QualityLocation } from '~/utils/quality'
 const props = defineProps<{ editor: UnwrapNestedRefs<ReturnType<typeof useEditor>>; compact?: boolean; breaks?: boolean }>()
 const emit = defineEmits<{ insert: [text: string]; replace: [text: string]; locate: [location: QualityLocation]; selectionContextMenu: [event: MouseEvent] }>()
@@ -39,6 +40,7 @@ function cancelTranslationRequest(requestId: string | null) {
   if (requestId) void window.scKit?.cancelTranslation(requestId).catch(() => undefined)
 }
 function newTranslationRequestId() { return crypto.randomUUID() }
+const batchTranslationRequests = new BatchTranslationRequests(cancelTranslationRequest)
 function openHistorySearch() { props.editor.panel = 'suggestions'; nextTick(() => memorySearch.value?.focus()) }
 const auxRoot = ref<HTMLElement>()
 const activeDockPanels = ref<string[]>([props.editor.panel])
@@ -202,6 +204,7 @@ function applyTranslationSettings(settings: TranslationSettings) {
     prefillRequest++
     cancelTranslationRequest(activeTranslationRequestId)
     cancelTranslationRequest(activePrefillRequestId)
+    batchTranslationRequests.cancelAll()
     activeTranslationRequestId = null
     activePrefillRequestId = null
     prefillFollowsSelection = false
@@ -398,6 +401,7 @@ function cancelSelectedTranslation() {
   prefillRequest++
   cancelTranslationRequest(activeTranslationRequestId)
   cancelTranslationRequest(activePrefillRequestId)
+  batchTranslationRequests.cancelAll()
   activeTranslationRequestId = null
   activePrefillRequestId = null
   prefillFollowsSelection = false
@@ -450,12 +454,25 @@ async function translateForPrefill(value: string) {
   return translatePrefillEntry(value, props.editor.selected, true, true)
 }
 async function translateEntryForPrefill(item: StringItem) {
-  return translatePrefillEntry(item.original, item, false, false)
+  if (activeTranslationRequestId || activePrefillRequestId || translationStarting) throw new Error('已有侧栏翻译正在进行，请先停止当前翻译')
+  const source = toTranslationRequestText(item.original, props.breaks !== false)
+  if (!source.trim()) throw new Error('原文为空，无法翻译')
+  if (!translationSettingsReady.value || translationAccessMode.value !== 'api') throw new Error('请先启用 API 或 AI 翻译模式')
+  if (!window.scKit?.translateToChinese) throw new Error('翻译服务仅在桌面应用中可用')
+  translationBusy.value = true
+  try {
+    return await batchTranslationRequests.run(async (requestId, isCurrent) => {
+      const result = await requestConfiguredTranslation(source, item, isCurrent, requestId, false)
+      if (!result) throw new Error(isCurrent() ? '翻译服务没有返回译文' : '翻译已停止。')
+      return result
+    })
+  } finally { translationBusy.value = !!(activeTranslationRequestId || activePrefillRequestId || batchTranslationRequests.size) }
 }
 function cancelPrefillTranslation() {
-  if (!activePrefillRequestId) return
+  if (!activePrefillRequestId && !batchTranslationRequests.size) return
   prefillRequest++
   cancelTranslationRequest(activePrefillRequestId)
+  batchTranslationRequests.cancelAll()
   activePrefillRequestId = null
   prefillFollowsSelection = false
   translationBusy.value = false
@@ -468,7 +485,7 @@ watch([() => props.editor.selected?.project, () => props.editor.selected?.id, ()
   cancelTranslationRequest(activeTranslationRequestId)
   activeTranslationRequestId = null
   if (prefillFollowsSelection) cancelPrefillTranslation()
-  if (!activePrefillRequestId) translationBusy.value = false
+  if (!activePrefillRequestId && !batchTranslationRequests.size) translationBusy.value = false
   translationSource.value = toTranslationRequestText(props.editor.selected?.original || '', props.breaks !== false)
   translationResult.value = ''
   translationError.value = ''

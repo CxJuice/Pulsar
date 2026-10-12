@@ -59,6 +59,54 @@ UI_CHECK = r'''async (page) => {
   await page.getByRole('option', { name: '键值 A–Z' }).click();
   await page.getByRole('listbox', { name: '待翻译字符串' }).getByRole('option', { name: /1 打开词条 KEY_001/ }).waitFor();
   await page.getByRole('listbox', { name: '待翻译字符串' }).getByRole('option', { name: /50 打开词条 KEY_050/ }).waitFor();
+  await page.getByRole('button', { name: '全文翻译并预填充', exact: true }).click();
+  const batch = page.getByRole('dialog', { name: '全文翻译并预填充', exact: true });
+  const concurrency = batch.getByRole('spinbutton', { name: '并发数量' });
+  await concurrency.fill('4');
+  await concurrency.blur();
+  await page.evaluate(() => window.__auditConfigureTranslation({ delay: 2000 }));
+  await batch.getByRole('button', { name: '开始翻译并预填充' }).click();
+  await page.waitForFunction(() => window.__auditTranslationStats().active === 4);
+  if (await concurrency.isEnabled()) throw new Error('Concurrency changed during an active batch');
+  await batch.getByRole('button', { name: '停止', exact: true }).click();
+  await batch.getByText(/已停止：成功 0、失败 0/).waitFor();
+  const stopped = await page.evaluate(() => window.__auditTranslationStats());
+  if (stopped.started !== 4 || stopped.canceled !== 4 || stopped.active !== 0) throw new Error('Stop did not cancel all four translations or started queued entries');
+  await batch.getByRole('button', { name: '关闭', exact: true }).click();
+  await page.getByRole('button', { name: '全文翻译并预填充', exact: true }).click();
+  if (await concurrency.inputValue() !== '4') throw new Error('The chosen concurrency was not retained');
+  await concurrency.fill('3');
+  await concurrency.blur();
+  await page.evaluate(() => window.__auditConfigureTranslation({ delay: 150, failOnceText: 'Audit entry 23' }));
+  await batch.getByRole('button', { name: '开始翻译并预填充' }).click();
+  await batch.getByText(/已处理 40 \/ 40 条：成功 39、失败 1/).waitFor();
+  const completed = await page.evaluate(() => ({ stats: window.__auditTranslationStats(), drafts: window.__auditDrafts() }));
+  if (completed.stats.maximum !== 3 || completed.stats.started !== 40) throw new Error('The full-file batch did not obey concurrency three');
+  for (let id = 121; id <= 160; id++) {
+    if (id === 123) continue;
+    const expected = '本地模拟译文：Audit entry ' + String(id - 100).padStart(2, '0');
+    if (completed.drafts['4242/' + id]?.translation !== expected) throw new Error('Parallel results were written to the wrong entry');
+  }
+  await page.evaluate(() => window.__auditConfigureTranslation({ delay: 150 }));
+  await batch.getByRole('button', { name: '重试失败项' }).click();
+  await batch.getByText(/已处理 1 \/ 1 条：成功 1、失败 0/).waitFor();
+  if ((await page.evaluate(() => window.__auditTranslationStats())).started !== 1) throw new Error('Retry translated successful entries again');
+  await batch.getByRole('button', { name: '关闭', exact: true }).click();
+  await page.reload();
+  await page.getByRole('button', { name: /审计测试项目 #4242/ }).click();
+  await page.getByRole('main', { name: '项目文件管理' }).getByRole('button', { name: /audit.strings.*开始翻译/ }).click();
+  await page.getByRole('button', { name: '全文翻译并预填充', exact: true }).click();
+  if (await concurrency.inputValue() !== '3') throw new Error('Concurrency did not survive a page reload');
+  await concurrency.fill('4');
+  await concurrency.blur();
+  await batch.getByRole('radio', { name: /保存到 ParaTranz/ }).check();
+  await page.evaluate(() => window.__auditConfigureTranslation({ delay: 150, slowAfterFirst: true }));
+  await batch.getByRole('button', { name: '开始翻译并预填充' }).click();
+  await page.waitForFunction(() => JSON.parse(document.documentElement.dataset.auditCalls).some(call => call.action === 'save'));
+  await batch.getByRole('button', { name: '停止', exact: true }).click();
+  await batch.getByText(/已停止：成功 1、失败 0/).waitFor();
+  const afterSaveStop = await page.evaluate(() => ({ stats: window.__auditTranslationStats(), saves: JSON.parse(document.documentElement.dataset.auditCalls).filter(call => call.action === 'save').length }));
+  if (afterSaveStop.saves !== 1 || afterSaveStop.stats.canceled !== 3) throw new Error('Stop did not finish just the active save and cancel the other translations');
 }'''
 
 

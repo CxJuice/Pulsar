@@ -8,6 +8,16 @@
   const terms=[{id:1,term:'account',translation:'账户/账号',pos:'noun',variants:[],caseSensitive:false,project:4242,uid:1,updatedAt:'2026-10-10T00:00:00Z'}];
   const drafts={}; let authenticated=true; let settings={provider:'google',mode:'api',deeplPlan:'free',proxy:{mode:'direct',host:'127.0.0.1',port:7890},googleConfigured:true,deeplConfigured:false,llmRequestUrl:'',llmModel:'',llmPrefixPrompt:'',llmConfigured:false,llmContext:{key:true,recommendations:true,recommendationCount:1,terms:true,notes:true},clearAfterSaveNext:true,useTermTranslations:true};
   const calls=[]; const record=(action,payload)=>{calls.push({action,payload:copy(payload||{}),at:Date.now()});document.documentElement.dataset.auditCalls=JSON.stringify(calls);};
+  const translationRequests = new Map();
+  let translationConfig = { delay: 150, failOnceText: '', slowAfterFirst: false };
+  let translationStats = { active: 0, maximum: 0, started: 0, canceled: 0 };
+  window.__auditConfigureTranslation = config => {
+    if (translationRequests.size) throw new Error('Synthetic translations are still active');
+    translationConfig = { delay: 150, failOnceText: '', slowAfterFirst: false, ...config };
+    translationStats = { active: 0, maximum: 0, started: 0, canceled: 0 };
+  };
+  window.__auditTranslationStats = () => copy(translationStats);
+  window.__auditDrafts = () => copy(drafts);
   window.__auditSetRemote = (id, translation) => {
     const row = strings.find(item => item.id === id);
     if (!row) throw new Error('Unknown synthetic item');
@@ -41,7 +51,21 @@
     async connect(){authenticated=true;return ok(session());},async login(){authenticated=true;return ok(session());},async disconnect(){authenticated=false;return ok(null);},
     async getTranslationSettings(){return ok(settings);},async saveTranslationSettings(value){settings={...settings,...copy(value)};return ok(settings);},async saveTranslationSelection(value){settings={...settings,...value};return ok(settings);},
     async testProxy(proxy){return ok({proxy,ok:true,results:[]});},
-    async translateToChinese(text,context,id){record('translate',{text,context,id});await pause(150);return ok({text:'本地模拟译文',provider:settings.provider});},async cancelTranslation(){return ok(null);},
+    async translateToChinese(text,context,id){
+      record('translate',{text,context,id});
+      translationStats.started++;
+      translationStats.maximum = Math.max(translationStats.maximum, ++translationStats.active);
+      const delay = translationConfig.delay * (translationConfig.slowAfterFirst && translationStats.started > 1 ? 10 : 1);
+      return new Promise(resolve => {
+        const finish = result => { clearTimeout(timer); translationRequests.delete(id); translationStats.active--; resolve(result); };
+        const timer = setTimeout(() => {
+          if (text === translationConfig.failOnceText) { translationConfig.failOnceText = ''; finish({ok:false,message:'本地模拟翻译失败'}); }
+          else finish(ok({text:'本地模拟译文：'+text,provider:settings.provider}));
+        }, delay);
+        translationRequests.set(id, () => { translationStats.canceled++; finish({ok:false,message:'翻译已取消'}); });
+      });
+    },
+    async cancelTranslation(id){record('cancelTranslation',{id});translationRequests.get(id)?.();return ok(null);},
     async fetchCommunityTranslationCandidates(){return ok({entries:[],warnings:[],fetchedAt:new Date().toISOString()});},
     async openExternal(){},async exportData(){return true;},window(){},translatorView(){},onAuxCustomizationAction(){return ()=>{};},onBeforeClose(){return ()=>{};},closeResponse(){},onSessionRestored(){return ()=>{};},async getBuildInfo(){return null;},
     async lookupCambridge(query){return ok({word:query,url:'https://dictionary.cambridge.org/',ukPronunciation:'',usPronunciation:'',entries:[]});},async openCambridgeOriginal(){}

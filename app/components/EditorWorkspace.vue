@@ -9,6 +9,7 @@ import { searchHighlightParts } from '~/utils/searchHighlight'
 import { highlightTranslatedTerms, replaceSourceTerms, termTranslationAlternatives } from '~/utils/termHighlights'
 import { readLocalUnresolvedTerms } from '~/utils/localUnresolvedTerms'
 import type { QualityLocation } from '~/utils/quality'
+import { MAX_PREFILL_CONCURRENCY, normalizePrefillConcurrency, runConcurrentPrefill } from '~/utils/batchPrefill'
 const props = defineProps<{ editor: UnwrapNestedRefs<ReturnType<typeof useEditor>> }>()
 const e = props.editor
 const navigation = inject<import('~/composables/useWorkspaceNavigation').WorkspaceNavigation>('workspace-navigation')!
@@ -89,6 +90,11 @@ const auxiliaryPanel = ref<{ focusTerm: (id: number) => void; openHistorySearch:
 const showBatchPrefill = ref(false), batchPrefillBusy = ref(false), batchPrefillError = ref('')
 const batchPrefillSaving = ref(false), batchStopRequested = ref(false)
 const batchPrefillScope = ref<'selected' | 'untranslated'>('selected'), batchPrefillDestination = ref<'local' | 'paratranz'>('local')
+const batchPrefillConcurrency = ref(1)
+watch(batchPrefillConcurrency, value => {
+  try { localStorage.setItem('sckit-batch-prefill-concurrency', String(normalizePrefillConcurrency(value))) }
+  catch { /* Keep the setting for this session. */ }
+})
 const batchPrefillProgress = ref(0), batchPrefillTotal = ref(0), batchPrefillSkipped = ref(0)
 const batchPrefillSucceeded = ref(0), batchPrefillFailed = ref(0), batchPrefillFailures = ref<string[]>([])
 const batchFailedItems = ref<StringItem[]>([]), batchRetryItems = ref<StringItem[] | null>(null)
@@ -234,7 +240,7 @@ async function loadAllUntranslated(projectId: number, fileId: number, run: numbe
   const first = await e.api<StringPage>('strings', { projectId, fileId, page: 1, pageSize, stage: 0 })
   const result = [...first.results]
   for (let page = 2; page <= first.pageCount; page++) {
-    if (run !== batchPrefillRun) throw new Error('翻译已停止。')
+    if (run !== batchPrefillRun || batchStopRequested.value) throw new Error('翻译已停止。')
     const next = await e.api<StringPage>('strings', { projectId, fileId, page, pageSize, stage: 0 })
     result.push(...next.results)
   }
@@ -258,24 +264,25 @@ function openBatchPrefill() {
 }
 function stopBatchPrefill(message = '') {
   if (!batchPrefillBusy.value) return
-  if (batchPrefillSaving.value) {
-    batchStopRequested.value = true
-    batchPrefillError.value = '已收到停止请求；当前条目保存完成后将停止。'
-    return
-  }
-  batchPrefillRun++
+  batchStopRequested.value = true
   auxiliaryPanel.value?.cancelPrefillTranslation()
-  batchPrefillBusy.value = false
-  batchStopRequested.value = false
-  batchPrefillError.value = message || `已停止：成功 ${batchPrefillSucceeded.value}、失败 ${batchPrefillFailed.value}、跳过 ${batchPrefillSkipped.value} 条。`
+  batchPrefillError.value = message || (batchPrefillSaving.value ? '已收到停止请求；当前条目保存完成后将停止。' : '正在停止翻译…')
 }
+watch([() => e.project.id, () => e.fileId, () => e.connected, () => e.sessionInfo.user?.id], () => {
+  if (batchPrefillBusy.value) stopBatchPrefill('连接或当前文件已变化，批量预填充已停止。')
+})
 async function startBatchPrefill() {
   if (batchPrefillBusy.value) return
   if (!e.connected || !e.sessionInfo.authenticated) { batchPrefillError.value = '请先登录 ParaTranz 并打开项目。'; return }
   if (!auxiliaryPanel.value?.canPrefillTranslation) { batchPrefillError.value = '请在设置中启用 API 或 AI 翻译模式后再开始。'; return }
   if (!auxiliaryPanel.value.translateEntryForPrefill) { batchPrefillError.value = '翻译模块尚未就绪，请稍后重试。'; return }
   if (auxiliaryPanel.value.translationBusy) { batchPrefillError.value = '侧栏翻译正在进行，请先停止当前翻译。'; return }
-  const run = ++batchPrefillRun, projectId = e.project.id, fileId = e.fileId
+  const panel = auxiliaryPanel.value
+  const run = ++batchPrefillRun, projectId = e.project.id, fileId = e.fileId, accountId = e.sessionInfo.user?.id
+  const destination = batchPrefillDestination.value
+  batchPrefillConcurrency.value = normalizePrefillConcurrency(batchPrefillConcurrency.value)
+  const concurrency = batchPrefillConcurrency.value
+  const canContinue = () => run === batchPrefillRun && !batchStopRequested.value && e.connected && e.sessionInfo.authenticated && e.sessionInfo.user?.id === accountId && e.project.id === projectId && e.fileId === fileId
   const retryItems = batchRetryItems.value
   batchRetryItems.value = null
   batchPrefillBusy.value = true
@@ -283,16 +290,17 @@ async function startBatchPrefill() {
   batchPrefillError.value = ''
   batchPrefillProgress.value = 0
   batchPrefillTotal.value = 0
+  batchPrefillSkipped.value = 0
   batchPrefillSucceeded.value = 0; batchPrefillFailed.value = 0; batchPrefillFailures.value = []; batchFailedItems.value = []; batchReport.value = []
   try {
     await e.flushDraft(true)
+    if (!canContinue()) return
     let sourceItems: StringItem[]
     if (retryItems) sourceItems = retryItems.map(item => ({ ...item }))
     else if (batchPrefillScope.value === 'selected') {
       sourceItems = e.visibleItems.filter(item => e.selectedIds.includes(item.id)).map(item => ({ ...item }))
     } else sourceItems = await loadAllUntranslated(projectId, fileId, run)
-    if (run !== batchPrefillRun) return
-    if (e.project.id !== projectId || e.fileId !== fileId) { stopBatchPrefill('当前文件已切换，批量预填充已停止。'); return }
+    if (!canContinue()) return
     const targets = sourceItems.filter(item => ![9, -1].includes(item.stage) && !!item.original.trim() && !entryHasPrefill(item))
     batchPrefillSkipped.value = sourceItems.length - targets.length
     for (const item of sourceItems.filter(item => !targets.includes(item))) batchReport.value.push({ key: item.key, id: item.id, status: 'skipped' })
@@ -301,43 +309,54 @@ async function startBatchPrefill() {
       batchPrefillError.value = sourceItems.length ? '所选范围内没有可翻译条目；已有译文、本机草稿或未保存编辑的条目已跳过。' : '所选范围内没有条目。'
       return
     }
-    for (const [index, item] of targets.entries()) {
-      if (run !== batchPrefillRun) return
-      if (e.project.id !== projectId || e.fileId !== fileId) { stopBatchPrefill('当前文件已切换，批量预填充已停止。'); return }
+    let saveQueue = Promise.resolve()
+    await runConcurrentPrefill(targets, concurrency, async item => {
+      if (!canContinue()) return
+      let processed = false, savingStarted = false
       try {
         const draftVersion = e.drafts[`${item.project}/${item.id}`]?.updatedAt ?? null
-        if (entryHasPrefill(item)) { batchPrefillSkipped.value++; batchReport.value.push({ key: item.key, id: item.id, status: 'skipped' }); batchPrefillProgress.value = index + 1; continue }
-        const translated = await auxiliaryPanel.value.translateEntryForPrefill(item)
-        if (run !== batchPrefillRun) return
-        if (e.project.id !== projectId || e.fileId !== fileId) { stopBatchPrefill('当前文件已切换，批量预填充已停止。'); return }
-        if (entryHasPrefill(item)) { batchPrefillSkipped.value++; batchReport.value.push({ key: item.key, id: item.id, status: 'skipped' }); batchPrefillProgress.value = index + 1; continue }
-        batchPrefillSaving.value = true
-        let overwroteConflict = false
-        try {
-          const saved = batchPrefillDestination.value === 'paratranz' ? await e.savePrefillToParaTranz(item, translated.text, draftVersion) : undefined
-          overwroteConflict = !!saved?.overwroteConflict
-          if (batchPrefillDestination.value !== 'paratranz') await e.savePrefillDraft(item, translated.text, draftVersion)
-        } finally { batchPrefillSaving.value = false }
-        batchPrefillSucceeded.value++
-        batchReport.value.push({ key: item.key, id: item.id, status: 'saved', message: overwroteConflict ? '已覆盖远端新修改' : undefined })
+        if (entryHasPrefill(item)) { batchPrefillSkipped.value++; batchReport.value.push({ key: item.key, id: item.id, status: 'skipped' }); processed = true; return }
+        const translated = await panel.translateEntryForPrefill(item)
+        if (!canContinue()) return
+        const save = saveQueue.then(async () => {
+          if (!canContinue()) return
+          processed = true
+          if (entryHasPrefill(item)) { batchPrefillSkipped.value++; batchReport.value.push({ key: item.key, id: item.id, status: 'skipped' }); return }
+          savingStarted = true
+          batchPrefillSaving.value = true
+          let overwroteConflict = false
+          try {
+            const saved = destination === 'paratranz' ? await e.savePrefillToParaTranz(item, translated.text, draftVersion) : undefined
+            overwroteConflict = !!saved?.overwroteConflict
+            if (destination !== 'paratranz') await e.savePrefillDraft(item, translated.text, draftVersion)
+          } finally { batchPrefillSaving.value = false }
+          batchPrefillSucceeded.value++
+          batchReport.value.push({ key: item.key, id: item.id, status: 'saved', message: overwroteConflict ? '已覆盖远端新修改' : undefined })
+        })
+        saveQueue = save.catch(() => {})
+        await save
       } catch (reason) {
-        if (run !== batchPrefillRun) return
+        if (run !== batchPrefillRun || (!canContinue() && !savingStarted)) return
+        processed = true
         const message = `${item.key || item.id}: ${(reason as Error).message || '失败'}`
         batchPrefillFailures.value.push(message); batchFailedItems.value.push(item); batchPrefillFailed.value++
         batchReport.value.push({ key: item.key, id: item.id, status: 'failed', message })
+      } finally {
+        if (processed && run === batchPrefillRun) batchPrefillProgress.value++
       }
-      batchPrefillProgress.value = index + 1
-      if (batchStopRequested.value) { stopBatchPrefill(); return }
-      if (e.project.id !== projectId || e.fileId !== fileId) { stopBatchPrefill('当前文件已切换，批量预填充已停止。'); return }
-    }
-    if (batchPrefillDestination.value === 'paratranz') await e.refreshFiles().catch(() => {})
+    }, () => !canContinue())
+    if (!canContinue()) return
+    if (destination === 'paratranz') await e.refreshFiles().catch(() => {})
     const overwritten = batchReport.value.filter(row => row.message === '已覆盖远端新修改').length
     batchPrefillError.value = `已处理 ${batchPrefillProgress.value} / ${batchPrefillTotal.value} 条：成功 ${batchPrefillSucceeded.value}、失败 ${batchPrefillFailed.value}、跳过 ${batchPrefillSkipped.value} 条` +
       (overwritten ? `；其中 ${overwritten} 条覆盖了远端新修改。` : '。')
   } catch (reason) {
     if (run === batchPrefillRun) batchPrefillError.value = (reason as Error).message || '批量预填充失败'
   } finally {
-    if (run === batchPrefillRun) { batchPrefillBusy.value = false; batchPrefillSaving.value = false; batchStopRequested.value = false }
+    if (run === batchPrefillRun) {
+      if (batchStopRequested.value) batchPrefillError.value = `已停止：成功 ${batchPrefillSucceeded.value}、失败 ${batchPrefillFailed.value}、跳过 ${batchPrefillSkipped.value} 条。`
+      batchPrefillBusy.value = false; batchPrefillSaving.value = false; batchStopRequested.value = false
+    }
   }
 }
 function retryBatchFailures() {
@@ -623,6 +642,7 @@ function activate() {
 }
 function deactivate() {
   active = false
+  if (batchPrefillBusy.value) stopBatchPrefill()
   stopResizing?.()
   rememberPanelLayout()
   dictionarySelection.value = ''
@@ -646,6 +666,7 @@ async function loadTranslationBehavior() {
 }
 function onTranslationSettingsUpdated(event: Event) {
   const settings = (event as CustomEvent<TranslationSettings>).detail
+  if (batchPrefillBusy.value) stopBatchPrefill('翻译设置已更新，批量预填充已停止。')
   if (settings) clearAfterSaveNext.value = settings.clearAfterSaveNext
 }
 onMounted(() => {
@@ -664,6 +685,7 @@ onMounted(() => {
   try {
     const stored = localStorage.getItem('sckit-save-mode')
     saveMode.value = saveModes.find(option => option.id === stored)?.id || 'next'
+    batchPrefillConcurrency.value = normalizePrefillConcurrency(localStorage.getItem('sckit-batch-prefill-concurrency'))
   } catch { /* Use the default when storage is unavailable. */ }
   activate()
 })
@@ -714,7 +736,7 @@ onBeforeUnmount(() => { if (batchPrefillBusy.value) stopBatchPrefill(); stopResi
     </main>
     </div>
     <Teleport to=".app-shell"><Transition name="fade"><div v-if="termTranslationOptions.length" ref="termTranslationPopup" class="term-translation-popup" role="menu" aria-label="选择要填入的译名" :style="termTranslationPopupStyle" @pointerdown.stop @click.stop><button v-for="option in termTranslationOptions" :key="option.translation" class="term-fill-pill" role="menuitem" @click="chooseTermTranslation(option)">{{ option.translation }}</button></div></Transition></Teleport>
-    <Transition name="dialog"><div v-if="showBatchPrefill" class="modal-backdrop" @click.self="closeBatchPrefill"><section class="info-dialog batch-prefill-dialog" role="dialog" aria-modal="true" aria-labelledby="batch-prefill-title" :aria-busy="batchPrefillBusy"><button class="icon-button modal-close" aria-label="关闭批量预填充窗口" :disabled="batchPrefillBusy" @click="closeBatchPrefill"><X :size="18" /></button><Languages :size="28" class="dialog-icon" /><h2 id="batch-prefill-title">全文翻译并预填充</h2><p class="dialog-description">逐条翻译当前文件中的原文。读取时已有译文、本机草稿和未保存编辑的条目会跳过；提交到 ParaTranz 时若远端随后发生修改，仍会覆盖。</p><fieldset class="batch-prefill-options" :disabled="batchPrefillBusy"><legend>选择翻译范围</legend><label><input v-model="batchPrefillScope" type="radio" name="batch-prefill-scope" value="selected" /><span><strong>已选中的文本</strong><small>{{ e.selectedIds.length }} 条，仅限当前列表页的勾选项。</small></span></label><label><input v-model="batchPrefillScope" type="radio" name="batch-prefill-scope" value="untranslated" /><span><strong>本文件所有未翻译文本</strong><small>读取整个当前文件的未翻译条目（约 {{ e.untranslated }} 条），不受当前页和搜索结果限制。</small></span></label></fieldset><fieldset class="batch-prefill-options" :disabled="batchPrefillBusy"><legend>选择保存位置</legend><label><input v-model="batchPrefillDestination" type="radio" name="batch-prefill-destination" value="local" /><span><strong>只保存在本机</strong><small>保存为本机草稿，ParaTranz 词条状态保持不变。</small></span></label><label><input v-model="batchPrefillDestination" type="radio" name="batch-prefill-destination" value="paratranz" /><span><strong>保存到 ParaTranz</strong><small>提交译文并将词条状态设为“未翻译”。</small></span></label></fieldset><div v-if="batchPrefillBusy" class="batch-prefill-progress" role="status"><div><LoadingIndicator :size="15" label="正在翻译" />正在翻译并保存 {{ batchPrefillProgress }} / {{ batchPrefillTotal }} 条</div><div class="progress-track"><span :style="{ width: `${batchPrefillTotal ? batchPrefillProgress / batchPrefillTotal * 100 : 0}%` }"></span></div></div><p v-if="batchPrefillError" class="batch-prefill-result" role="status">{{ batchPrefillError }}</p><details v-if="batchPrefillFailures.length"><summary>查看全部 {{ batchPrefillFailures.length }} 条失败记录</summary><p v-for="(failure, index) in batchPrefillFailures" :key="index">{{ failure }}</p></details><div v-if="batchReport.length" class="batch-prefill-actions"><button class="button compact" :disabled="batchPrefillBusy" @click="exportBatchReport">导出处理报告</button><button v-if="batchFailedItems.length" class="button compact" :disabled="batchPrefillBusy" @click="retryBatchFailures">重试失败项</button></div><div class="batch-prefill-actions"><button class="button" :disabled="batchPrefillBusy" @click="closeBatchPrefill">关闭</button><button v-if="batchPrefillBusy" class="button primary" @click="stopBatchPrefill()"><X :size="14" />停止</button><button v-else class="button primary" :disabled="!auxiliaryPanel?.canPrefillTranslation || (batchPrefillScope === 'selected' && !e.selectedIds.length) || !e.connected || !e.sessionInfo.authenticated" @click="startBatchPrefill"><Languages :size="14" />开始翻译并预填充</button></div></section></div></Transition>
+    <Transition name="dialog"><div v-if="showBatchPrefill" class="modal-backdrop" @click.self="closeBatchPrefill"><section class="info-dialog batch-prefill-dialog" role="dialog" aria-modal="true" aria-labelledby="batch-prefill-title" :aria-busy="batchPrefillBusy"><button class="icon-button modal-close" aria-label="关闭批量预填充窗口" :disabled="batchPrefillBusy" @click="closeBatchPrefill"><X :size="18" /></button><Languages :size="28" class="dialog-icon" /><h2 id="batch-prefill-title">全文翻译并预填充</h2><p class="dialog-description">翻译当前文件中的原文。读取时已有译文、本机草稿和未保存编辑的条目会跳过；提交到 ParaTranz 时若远端随后发生修改，仍会覆盖。</p><fieldset class="batch-prefill-options" :disabled="batchPrefillBusy"><legend>选择翻译范围</legend><label><input v-model="batchPrefillScope" type="radio" name="batch-prefill-scope" value="selected" /><span><strong>已选中的文本</strong><small>{{ e.selectedIds.length }} 条，仅限当前列表页的勾选项。</small></span></label><label><input v-model="batchPrefillScope" type="radio" name="batch-prefill-scope" value="untranslated" /><span><strong>本文件所有未翻译文本</strong><small>读取整个当前文件的未翻译条目（约 {{ e.untranslated }} 条），不受当前页和搜索结果限制。</small></span></label></fieldset><fieldset class="batch-prefill-options" :disabled="batchPrefillBusy"><legend>选择保存位置</legend><label><input v-model="batchPrefillDestination" type="radio" name="batch-prefill-destination" value="local" /><span><strong>只保存在本机</strong><small>保存为本机草稿，ParaTranz 词条状态保持不变。</small></span></label><label><input v-model="batchPrefillDestination" type="radio" name="batch-prefill-destination" value="paratranz" /><span><strong>保存到 ParaTranz</strong><small>提交译文并将词条状态设为“未翻译”。</small></span></label></fieldset><fieldset class="batch-prefill-options" :disabled="batchPrefillBusy"><legend>执行设置</legend><label class="batch-prefill-concurrency" for="batch-prefill-concurrency"><span><strong>并发数量</strong><small id="batch-prefill-concurrency-description">同时翻译的条目数，默认 1。按翻译服务允许的并发数量设置。</small></span><input id="batch-prefill-concurrency" v-model.number="batchPrefillConcurrency" class="form-input" type="number" min="1" :max="MAX_PREFILL_CONCURRENCY" step="1" aria-describedby="batch-prefill-concurrency-description" @change="batchPrefillConcurrency = normalizePrefillConcurrency(batchPrefillConcurrency)" /></label></fieldset><div v-if="batchPrefillBusy" class="batch-prefill-progress" role="status"><div><LoadingIndicator :size="15" label="正在翻译" />正在翻译并保存 {{ batchPrefillProgress }} / {{ batchPrefillTotal }} 条</div><div class="progress-track"><span :style="{ width: `${batchPrefillTotal ? batchPrefillProgress / batchPrefillTotal * 100 : 0}%` }"></span></div></div><p v-if="batchPrefillError" class="batch-prefill-result" role="status">{{ batchPrefillError }}</p><details v-if="batchPrefillFailures.length"><summary>查看全部 {{ batchPrefillFailures.length }} 条失败记录</summary><p v-for="(failure, index) in batchPrefillFailures" :key="index">{{ failure }}</p></details><div v-if="batchReport.length" class="batch-prefill-actions"><button class="button compact" :disabled="batchPrefillBusy" @click="exportBatchReport">导出处理报告</button><button v-if="batchFailedItems.length" class="button compact" :disabled="batchPrefillBusy" @click="retryBatchFailures">重试失败项</button></div><div class="batch-prefill-actions"><button class="button" :disabled="batchPrefillBusy" @click="closeBatchPrefill">关闭</button><button v-if="batchPrefillBusy" class="button primary" @click="stopBatchPrefill()"><X :size="14" />停止</button><button v-else class="button primary" :disabled="!auxiliaryPanel?.canPrefillTranslation || (batchPrefillScope === 'selected' && !e.selectedIds.length) || !e.connected || !e.sessionInfo.authenticated" @click="startBatchPrefill"><Languages :size="14" />开始翻译并预填充</button></div></section></div></Transition>
     <Transition name="dialog"><div v-if="showShortcuts || showOverview" class="modal-backdrop" @click.self="showShortcuts = false; showOverview = false"><section class="info-dialog" role="dialog" aria-modal="true" :aria-label="showShortcuts ? '快捷键' : '文件概览'"><button class="icon-button modal-close" aria-label="关闭窗口" @click="showShortcuts = false; showOverview = false"><X :size="18" /></button><template v-if="showShortcuts"><Keyboard :size="28" class="dialog-icon" /><h2>快捷键</h2><div v-for="[key, label] in shortcuts" :key="key" class="shortcut-row"><span>{{ label }}</span><kbd>{{ key }}</kbd></div></template><template v-else><BarChart3 :size="28" class="dialog-icon" /><h2>文件概览</h2><p class="dialog-description">{{ e.file.name }}<span v-if="!e.connected"> · 7 条样例</span></p><div class="progress-heading"><strong>{{ progress }}<small>%</small></strong><span>{{ e.file.translated }} / {{ e.file.total }} 已翻译</span></div><div class="progress-track"><span :style="{ width: `${progress}%` }"></span></div><div class="overview-stats"><div><span>未翻译</span><strong>{{ e.untranslated }}</strong></div><div><span>有疑问</span><strong>{{ e.file.disputed }}</strong></div><div><span>已检查</span><strong>{{ e.file.checked }}</strong></div><div><span>已审核</span><strong>{{ e.file.reviewed }}</strong></div></div></template></section></div></Transition>
     <Teleport to=".app-shell"><Transition name="menu"><div v-if="selectionContextMenu" class="selection-context-menu" role="menu" :style="selectionMenuStyle(selectionContextMenu)" @click.stop><button role="menuitem" @click="runSelectionContextAction()">{{ selectionContextMenu.word ? '查询剑桥中文释义' : selectionContextMenu.selected ? '翻译所选内容到简体中文' : '翻译当前句子到简体中文' }}</button><button v-if="!selectionContextMenu.word && (e.termsBusy || (preservedSelection?.replacements.length || 0) > 0)" role="menuitem" :disabled="e.termsBusy || !preservedSelection?.replacements.length" @click="runSelectionContextAction(true)">{{ e.termsBusy ? '保留译名翻译（术语加载中…）' : `保留译名翻译（${preservedSelection?.replacements.length} 处）` }}</button><p>{{ selectionContextMenu.text }}</p></div></Transition></Teleport>
   </div>
