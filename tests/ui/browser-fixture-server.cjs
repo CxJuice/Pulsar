@@ -1,7 +1,8 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
-const fixture = fs.readFileSync(path.join(__dirname,'browser-fixture.js'),'utf8');
+const retry = fs.readFileSync(path.join(__dirname,'../../electron/translation-retry.cjs'),'utf8');
+const fixture = `(() => { const module = {exports:{}}; ${retry}; window.__auditRetryTranslation = module.exports.withTranslationTimeoutRetries; })();` + fs.readFileSync(path.join(__dirname,'browser-fixture.js'),'utf8');
 const server = http.createServer((req,res)=>{
   const upstream=http.request({hostname:'127.0.0.1',port:3000,path:req.url,method:req.method,headers:{...req.headers,host:'127.0.0.1:3000','accept-encoding':'identity'}},response=>{
     const headers={...response.headers}; delete headers['content-length']; delete headers['transfer-encoding'];

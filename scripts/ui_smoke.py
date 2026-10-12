@@ -77,20 +77,22 @@ UI_CHECK = r'''async (page) => {
   if (await concurrency.inputValue() !== '4') throw new Error('The chosen concurrency was not retained');
   await concurrency.fill('3');
   await concurrency.blur();
-  await page.evaluate(() => window.__auditConfigureTranslation({ delay: 150, failOnceText: 'Audit entry 23' }));
+  await page.evaluate(() => window.__auditConfigureTranslation({ delay: 150, failOnceText: 'Audit entry 23', timeouts: { 'Audit entry 24': 1, 'Audit entry 25': 3 } }));
   await batch.getByRole('button', { name: '开始翻译并预填充' }).click();
-  await batch.getByText(/已处理 40 \/ 40 条：成功 39、失败 1/).waitFor();
+  await batch.getByText(/已处理 40 \/ 40 条：成功 38、失败 2/).waitFor();
   const completed = await page.evaluate(() => ({ stats: window.__auditTranslationStats(), drafts: window.__auditDrafts() }));
-  if (completed.stats.maximum !== 3 || completed.stats.started !== 40) throw new Error('The full-file batch did not obey concurrency three');
+  if (completed.stats.maximum !== 3 || completed.stats.started !== 43) throw new Error('Timeout retries exceeded concurrency three or used the wrong attempt count');
+  if (completed.stats.attempts['Audit entry 24'] !== 2 || completed.stats.attempts['Audit entry 25'] !== 3) throw new Error('Timeouts did not recover or respect the retry limit');
+  if (await batch.locator('details').count() || await batch.getByText(/本地模拟翻译失败|翻译请求超时|KEY_038/).count()) throw new Error('Individual entry failures are still displayed');
   for (let id = 121; id <= 160; id++) {
-    if (id === 123) continue;
+    if (id === 123 || id === 125) continue;
     const expected = '本地模拟译文：Audit entry ' + String(id - 100).padStart(2, '0');
     if (completed.drafts['4242/' + id]?.translation !== expected) throw new Error('Parallel results were written to the wrong entry');
   }
   await page.evaluate(() => window.__auditConfigureTranslation({ delay: 150 }));
   await batch.getByRole('button', { name: '重试失败项' }).click();
-  await batch.getByText(/已处理 1 \/ 1 条：成功 1、失败 0/).waitFor();
-  if ((await page.evaluate(() => window.__auditTranslationStats())).started !== 1) throw new Error('Retry translated successful entries again');
+  await batch.getByText(/已处理 2 \/ 2 条：成功 2、失败 0/).waitFor();
+  if ((await page.evaluate(() => window.__auditTranslationStats())).started !== 2) throw new Error('Retry translated successful entries again');
   await batch.getByRole('button', { name: '关闭', exact: true }).click();
   await page.reload();
   await page.getByRole('button', { name: /审计测试项目 #4242/ }).click();

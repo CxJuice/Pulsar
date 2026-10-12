@@ -8,6 +8,7 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 const { SocksProxyAgent } = require('socks-proxy-agent');
+const { withTranslationTimeoutRetries } = require('./translation-retry.cjs');
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'sckit', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }]);
 const devUrl = process.env.SCKIT_DEV_URL;
@@ -327,6 +328,11 @@ function postTranslationJson(target, headers, payload, agent, signal) {
     };
     let request;
     const abortRequest = () => request?.destroy(new Error('翻译已取消'));
+    const timeoutRequest = () => {
+      const error = Object.assign(new Error('翻译请求超时'), { code: 'ETIMEDOUT' });
+      settle(reject, error);
+      request?.destroy(error);
+    };
     const client = target.protocol === 'https:' ? https : http;
     request = client.request(target, {
       method: 'POST', agent, timeout: 30000,
@@ -348,14 +354,14 @@ function postTranslationJson(target, headers, payload, agent, signal) {
         try { data = JSON.parse(responseBody); } catch { data = null; }
         if ((response.statusCode || 500) < 200 || (response.statusCode || 500) >= 300) {
           const message = data?.error?.message || data?.message;
-          settle(reject, new Error(typeof message === 'string' && message.length < 500 ? message : `翻译服务返回 HTTP ${response.statusCode || 500}`));
+          settle(reject, Object.assign(new Error(typeof message === 'string' && message.length < 500 ? message : `翻译服务返回 HTTP ${response.statusCode || 500}`), { status: response.statusCode || 500 }));
         } else if (!data) settle(reject, new Error('翻译服务返回了无效响应'));
         else settle(resolve, data);
       });
     });
-    request.on('timeout', () => request.destroy(new Error('翻译请求超时')));
+    request.on('timeout', timeoutRequest);
     request.on('error', error => settle(reject, error));
-    deadline = setTimeout(() => request.destroy(new Error('翻译请求超时')), 45000);
+    deadline = setTimeout(timeoutRequest, 45000);
     signal?.addEventListener('abort', abortRequest, { once: true });
     if (signal?.aborted) abortRequest();
     request.end(body);
@@ -434,7 +440,7 @@ async function translateToChinese(text, suppliedContext = {}, signal) {
   }
   const agent = settings.provider === 'llm' && target.protocol === 'http:' ? undefined : await resolveTranslationAgent(target.href, settings.proxy);
   if (signal?.aborted) throw new Error('翻译已取消');
-  const data = await postTranslationJson(target, headers, payload, agent, signal);
+  const data = await withTranslationTimeoutRetries(() => postTranslationJson(target, headers, payload, agent, signal), signal);
   if (signal?.aborted) throw new Error('翻译已取消');
   const messageContent = data.choices?.[0]?.message?.content;
   const responseContent = Array.isArray(data.output) ? data.output.flatMap(item => Array.isArray(item?.content) ? item.content : []) : [];

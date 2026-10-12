@@ -7,6 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
 const vm = require('node:vm');
+const { isTranslationTimeout, withTranslationTimeoutRetries } = require('../electron/translation-retry.cjs');
 
 const mainPath = path.resolve(__dirname, '../electron/main.cjs');
 const requireFromMain = createRequire(mainPath);
@@ -396,6 +397,94 @@ test('translation request rejects when a response disconnects before its body co
     ]),
     /翻译服务响应中途断开/,
   );
+});
+
+test('translation timeouts retry twice and preserve the last failure', async () => {
+  let attempts = 0;
+  const failure = Object.assign(new Error('翻译请求超时'), { code: 'ETIMEDOUT' });
+  await assert.rejects(withTranslationTimeoutRetries(async () => {
+    attempts++;
+    throw failure;
+  }, undefined, { delayMs: 0 }), error => error === failure);
+  assert.equal(attempts, 3);
+  for (const error of [new Error('翻译请求超时'), new Error('request timed out'), { name: 'TimeoutError' },
+    { code: 'ESOCKETTIMEDOUT' }, { status: 408 }, { status: 504 },
+    { status: 502, message: 'upstream request timed out' }]) assert.equal(isTranslationTimeout(error), true);
+});
+
+test('a stalled partial translation response preserves timeout classification and can recover', async t => {
+  const h = harness(t);
+  h.context.setTimeout = (callback, delay, ...args) => setTimeout(callback, delay === 45000 ? 15 : delay, ...args);
+  let attempts = 0;
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    if (++attempts < 3) response.write('{"partial":');
+    else response.end('{"finished":true}');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const target = new URL(`http://127.0.0.1:${server.address().port}/`);
+  const response = await withTranslationTimeoutRetries(() => h.context.postTranslationJson(target, {}, {}), undefined, { delayMs: 0 });
+  assert.equal(response.finished, true);
+  assert.equal(attempts, 3);
+});
+
+test('translation authentication, rate limits and malformed responses are not retried', async () => {
+  for (const error of [Object.assign(new Error('timeout mentioned in an auth error'), { status: 401 }),
+    Object.assign(new Error('rate limited'), { status: 429 }), new Error('翻译服务返回了无效响应')]) {
+    let attempts = 0;
+    await assert.rejects(withTranslationTimeoutRetries(async () => {
+      attempts++;
+      throw error;
+    }, undefined, { delayMs: 0 }), rejected => rejected === error);
+    assert.equal(attempts, 1);
+  }
+});
+
+test('canceling a translation interrupts the retry delay without sending another request', async () => {
+  const controller = new AbortController();
+  let attempts = 0;
+  const pending = withTranslationTimeoutRetries(async () => {
+    attempts++;
+    throw new Error('翻译请求超时');
+  }, controller.signal, { delayMs: 10000 });
+  const rejected = assert.rejects(pending, /翻译已取消/);
+  await new Promise(resolve => setImmediate(resolve));
+  controller.abort();
+  await rejected;
+  assert.equal(attempts, 1);
+});
+
+test('LLM translation retries HTTP 504 with the same source and reference context', async t => {
+  const h = harness(t);
+  const bodies = [];
+  const server = http.createServer((request, response) => {
+    let body = '';
+    request.setEncoding('utf8');
+    request.on('data', part => { body += part; });
+    request.on('end', () => {
+      bodies.push(JSON.parse(body));
+      response.writeHead(bodies.length < 3 ? 504 : 200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify(bodies.length < 3 ? { message: 'Gateway deadline exceeded' }
+        : { choices: [{ message: { content: '测试译文' } }] }));
+    });
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const target = `http://127.0.0.1:${server.address().port}/v1/chat/completions`;
+  h.run(`saveTranslationSettings({ ...defaultTranslationSettings(), provider: 'llm', mode: 'api', llmRequestUrl: '${target}', llmModel: 'synthetic-model' })`);
+  const context = { key: 'TEST_KEY', recommendations: [{ original: 'Test source', translation: '参考译文', similarity: 0.9 }],
+    terms: [{ term: 'Test', translation: '测试' }] };
+  h.context.testTranslationContext = context;
+  const translated = await h.run("translateToChinese('Test source', testTranslationContext)");
+  assert.equal(translated.text, '测试译文');
+  assert.equal(bodies.length, 3);
+  assert.deepEqual(bodies[1], bodies[0]);
+  assert.deepEqual(bodies[2], bodies[0]);
+  const reference = JSON.parse(bodies[0].messages[1].content).reference;
+  assert.equal(reference.key, context.key);
+  assert.equal(reference.recommendations[0].translation, '参考译文');
+  assert.equal(reference.terms[0].translation, '测试');
 });
 
 test('canceling one list request aborts it without affecting another sender', async t => {

@@ -9,12 +9,12 @@
   const drafts={}; let authenticated=true; let settings={provider:'google',mode:'api',deeplPlan:'free',proxy:{mode:'direct',host:'127.0.0.1',port:7890},googleConfigured:true,deeplConfigured:false,llmRequestUrl:'',llmModel:'',llmPrefixPrompt:'',llmConfigured:false,llmContext:{key:true,recommendations:true,recommendationCount:1,terms:true,notes:true},clearAfterSaveNext:true,useTermTranslations:true};
   const calls=[]; const record=(action,payload)=>{calls.push({action,payload:copy(payload||{}),at:Date.now()});document.documentElement.dataset.auditCalls=JSON.stringify(calls);};
   const translationRequests = new Map();
-  let translationConfig = { delay: 150, failOnceText: '', slowAfterFirst: false };
-  let translationStats = { active: 0, maximum: 0, started: 0, canceled: 0 };
+  let translationConfig = { delay: 150, failOnceText: '', slowAfterFirst: false, timeouts: {} };
+  let translationStats = { active: 0, maximum: 0, started: 0, canceled: 0, attempts: {} };
   window.__auditConfigureTranslation = config => {
     if (translationRequests.size) throw new Error('Synthetic translations are still active');
-    translationConfig = { delay: 150, failOnceText: '', slowAfterFirst: false, ...config };
-    translationStats = { active: 0, maximum: 0, started: 0, canceled: 0 };
+    translationConfig = { delay: 150, failOnceText: '', slowAfterFirst: false, timeouts: {}, ...config };
+    translationStats = { active: 0, maximum: 0, started: 0, canceled: 0, attempts: {} };
   };
   window.__auditTranslationStats = () => copy(translationStats);
   window.__auditDrafts = () => copy(drafts);
@@ -53,17 +53,35 @@
     async testProxy(proxy){return ok({proxy,ok:true,results:[]});},
     async translateToChinese(text,context,id){
       record('translate',{text,context,id});
-      translationStats.started++;
-      translationStats.maximum = Math.max(translationStats.maximum, ++translationStats.active);
-      const delay = translationConfig.delay * (translationConfig.slowAfterFirst && translationStats.started > 1 ? 10 : 1);
-      return new Promise(resolve => {
-        const finish = result => { clearTimeout(timer); translationRequests.delete(id); translationStats.active--; resolve(result); };
-        const timer = setTimeout(() => {
-          if (text === translationConfig.failOnceText) { translationConfig.failOnceText = ''; finish({ok:false,message:'本地模拟翻译失败'}); }
-          else finish(ok({text:'本地模拟译文：'+text,provider:settings.provider}));
-        }, delay);
-        translationRequests.set(id, () => { translationStats.canceled++; finish({ok:false,message:'翻译已取消'}); });
-      });
+      const controller = new AbortController();
+      translationRequests.set(id, () => { translationStats.canceled++; controller.abort(); });
+      try {
+        const result = await window.__auditRetryTranslation(() => {
+          translationStats.started++;
+          translationStats.attempts[text] = (translationStats.attempts[text] || 0) + 1;
+          translationStats.maximum = Math.max(translationStats.maximum, ++translationStats.active);
+          const delay = translationConfig.delay * (translationConfig.slowAfterFirst && translationStats.started > 1 ? 10 : 1);
+          return new Promise((resolve,reject) => {
+            let settled = false;
+            const finish = (callback,result) => {
+              if (settled) return;
+              settled = true; clearTimeout(timer);
+              controller.signal.removeEventListener('abort', abort);
+              translationStats.active--; callback(result);
+            };
+            const abort = () => finish(reject,new Error('翻译已取消'));
+            const timer = setTimeout(() => {
+              if (translationConfig.timeouts[text] > 0) { translationConfig.timeouts[text]--; finish(reject,Object.assign(new Error('翻译请求超时'),{status:504})); }
+              else if (text === translationConfig.failOnceText) { translationConfig.failOnceText = ''; finish(reject,new Error('本地模拟翻译失败')); }
+              else finish(resolve,{text:'本地模拟译文：'+text,provider:settings.provider});
+            }, delay);
+            controller.signal.addEventListener('abort',abort,{once:true});
+            if (controller.signal.aborted) abort();
+          });
+        },controller.signal);
+        return ok(result);
+      } catch(error) { return {ok:false,message:error.message}; }
+      finally { translationRequests.delete(id); }
     },
     async cancelTranslation(id){record('cancelTranslation',{id});translationRequests.get(id)?.();return ok(null);},
     async fetchCommunityTranslationCandidates(){return ok({entries:[],warnings:[],fetchedAt:new Date().toISOString()});},
