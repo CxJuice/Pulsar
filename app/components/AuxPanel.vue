@@ -28,8 +28,9 @@ const useTermTranslations = ref(true)
 const translationLlmModel = ref(''), translationLlmContext = ref<TranslationLlmContextSettings>({ key: true, recommendations: true, recommendationCount: 1, terms: true, notes: true })
 const translationApiProvider = ref<TranslationProvider | null>(null), translationWebQueried = ref(false)
 const translationSettingsReady = ref(false)
-let translationRequest = 0, prefillRequest = 0, dictionaryRequest = 0, translationStarting = false
+let translationRequest = 0, prefillRequest = 0, dictionaryRequest = 0, translationStarting = false, translationEntryVersion = 0
 let activeTranslationRequestId: string | null = null, activePrefillRequestId: string | null = null
+let prefillFollowsSelection = false
 let dictionaryObserver: ResizeObserver | undefined, dictionaryFrame = 0, auxPreferencesFrame = 0
 let modalObserver: MutationObserver | undefined
 let blockingModalPresent = false
@@ -199,6 +200,7 @@ function applyTranslationSettings(settings: TranslationSettings) {
     cancelTranslationRequest(activePrefillRequestId)
     activeTranslationRequestId = null
     activePrefillRequestId = null
+    prefillFollowsSelection = false
     translationBusy.value = false
     translationResult.value = ''
     translationApiProvider.value = null
@@ -338,14 +340,16 @@ async function translateSelectedText(value = translationSource.value) {
   translationResult.value = ''
   translationError.value = ''
   translationApiProvider.value = null
+  const entryVersion = translationEntryVersion
+  const translationEntry = props.editor.selected
   let request = 0, requestId: string | null = null
   try {
     if (!translationSettingsReady.value) await loadTranslationSelection()
+    if (entryVersion !== translationEntryVersion) return
     if (!translationSettingsReady.value) throw new Error(translationError.value || '无法读取翻译设置')
     translationStarting = false
     request = ++translationRequest
     translationBusy.value = true
-    const translationEntry = props.editor.selected
     if (translationAccessMode.value === 'web') {
       if (!window.scKit?.translatorView) throw new Error('翻译网页仅在桌面应用中嵌入显示。')
       const source = toEditorText(value)
@@ -368,7 +372,7 @@ async function translateSelectedText(value = translationSource.value) {
       translationApiProvider.value = result.provider
     }
   } catch (reason) {
-    if (!request || request === translationRequest) translationError.value = (reason as Error).message || '翻译失败'
+    if (entryVersion === translationEntryVersion && (!request || request === translationRequest)) translationError.value = (reason as Error).message || '翻译失败'
   } finally {
     translationStarting = false
     if (requestId && activeTranslationRequestId === requestId) activeTranslationRequestId = null
@@ -383,6 +387,7 @@ function cancelSelectedTranslation() {
   cancelTranslationRequest(activePrefillRequestId)
   activeTranslationRequestId = null
   activePrefillRequestId = null
+  prefillFollowsSelection = false
   if (translationAccessMode.value === 'web') window.scKit?.translatorView({ visible: false, bounds: null })
   translationBusy.value = false
   translationError.value = '翻译已停止。'
@@ -391,7 +396,9 @@ async function translatePrefillEntry(value: string, translationEntry: StringItem
   const source = toTranslationRequestText(value, props.breaks !== false)
   if (!source.trim()) throw new Error('原文为空，无法翻译')
   if (translationBusy.value) throw new Error('已有翻译正在进行，请先停止当前翻译')
+  const entryVersion = translationEntryVersion
   if (!translationSettingsReady.value) await loadTranslationSelection()
+  if (requireSelected && entryVersion !== translationEntryVersion) throw new Error('当前词条已切换，请重新发起翻译')
   if (!translationSettingsReady.value) throw new Error(translationError.value || '无法读取翻译设置')
   if (translationAccessMode.value !== 'api') throw new Error('一键翻译预填充仅支持 API 或 AI 模式')
   if (!window.scKit?.translateToChinese) throw new Error('翻译服务仅在桌面应用中可用')
@@ -407,6 +414,7 @@ async function translatePrefillEntry(value: string, translationEntry: StringItem
   const request = ++prefillRequest
   const requestId = newTranslationRequestId()
   activePrefillRequestId = requestId
+  prefillFollowsSelection = requireSelected
   translationBusy.value = true
   try {
     const result = await requestConfiguredTranslation(source, translationEntry, () => request === prefillRequest, requestId, requireSelected)
@@ -420,7 +428,7 @@ async function translatePrefillEntry(value: string, translationEntry: StringItem
     if (request === prefillRequest && showResult) translationError.value = (reason as Error).message || '翻译失败'
     throw reason
   } finally {
-    if (activePrefillRequestId === requestId) activePrefillRequestId = null
+    if (activePrefillRequestId === requestId) { activePrefillRequestId = null; prefillFollowsSelection = false }
     if (request === prefillRequest) translationBusy.value = false
   }
 }
@@ -435,10 +443,25 @@ function cancelPrefillTranslation() {
   prefillRequest++
   cancelTranslationRequest(activePrefillRequestId)
   activePrefillRequestId = null
+  prefillFollowsSelection = false
   translationBusy.value = false
   translationError.value = '翻译已停止。'
 }
 const canPrefillTranslation = computed(() => translationSettingsReady.value && translationAccessMode.value === 'api')
+watch([() => props.editor.selected?.project, () => props.editor.selected?.id, () => props.editor.selected?.original], () => {
+  translationEntryVersion++
+  translationRequest++
+  cancelTranslationRequest(activeTranslationRequestId)
+  activeTranslationRequestId = null
+  if (prefillFollowsSelection) cancelPrefillTranslation()
+  if (!activePrefillRequestId) translationBusy.value = false
+  translationSource.value = toTranslationRequestText(props.editor.selected?.original || '', props.breaks !== false)
+  translationResult.value = ''
+  translationError.value = ''
+  translationApiProvider.value = null
+  translationWebQueried.value = false
+  nextTick(scheduleDictionaryBounds)
+}, { immediate: true })
 defineExpose({ focusTerm, openHistorySearch, lookupDictionary, translateSelectedText, cancelSelectedTranslation, translateForPrefill, translateEntryForPrefill, cancelPrefillTranslation, canPrefillTranslation, translationBusy })
 function listenDictionaryLayout() {
   window.addEventListener('resize', scheduleDictionaryBounds)
