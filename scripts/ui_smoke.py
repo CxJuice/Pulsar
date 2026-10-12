@@ -29,24 +29,21 @@ NODE = shutil.which("node")
 UI_CHECK = r'''async (page) => {
   await page.getByRole('button', { name: /审计测试项目 #4242/ }).click();
   await page.getByRole('button', { name: '编辑全部文本' }).click();
-  const dialog = page.getByRole('dialog', { name: /全文编辑器/ });
-  const translation = dialog.getByRole('textbox', { name: '编辑 KEY_058 的译文' });
-  await translation.fill('值：~amount(10) <EM4>账本</EM4>\\n下一行');
-  await dialog.getByRole('status').filter({ hasText: '译文未使用术语表中的对应译名' }).waitFor();
-  await translation.fill('值：~amount(10) <EM4>账户</EM4>\\n下一行');
-  if (await dialog.getByRole('status').filter({ hasText: '译文未使用术语表中的对应译名' }).count()) throw new Error('Valid glossary translation still has a term warning');
-  await page.evaluate(() => window.__auditSetRemote(103, '远端新译文'));
-  await dialog.getByRole('button', { name: '保存 KEY_058' }).click();
-  await dialog.getByRole('status').filter({ hasText: '已覆盖远端新修改' }).waitFor();
-  await page.waitForFunction(() => !document.querySelector('button[aria-label="关闭全文编辑器"]')?.disabled);
-  await dialog.getByRole('button', { name: '关闭全文编辑器' }).click();
-  await dialog.waitFor({ state: 'hidden' });
-  await page.getByRole('button', { name: '编辑全部文本' }).click();
-  await page.waitForFunction(() => !document.querySelector('button[aria-label="关闭全文编辑器"]')?.disabled);
-  await dialog.getByRole('textbox', { name: '搜索项目全部文本' }).focus();
-  await page.keyboard.press('Escape');
-  await dialog.waitFor({ state: 'hidden' });
-  await page.getByRole('main', { name: '项目文件管理' }).getByRole('button', { name: /audit.strings.*开始翻译/ }).click();
+  const waitWorkspace = async fileId => page.waitForFunction(fileId => {
+    const workspace = JSON.parse(localStorage.getItem('sckit-workspace'));
+    return workspace?.projectId === 4242 && workspace.fileId === fileId
+      && document.querySelector('.string-list')?.getAttribute('aria-busy') === 'false';
+  }, fileId);
+  await waitWorkspace(0);
+  const aggregateRows = page.locator('.string-list .string-row');
+  if (await aggregateRows.count() !== 50) throw new Error('Edit all did not open the paginated aggregate workspace');
+  if (await aggregateRows.filter({ has: page.getByRole('button', { name: '打开词条 KEY_058', exact: true }) }).count() !== 1) throw new Error('The first aggregate page is missing its expected entry');
+  if (await page.locator('.row-file').count() !== 50) throw new Error('Aggregate rows are missing their source file labels');
+  if (await page.getByRole('dialog', { name: /全文编辑器/ }).count()) throw new Error('Edit all opened a separate editor instead of the aggregate workspace');
+  const filePicker = page.getByRole('combobox', { name: '翻译文件', exact: true });
+  await filePicker.click();
+  await page.getByRole('option', { name: 'audit.strings', exact: true }).click();
+  await waitWorkspace(42420);
   await page.getByRole('combobox', { name: '词条状态', exact: true }).click();
   await page.getByRole('option', { name: '所有状态' }).click();
   await page.getByRole('textbox', { name: '搜索字符串' }).fill('KEY_003');

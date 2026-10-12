@@ -121,6 +121,9 @@ jobs:
       - name: Test browser UI flows with local fixture
         if: matrix.platform == 'linux' && matrix.arch == 'x64'
         run: python scripts/ui_smoke.py
+      - name: Test aggregate editor UI flows with local fixture
+        if: matrix.platform == 'linux' && matrix.arch == 'x64'
+        run: python scripts/check_aggregate.py
       - name: Record build source
         run: node scripts/write-build-info.mjs
       - name: Smoke test desktop UI and IPC
