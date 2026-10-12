@@ -24,9 +24,6 @@ jobs:
       matrix:
         include:
           - { platform: win, arch: x64, runner: windows-2025, rust: x86_64-pc-windows-msvc }
-          - { platform: win, arch: arm64, runner: windows-11-arm, rust: aarch64-pc-windows-msvc }
-          - { platform: mac, arch: x64, runner: macos-15-intel, rust: x86_64-apple-darwin }
-          - { platform: mac, arch: arm64, runner: macos-15, rust: aarch64-apple-darwin }
           - { platform: mac, arch: universal, runner: macos-15, rust: universal }
     defaults:
       run:
