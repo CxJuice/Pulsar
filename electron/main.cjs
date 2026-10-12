@@ -22,6 +22,7 @@ if (smoke) {
 const serviceKey = randomBytes(32).toString('hex');
 let mainWindow, loginWindow, dictionaryView, translatorView, auxCustomizationWindow, sidecar, serviceUrl, closing = false;
 let restartingService = false, activeServiceCredentials = null;
+let tokenLoginInFlight = false;
 let windowStateTimer, windowWasMaximized = false, dictionaryLookupRequest = 0;
 let translatorProxySignature = '', translatorViewRequest = 0, translatorLastFilledText = '';
 const activeTranslationRequests = new Map();
@@ -991,12 +992,106 @@ async function restartService() {
   } finally { restartingService = false; }
 }
 const paraTranzAuthCookieNames = new Set(['sid', 'user', 'permissionsHash', 'locale', 'XSRF-TOKEN']);
-async function paraTranzAuthCookies() {
-  const cookies = await session.fromPartition('persist:paratranz').cookies.get({ url: 'https://paratranz.cn' });
+async function paraTranzAuthCookies(targetSession = session.fromPartition('persist:paratranz')) {
+  const cookies = await targetSession.cookies.get({ url: 'https://paratranz.cn' });
   return cookies.filter(cookie => paraTranzAuthCookieNames.has(cookie.name));
 }
 function cookieHeader(cookies) {
   return cookies.map(cookie => `${cookie.name}=${cookie.value}`).join('; ');
+}
+function paraTranzCookieDetails(cookie) {
+  const details = {
+    url: `https://paratranz.cn${cookie.path || '/'}`, name: cookie.name, value: cookie.value,
+    path: cookie.path || '/', secure: cookie.secure, httpOnly: cookie.httpOnly, sameSite: cookie.sameSite,
+  };
+  if (!cookie.hostOnly) details.domain = cookie.domain;
+  if (!cookie.session && Number.isFinite(cookie.expirationDate)) details.expirationDate = cookie.expirationDate;
+  return details;
+}
+async function replaceParaTranzAuthCookies(targetSession, cookies) {
+  for (const cookie of await paraTranzAuthCookies(targetSession)) {
+    await targetSession.cookies.remove(`https://paratranz.cn${cookie.path || '/'}`, cookie.name);
+  }
+  for (const cookie of cookies) await targetSession.cookies.set(paraTranzCookieDetails(cookie));
+}
+function submitParaTranzToken(targetSession, token) {
+  // Match the website's form submission. net.request exposes redirects, whereas
+  // session.fetch with redirect: manual rejects them without a response.
+  return new Promise(resolve => {
+    let request, settled = false, redirects = 0;
+    const finish = result => {
+      if (settled) return;
+      settled = true; clearTimeout(timer);
+      resolve(result);
+      request?.abort();
+    };
+    const timer = setTimeout(() => finish({ ok: false, status: 504, message: 'ParaTranz 登录超时，请稍后重试' }), 30000);
+    try {
+      request = net.request({ url: 'https://paratranz.cn/oauth/token', method: 'POST', session: targetSession, redirect: 'manual', credentials: 'include' });
+      request.setHeader('Content-Type', 'application/x-www-form-urlencoded');
+      request.setHeader('Origin', 'https://paratranz.cn');
+      request.setHeader('Referer', 'https://paratranz.cn/login');
+      request.on('redirect', (_status, method, url) => {
+        let target;
+        try { target = new URL(url); } catch { return finish({ ok: false, status: 502, message: 'ParaTranz 登录返回了无效的跳转地址' }); }
+        if (target.origin !== 'https://paratranz.cn' || method !== 'GET' || ++redirects > 5) {
+          return finish({ ok: false, status: 502, message: 'ParaTranz 登录返回了异常跳转' });
+        }
+        if (target.pathname === '/login' && target.searchParams.has('fail')) {
+          return finish({ ok: false, status: 401, message: 'Token 无效或已过期，请在 ParaTranz 个人设置中重新获取' });
+        }
+        request.followRedirect();
+      });
+      request.on('response', response => {
+        response.on('error', () => finish({ ok: false, status: 502, message: '读取 ParaTranz 登录响应失败' }));
+        response.on('end', () => finish(response.statusCode >= 200 && response.statusCode < 300
+          ? { ok: true }
+          : { ok: false, status: response.statusCode, message: `ParaTranz 登录失败（HTTP ${response.statusCode}）` }));
+        response.on('data', () => {});
+      });
+      request.on('error', () => finish({ ok: false, status: 502, message: '无法连接 ParaTranz，请检查网络或代理设置' }));
+      request.end(`token=${encodeURIComponent(token)}`);
+    } catch { finish({ ok: false, status: 502, message: '无法发起 ParaTranz 登录请求' }); }
+  });
+}
+async function tokenConnection(token, project = 0) {
+  const normalized = typeof token === 'string' ? token.trim().replace(/^Bearer\s+/i, '') : '';
+  if (normalized.length !== 32 || /[\s\x00-\x1f\x7f]/.test(normalized) || !Number.isSafeInteger(project) || project < 0 || project > 2147483647) {
+    return { ok: false, status: 400, message: '请输入 ParaTranz 的 32 位 API Token' };
+  }
+  if (tokenLoginInFlight || (loginWindow && !loginWindow.isDestroyed())) return { ok: false, message: '请先完成正在进行的登录' };
+  tokenLoginInFlight = true;
+  // An empty, temporary cookie jar prevents an old login from authenticating a
+  // rejected token. Only a verified new session replaces the current connection.
+  let candidate, loginSession, previousCookies, replaced = false, committed = false;
+  try {
+    candidate = session.fromPartition(`paratranz-token-${randomBytes(8).toString('hex')}`, { cache: false });
+    loginSession = session.fromPartition('persist:paratranz');
+    await configureSessionProxy(candidate);
+    const submitted = await submitParaTranzToken(candidate, normalized);
+    if (!submitted.ok) return submitted;
+    const cookies = await paraTranzAuthCookies(candidate);
+    if (!cookies.some(cookie => cookie.name === 'sid' && cookie.value)) return { ok: false, status: 401, message: 'ParaTranz 未建立登录会话，请重新获取 Token 后重试' };
+    previousCookies = await paraTranzAuthCookies(loginSession);
+    replaced = true;
+    await replaceParaTranzAuthCookies(loginSession, cookies);
+    const result = await serviceRequest('/credentials', 'POST', { cookie: cookieHeader(cookies), projectId: project });
+    if (!result.ok) return result;
+    committed = true;
+    presence.stop();
+    await persistLoginSession(loginSession);
+    return result;
+  } catch {
+    return { ok: false, status: 502, message: 'ParaTranz Token 登录失败，请检查网络和代理设置后重试' };
+  } finally {
+    if (replaced && !committed) {
+      try { await replaceParaTranzAuthCookies(loginSession, previousCookies); }
+      catch { log('Previous ParaTranz cookies could not be restored'); }
+    }
+    try { if (candidate) { await candidate.clearStorageData(); await candidate.closeAllConnections(); } }
+    catch { /* Temporary sessions are never persisted. */ }
+    tokenLoginInFlight = false;
+  }
 }
 async function flushCookieStore(targetSession) {
   try {
@@ -1024,12 +1119,7 @@ async function restoreLoginSession() {
     for (const cookie of cookies) {
       if (!paraTranzAuthCookieNames.has(cookie.name) || cookie.domain?.replace(/^\./, '') !== 'paratranz.cn' || typeof cookie.value !== 'string') continue;
       if (existing.some(current => current.name === cookie.name && current.path === cookie.path)) continue;
-      const details = {
-        url: 'https://paratranz.cn', name: cookie.name, value: cookie.value,
-        path: cookie.path, secure: cookie.secure, httpOnly: cookie.httpOnly, sameSite: cookie.sameSite,
-      };
-      if (!cookie.hostOnly) details.domain = cookie.domain;
-      await cookieStore.set(details);
+      await cookieStore.set(paraTranzCookieDetails(cookie));
     }
   } catch { log('Saved ParaTranz session cookies could not be restored'); }
 }
@@ -1061,7 +1151,7 @@ async function restoreConnection() {
   if (safeStorage.isEncryptionAvailable() && fs.existsSync(credentialFile())) {
     try {
       const saved = JSON.parse(safeStorage.decryptString(fs.readFileSync(credentialFile())));
-      return await serviceRequest('/credentials', 'POST', { token: saved.token, projectId: 0 });
+      return await tokenConnection(saved.token, 0);
     } catch { log('Saved token could not be restored'); }
   }
   if (preferred === 'token') return { ok: false, message: '请重新输入未记住的 API Token' };
@@ -1073,6 +1163,7 @@ function allowLoginNavigation(url) {
   catch { return false; }
 }
 async function login(project, presenceOnly = false) {
+  if (tokenLoginInFlight) return { ok: false, message: '请先完成正在进行的 Token 登录' };
   if (loginWindow && !loginWindow.isDestroyed()) { loginWindow.focus(); return { ok: false, message: '请先完成已打开的登录窗口' }; }
   const checkConnection = () => presenceOnly ? presenceLoginConnection() : cookieConnection(project);
   const existing = await checkConnection();
@@ -1142,8 +1233,7 @@ function registerIpc() {
   });
   ipcMain.handle('sc:connect', async (event, token, remember, project) => {
     validateSender(event);
-    if (typeof token !== 'string' || !token.trim() || token.length > 16384 || /[\r\n]/.test(token) || !Number.isSafeInteger(project) || project < 0 || project > 2147483647) return { ok: false, message: 'Token 或项目 ID 无效' };
-    const result = await serviceRequest('/credentials', 'POST', { token: token.trim(), projectId: project });
+    const result = await tokenConnection(token, project);
     if (result.ok) {
       if (remember && safeStorage.isEncryptionAvailable()) {
         fs.writeFileSync(credentialFile(), safeStorage.encryptString(JSON.stringify({ token: token.trim(), projectId: project })));

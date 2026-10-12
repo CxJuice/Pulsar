@@ -22,6 +22,7 @@ function harness(t, overrides = {}) {
       proxy: { mode: 'system' },
       async setProxy(config) { this.proxy = config; },
       async closeAllConnections() {},
+      async clearStorageData() { this.storageCleared = true; },
       async resolveProxy() { return 'DIRECT'; },
       cookies: { async get() { return []; }, async flushStore() {} },
     });
@@ -30,6 +31,7 @@ function harness(t, overrides = {}) {
   const electron = {
     app: { getAppPath: () => folder, getPath: () => folder, isPackaged: false },
     protocol: { registerSchemesAsPrivileged() {} },
+    net: overrides.net || {},
     ipcMain: { handle(name, action) { ipcHandlers.set(name, action); }, on() {} },
     session: { defaultSession: getSession('default'), fromPartition: getSession },
     safeStorage: {
@@ -68,6 +70,147 @@ test('LLM URL, model, prompt and API key survive inactive-provider saves and rer
   assert.equal('llmApiKey' in h.run('publicTranslationSettings()'), false);
   h.run(`saveTranslationSettings({ ...readTranslationSettings(), provider: 'llm', llmPrefixPrompt: '' })`);
   assert.equal(h.run('readTranslationSettings().llmPrefixPrompt'), '');
+});
+
+function tokenLoginHarness(t, { redirect = '/', cookies = true, serviceOk = true, requestError = false } = {}) {
+  const submissions = [], credentialCalls = [];
+  const oldCookie = { name: 'sid', value: 'previous-session', domain: 'paratranz.cn', path: '/', hostOnly: true, secure: true, httpOnly: true, session: true, sameSite: 'lax' };
+  const newCookie = { ...oldCookie, value: 'new-session', session: false, expirationDate: 2_000_000_000 };
+  const cookieJar = initial => {
+    let values = initial;
+    return {
+      async get() { return values; }, async flushStore() {},
+      async remove(_url, name) { values = values.filter(cookie => cookie.name !== name); },
+      async set(details) {
+        values = values.filter(cookie => cookie.name !== details.name);
+        values.push({ ...details, domain: details.domain || 'paratranz.cn', hostOnly: !details.domain, session: !details.expirationDate });
+      },
+    };
+  };
+  const h = harness(t, { net: { request(options) {
+    options.session.cookies = cookieJar([]);
+    const request = new EventEmitter();
+    const submission = { options, headers: {}, body: '', followed: false, aborted: false };
+    submissions.push(submission);
+    request.setHeader = (name, value) => { submission.headers[name] = value; };
+    request.abort = () => { submission.aborted = true; };
+    request.followRedirect = () => {
+      submission.followed = true;
+      const response = new EventEmitter(); response.statusCode = 200;
+      request.emit('response', response);
+      response.emit('data', Buffer.from('<html>ParaTranz</html>'));
+      response.emit('end');
+    };
+    request.end = body => {
+      submission.body = body;
+      queueMicrotask(async () => {
+        if (requestError) return request.emit('error', new Error('test network failure'));
+        if (cookies) {
+          await options.session.cookies.set(newCookie);
+          await options.session.cookies.set({ ...newCookie, name: 'unrelated', value: 'excluded' });
+        }
+        request.emit('redirect', 302, 'GET', new URL(redirect, 'https://paratranz.cn').href, {});
+      });
+    };
+    return request;
+  } } });
+  const liveCookies = cookieJar([oldCookie]);
+  h.sessions.set('persist:paratranz', { cookies: liveCookies });
+  h.context.recordCredentialCall = (endpoint, body) => {
+    credentialCalls.push({ endpoint, body });
+    return serviceOk ? { ok: true, data: { authenticated: true, mode: 'session', user: { id: 2 } } } : { ok: false, status: 401, message: 'Not authenticated' };
+  };
+  h.run(`serviceRequest = async (endpoint, method, body) => recordCredentialCall(endpoint, body); validateSender = () => {}; registerIpc()`);
+  return { ...h, submissions, credentialCalls, liveCookies, oldCookie, newCookie };
+}
+
+test('Token login submits the website form, follows redirects and connects using the resulting Cookie', async t => {
+  const h = tokenLoginHarness(t);
+  const token = '0123456789abcdefghijklmnopqrstuv';
+  h.run(`saveTranslationSettings({ ...defaultTranslationSettings(), proxy: { mode: 'socks5', host: '127.0.0.1', port: 10808 } })`);
+  const result = await h.ipcHandlers.get('sc:connect')({}, token, true, 0);
+  assert.equal(result.ok, true);
+  assert.equal(result.data.mode, 'session');
+  assert.equal(h.submissions.length, 1);
+  const submitted = h.submissions[0];
+  assert.equal(submitted.options.url, 'https://paratranz.cn/oauth/token');
+  assert.equal(submitted.options.method, 'POST');
+  assert.equal(submitted.options.redirect, 'manual');
+  assert.equal(submitted.options.credentials, 'include');
+  assert.equal(submitted.headers['Content-Type'], 'application/x-www-form-urlencoded');
+  assert.equal(submitted.body, `token=${token}`);
+  assert.equal(submitted.followed, true);
+  assert.equal(submitted.options.session.storageCleared, true);
+  assert.equal(submitted.options.session.proxy.proxyRules, 'socks5://127.0.0.1:10808');
+  assert.equal([...h.sessions.keys()].find(name => name.startsWith('paratranz-token-')).startsWith('persist:'), false);
+  assert.equal(h.credentialCalls.length, 1);
+  assert.equal(h.credentialCalls[0].endpoint, '/credentials');
+  assert.equal(h.credentialCalls[0].body.cookie, 'sid=new-session');
+  assert.equal('token' in h.credentialCalls[0].body, false);
+  assert.equal((await h.liveCookies.get())[0].expirationDate, h.newCookie.expirationDate);
+  assert.equal(fs.readFileSync(path.join(h.folder, 'credentials.bin'), 'utf8').includes(token), false);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(h.folder, 'connection.json'), 'utf8')).mode, 'token');
+});
+
+test('a rejected Token cannot reuse or overwrite an existing login or saved Token', async t => {
+  const h = tokenLoginHarness(t, { redirect: '/login?fail=1&message=Token%20error', cookies: false });
+  fs.writeFileSync(path.join(h.folder, 'credentials.bin'), 'previous archive');
+  fs.writeFileSync(path.join(h.folder, 'connection.json'), '{"mode":"session"}');
+  const result = await h.ipcHandlers.get('sc:connect')({}, '0'.repeat(32), true, 0);
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 401);
+  assert.equal(h.submissions[0].followed, false);
+  assert.equal(h.credentialCalls.length, 0);
+  assert.deepEqual(await h.liveCookies.get(), [h.oldCookie]);
+  assert.equal(fs.readFileSync(path.join(h.folder, 'credentials.bin'), 'utf8'), 'previous archive');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(h.folder, 'connection.json'), 'utf8')).mode, 'session');
+});
+
+test('missing Cookie, network failures and external redirects never connect', async t => {
+  for (const options of [{ cookies: false }, { requestError: true }, { redirect: 'https://example.test/' }]) {
+    const h = tokenLoginHarness(t, options);
+    const result = await h.ipcHandlers.get('sc:connect')({}, '0'.repeat(32), false, 0);
+    assert.equal(result.ok, false);
+    assert.equal(h.credentialCalls.length, 0);
+    assert.deepEqual(await h.liveCookies.get(), [h.oldCookie]);
+    assert.equal(h.run('tokenLoginInFlight'), false);
+  }
+});
+
+test('account verification failure restores the previous Cookie and keeps saved credentials', async t => {
+  const h = tokenLoginHarness(t, { serviceOk: false });
+  fs.writeFileSync(path.join(h.folder, 'credentials.bin'), 'previous archive');
+  const result = await h.ipcHandlers.get('sc:connect')({}, '0'.repeat(32), true, 0);
+  assert.equal(result.status, 401);
+  assert.equal(h.credentialCalls.length, 1);
+  assert.equal((await h.liveCookies.get())[0].value, 'previous-session');
+  assert.equal(fs.readFileSync(path.join(h.folder, 'credentials.bin'), 'utf8'), 'previous archive');
+});
+
+test('saved Bearer Tokens migrate through the website login and unremembered Tokens are removed', async t => {
+  const h = tokenLoginHarness(t);
+  const saved = h.electron.safeStorage.encryptString(JSON.stringify({ token: `Bearer ${'0'.repeat(32)}`, projectId: 8340 }));
+  fs.writeFileSync(path.join(h.folder, 'credentials.bin'), saved);
+  fs.writeFileSync(path.join(h.folder, 'connection.json'), '{"mode":"token"}');
+  assert.equal((await h.run('restoreConnection()')).ok, true);
+  assert.equal(h.submissions[0].body, `token=${'0'.repeat(32)}`);
+  assert.equal(h.credentialCalls[0].body.projectId, 0);
+  await h.ipcHandlers.get('sc:connect')({}, '1'.repeat(32), false, 0);
+  assert.equal(fs.existsSync(path.join(h.folder, 'credentials.bin')), false);
+  assert.equal((await h.run('restoreConnection()')).ok, false);
+  assert.equal(h.submissions.length, 2);
+});
+
+test('invalid Token format and concurrent logins are rejected before issuing network requests', async t => {
+  const h = tokenLoginHarness(t);
+  for (const token of [null, '', 'short', '0'.repeat(31), '0'.repeat(33), '0'.repeat(31) + '\n', '0'.repeat(30) + '\n0']) {
+    assert.equal((await h.ipcHandlers.get('sc:connect')({}, token, false, 0)).ok, false);
+  }
+  assert.equal(h.submissions.length, 0);
+  h.run('tokenLoginInFlight = true');
+  assert.equal((await h.ipcHandlers.get('sc:connect')({}, '0'.repeat(32), false, 0)).ok, false);
+  assert.equal((await h.run('login(0)')).ok, false);
+  assert.equal(h.submissions.length, 0);
 });
 
 test('testing unsaved proxy values leaves login, translation and persisted settings unchanged', async t => {
