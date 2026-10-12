@@ -6,6 +6,12 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      validate_only:
+        description: Build and retain temporary artifacts without publishing a Release
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -137,7 +143,7 @@ jobs:
   publish:
     name: Publish release
     needs: build
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.validate_only != true
     runs-on: ubuntu-24.04
     permissions:
       contents: write
