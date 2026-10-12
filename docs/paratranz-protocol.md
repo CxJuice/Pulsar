@@ -111,6 +111,20 @@
 
 常规网页登录是推荐入口，Token 是默认折叠的备选入口。主进程仅在成功登录后记住所选方式，connection.json 不含 Token 或 Cookie；Token 仍由 safeStorage 加密，网页会话仍使用 persist:paratranz 分区。占用专用网页登录保持原 API 连接和主登录偏好。当前自然启动日志验证了无项目 Token 恢复和实际项目读取；本次未重新进行首次网页认证。
 
+## Token 登录与网页会话统一（2026-10-12）
+
+核对官网 `/login` 页面构建时间 `2026-10-12T09:34:25.914Z`，公开前端来源为 `https://paratranz.cn/assets/index-QH4bzNrE.js`。登录组件的 Token 分支是普通 HTML 表单：`method="post" action="/oauth/token"`，输入名为 `token`，32 位；不是 API Bearer 请求。网页登录成功后从 Cookie 更新用户状态。
+
+无效诊断 Token 的真实请求为 `POST https://paratranz.cn/oauth/token`，`Content-Type: application/x-www-form-urlencoded`，正文 `token=<32位Token>`；返回 `302 Location: /login?fail=1&message=Token%20error,%20no%20user%20found`。未使用真实账号 Token 做成功登录测试。该 OAuth 路径依据网站实现及实际请求，不属于 OpenAPI 的公开 Bearer API 契约。
+
+桌面 `sc:connect` 与已保存 Token 恢复改为相同表单链路。Electron `net.request` 使用应用的代理设置、空的临时内存 Session、`credentials: include` 和手动重定向；拒绝登录失败跳转、跨域跳转、非 GET 重定向及过多跳转，设置 30 秒截止时间。旧 Bearer 前缀在提交前移除；Token 不进入 URL、日志或渲染进程返回值。
+
+成功响应必须在临时 Session 中建立有效 `sid`。应用把允许的认证 Cookie 转到 `persist:paratranz`，保留 domain/path/secure/httpOnly/sameSite 及持久 Cookie 的 expirationDate，再用 Cookie 调用本地 `/credentials`。Rust 验证 `/api/account` 身份，成功后才更新当前凭据；验证失败恢复原 Cookie。公开项目读取不作为登录依据。成功返回的认证模式为 `session`，词条 API 与实时占用复用同一登录身份，不再需要额外网页登录补充占用认证。
+
+记住 Token 仍使用 safeStorage 加密，重新启动通过同一 `/oauth/token` 链路恢复；未勾选记住时移除旧 Token 文件，启动仍遵守 `connection.json` 中的 Token 偏好，不自动借用旧 Cookie。网页登录的 Cookie 恢复与主动断开清理保持原行为。
+
+验证：15 项 Electron 状态测试（包含新增 6 项 Token 协议/失败保护测试）、Nuxt 类型检查及静态构建通过；原生 Electron 44.7.0 配合本地 HTTPS 模拟服务验证 `POST` 表单、`302 Set-Cookie` 接收、HttpOnly Cookie 转移、错误 Token 拒绝、旧会话保留与空候选 Cookie 存储。同一客户端实现通过本机 `socks5://127.0.0.1:10808` 访问真实网站，正确将无效诊断 Token 的失败重定向映射为 401。测试配置、模拟 Cookie 和结果仅保存在 git 忽略的 artifacts 目录。
+
 ## 项目术语管理（2026-10-11）
 
 - 官方协议来源：https://paratranz.cn/api-docs?format=json ，已实时读取术语路径、Term schema、TermList 和分页参数。页面参考：https://paratranz.apifox.cn/api-44145258 、https://paratranz.apifox.cn/api-44145261 。

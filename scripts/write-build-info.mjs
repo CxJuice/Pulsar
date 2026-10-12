@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
-const inputs = ['app', 'electron', 'service', 'public', 'scripts', 'package.json', 'package-lock.json', 'nuxt.config.ts', 'tsconfig.json', '启动.py']
+const inputs = ['app', 'electron', 'service', 'public', 'scripts', 'package.json', 'package-lock.json', 'nuxt.config.ts', 'tsconfig.json']
 const git = (...args) => execFileSync('git', args, { cwd: root })
 const commit = git('rev-parse', 'HEAD').toString('utf8').trim()
 const paths = [...new Set(git('ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', ...inputs)

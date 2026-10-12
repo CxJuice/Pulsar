@@ -34,9 +34,9 @@ defineExpose({ focus: () => primaryButton.value?.focus() })
     <MotionFolder class="token-fallback" :open="showToken" :disabled="busy" title="API Token 备选登录" @toggle="showToken = !showToken">
       <template #heading><KeyRound :size="15" /><span>使用 API Token</span><small>备选登录</small><ChevronDown :size="15" :class="{ expanded: showToken }" /></template>
       <div class="token-fallback-content">
-        <p class="connection-method-description">词条占用需同账号网页登录。</p>
+        <p class="connection-method-description">使用 Token 登录 ParaTranz，同时启用词条占用同步。</p>
         <label class="field-label" :for="tokenId">API Token</label>
-        <input :id="tokenId" v-model="token" class="form-input" type="password" placeholder="粘贴 ParaTranz API Token" autocomplete="off" :disabled="blocked" @keydown.enter.prevent="connect('token')" />
+        <input :id="tokenId" v-model="token" class="form-input" type="password" placeholder="粘贴 32 位 ParaTranz API Token" autocomplete="off" :disabled="blocked" @keydown.enter.prevent="connect('token')" />
         <div class="token-options"><label><input v-model="remember" type="checkbox" :disabled="blocked" /> 在此设备上记住 Token</label><button type="button" class="text-button" :disabled="blocked" @click="openTokenPage">获取 Token <ExternalLink :size="12" /></button></div>
         <button type="button" class="button token-connect" :disabled="blocked || !token.trim()" @click="connect('token')"><LoadingIndicator v-if="busy && methodInFlight === 'token'" :size="16" label="正在验证 Token" />{{ busy && methodInFlight === 'token' ? '正在验证…' : '使用 Token 登录' }}</button>
         
