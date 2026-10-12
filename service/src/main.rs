@@ -662,6 +662,7 @@ async fn rpc(
             let string = id(&payload, "stringId")?;
             let target = format!("{project_path}/strings/{string}");
             let current = remote(&state, &credentials, Method::GET, &target, &[], None).await?;
+            let mut overwrote_conflict = false;
             for (expected, field) in [
                 ("expectedUpdatedAt", "updatedAt"),
                 ("expectedTranslation", "translation"),
@@ -671,21 +672,20 @@ async fn rpc(
                 let provided = payload
                     .get(expected)
                     .ok_or_else(|| ApiError::invalid("缺少远端版本信息，请重新载入词条"))?;
-                if provided != current.get(field).unwrap_or(&Value::Null) {
-                    return Err(ApiError::new(
-                        StatusCode::CONFLICT,
-                        "这条词条已被其他人修改。请重新载入后合并译文；本地草稿已保留。",
-                    ));
-                }
+                overwrote_conflict |= provided != current.get(field).unwrap_or(&Value::Null);
             }
             let body = json!({"translation":translation(&payload)?,"stage":stage(&payload)?});
             let saved = remote(&state, &credentials, Method::PUT, &target, &[], Some(body)).await?;
             state.suggestions.lock().await.clear();
-            if saved.is_null() {
+            let mut saved = if saved.is_null() {
                 remote(&state, &credentials, Method::GET, &target, &[], None).await?
             } else {
                 saved
+            };
+            if let Some(item) = saved.as_object_mut() {
+                item.insert("overwroteConflict".into(), Value::Bool(overwrote_conflict));
             }
+            saved
         }
         _ => return Err(ApiError::new(StatusCode::NOT_FOUND, "不存在的服务操作")),
     };
@@ -727,7 +727,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .timeout(Duration::from_secs(45))
         .connect_timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none())
-        .user_agent("ScTranslateKit/0.1.0");
+        .user_agent(format!("ScTranslateKit/{}", env!("CARGO_PKG_VERSION")));
     if let Ok(proxy) = std::env::var("SCKIT_PROXY") {
         if !proxy.is_empty() {
             builder = builder.proxy(reqwest::Proxy::all(proxy)?);

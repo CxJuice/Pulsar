@@ -8,6 +8,12 @@
   const terms=[{id:1,term:'account',translation:'账户/账号',pos:'noun',variants:[],caseSensitive:false,project:4242,uid:1,updatedAt:'2026-10-10T00:00:00Z'}];
   const drafts={}; let authenticated=true; let settings={provider:'google',mode:'api',deeplPlan:'free',proxy:{mode:'direct',host:'127.0.0.1',port:7890},googleConfigured:true,deeplConfigured:false,llmRequestUrl:'',llmModel:'',llmPrefixPrompt:'',llmConfigured:false,llmContext:{key:true,recommendations:true,recommendationCount:1,terms:true,notes:true},clearAfterSaveNext:true,useTermTranslations:true};
   const calls=[]; const record=(action,payload)=>{calls.push({action,payload:copy(payload||{}),at:Date.now()});document.documentElement.dataset.auditCalls=JSON.stringify(calls);};
+  window.__auditSetRemote = (id, translation) => {
+    const row = strings.find(item => item.id === id);
+    if (!row) throw new Error('Unknown synthetic item');
+    row.translation = translation;
+    row.updatedAt = new Date().toISOString();
+  };
   const session=()=>({authenticated,mode:authenticated?'session':'none',user:authenticated?{id:1,username:'audit',nickname:'本地审计账户'}:null});
   window.scKit={
     async request(action,p={}) {
@@ -22,7 +28,7 @@
       if(action==='draft'){const k=p.projectId+'/'+p.stringId;if(p.remove)delete drafts[k];else drafts[k]={translation:p.translation,stage:p.stage,updatedAt:p.updatedAt};return ok({saved:true});}
       if(action==='strings'){let rows=strings.filter(s=>(!p.fileId||s.fileId===p.fileId)&&(p.stage==null||s.stage===p.stage));const q=(p.text||'').toLowerCase();if(q)rows=rows.filter(s=>(p.searchMode==='text'?[s.original,s.translation,s.key].join(' '):String(s[p.searchMode]||'')).toLowerCase().includes(q));const size=p.pageSize||50;const count=Math.max(1,Math.ceil(rows.length/size));const page=Math.max(1,Math.min(p.page||1,count));return ok({results:rows.slice((page-1)*size,page*size),rowCount:rows.length,pageCount:count,page,pageSize:size});}
       if(action==='string') return ok(strings.find(s=>s.id===p.stringId));
-      if(action==='save'){const row=strings.find(s=>s.id===p.stringId);Object.assign(row,{translation:p.translation,stage:p.stage,updatedAt:new Date().toISOString()});return ok(row);}
+      if(action==='save'){const row=strings.find(s=>s.id===p.stringId);const overwroteConflict=row.translation!==p.expectedTranslation||row.updatedAt!==p.expectedUpdatedAt;Object.assign(row,{translation:p.translation,stage:p.stage,updatedAt:new Date().toISOString()});return ok({...row,overwroteConflict});}
       if(action==='suggestions')return ok([{id:9001,key:'REFERENCE',original:'Search for another project',translation:'查找其他项目',matching:.9,project:{id:4242,name:project.name},file:{id:42420,name:'audit.strings'}}]);
       if(action==='terms')return ok(terms.filter(t=>(strings.find(s=>s.id===p.stringId)?.original||'').includes(t.term)));
       if(action==='projectTerms')return ok({results:terms,page:1,pageSize:800,pageCount:1,rowCount:terms.length});

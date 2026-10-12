@@ -4,6 +4,7 @@ import { matchSuggestions } from '~/utils/textWorker'
 import { toParaTranzText } from '~/utils/translationText'
 import { sortFilesByCompletion } from '~/utils/fileSort'
 import { EntryAuxCache } from '~/utils/entryAuxCache'
+import { ListRequestCoordinator } from '~/utils/listRequestCoordinator'
 
 const emptyProject = (): ProjectInfo => ({ id: 0, name: '', source: '', dest: '' })
 const emptyFile = (): FileInfo => ({ id: 0, name: '', project: 0, total: 0, translated: 0, disputed: 0, checked: 0, reviewed: 0, hidden: 0, locked: 0, words: 0 })
@@ -51,7 +52,7 @@ export function useEditor() {
   const detachedNeighbors = shallowRef<{ previousId?: number; nextId?: number; index: number; page: number } | null>(null)
   const termsCache = new EntryAuxCache<Term[]>(), suggestionsCache = new EntryAuxCache<Suggestion[]>(), disputedStringsCache = new EntryAuxCache<StringItem[]>(120_000, 8)
   const updatedStringsCache = shallowRef<{ key: string; items: StringItem[] } | null>(null)
-  const activeListRequests = new Set<string>()
+  const listRequests = new ListRequestCoordinator(id => { void window.scKit?.cancelRequest?.(id) })
   const globalSortLimit = 20_000
   let updatedSortNeedsRefresh = false
   let prefetchTimer: ReturnType<typeof setTimeout> | undefined, prefetchSequence = 0, disposed = false
@@ -147,14 +148,10 @@ export function useEditor() {
     } finally { requestCount.value-- }
   }
   function stopListRequests() {
-    for (const id of activeListRequests) void window.scKit?.cancelRequest?.(id)
-    activeListRequests.clear()
+    listRequests.cancelAll()
   }
   async function listPage(payload: Record<string, unknown>): Promise<StringPage> {
-    const id = crypto.randomUUID()
-    activeListRequests.add(id)
-    try { return await api<StringPage>('strings', payload, id) }
-    finally { activeListRequests.delete(id) }
+    return listRequests.run(id => api<StringPage>('strings', payload, id))
   }
   function choose(item: StringItem | null, clearTranslation = false) {
     ++selectionSequence
@@ -636,6 +633,7 @@ export function useEditor() {
           const saved = await api<StringItem>('save', { projectId: job.item.project, stringId: job.item.id,
             translation: job.translation, stage: job.stage, expectedUserId: job.accountId,
             expectedUpdatedAt: base.updatedAt ?? null, expectedTranslation: base.translation, expectedStage: base.stage, expectedOriginal: base.original })
+          if (saved.overwroteConflict) notice.value = `已覆盖 ${job.item.key || '#' + job.item.id} 的远端新修改。`
           submittedVersions.set(versionKey, saved)
           // The saved translation can now be a suggestion for another entry.
           suggestionsCache.clear(); disputedStringsCache.clear()

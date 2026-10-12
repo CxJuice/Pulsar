@@ -34,6 +34,15 @@ UI_CHECK = r'''async (page) => {
   await dialog.getByRole('status').filter({ hasText: '译文未使用术语表中的对应译名' }).waitFor();
   await translation.fill('值：~amount(10) <EM4>账户</EM4>\\n下一行');
   if (await dialog.getByRole('status').filter({ hasText: '译文未使用术语表中的对应译名' }).count()) throw new Error('Valid glossary translation still has a term warning');
+  await page.evaluate(() => window.__auditSetRemote(103, '远端新译文'));
+  await dialog.getByRole('button', { name: '保存 KEY_058' }).click();
+  await dialog.getByRole('status').filter({ hasText: '已覆盖远端新修改' }).waitFor();
+  await page.waitForFunction(() => !document.querySelector('button[aria-label="关闭全文编辑器"]')?.disabled);
+  await dialog.getByRole('button', { name: '关闭全文编辑器' }).click();
+  await dialog.waitFor({ state: 'hidden' });
+  await page.getByRole('button', { name: '编辑全部文本' }).click();
+  await page.waitForFunction(() => !document.querySelector('button[aria-label="关闭全文编辑器"]')?.disabled);
+  await dialog.getByRole('textbox', { name: '搜索项目全部文本' }).focus();
   await page.keyboard.press('Escape');
   await dialog.waitFor({ state: 'hidden' });
   await page.getByRole('main', { name: '项目文件管理' }).getByRole('button', { name: /audit.strings.*开始翻译/ }).click();

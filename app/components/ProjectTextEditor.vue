@@ -82,8 +82,9 @@ async function ensureRowTerms(row: WorkRow) {
   if (row.terms) return
   if (row.termsRequest) return row.termsRequest
   const generation = ++row.termsGeneration
+  const item = row.base
   row.termsBusy = true; row.termsError = ''
-  const request = props.editor.termsFor(row.base).then(terms => {
+  const request = Promise.resolve().then(() => props.editor.termsFor(item)).then(terms => {
     if (row.termsGeneration === generation) row.terms = terms
   }).catch(reason => {
     if (row.termsGeneration === generation) row.termsError = '术语检查暂不可用：' + (reason as Error).message
@@ -303,17 +304,21 @@ async function saveAll() {
     batch.some(row => (row.base.fileId || row.base.file?.id) === props.editor.fileId)
   savingAll.value = true
   let savedCount = 0
-  const qaRows: string[] = [], failedRows: string[] = []
+  const qaRows: string[] = [], failedRows: string[] = [], overwrittenRows: string[] = []
   batchSummary.value = ''
   try {
     for (const row of batch) {
       await ensureRowTerms(row)
       const label = row.base.key || '#' + row.base.id
       if (rowQualityIssues(row).length || row.termsError) qaRows.push(label)
-      if (await saveRow(row, false)) savedCount++
+      if (await saveRow(row, false)) {
+        savedCount++
+        if (row.base.overwroteConflict) overwrittenRows.push(label)
+      }
       else failedRows.push(label)
     }
     batchSummary.value = `已保存 ${savedCount} / ${batch.length} 条` +
+      (overwrittenRows.length ? `；已覆盖远端新修改：${overwrittenRows.join('、')}` : '') +
       (qaRows.length ? `；QA 提示或术语检查未完成：${qaRows.join('、')}` : '') +
       (failedRows.length ? `；保存失败：${failedRows.join('、')}` : '')
     if (savedCount) {
@@ -323,7 +328,16 @@ async function saveAll() {
     }
   } finally { savingAll.value = false }
 }
-async function saveOne(row: WorkRow) { if (await saveRow(row)) { await refreshFiles(); await loadPage() } }
+async function saveOne(row: WorkRow) {
+  await ensureRowTerms(row)
+  const label = row.base.key || '#' + row.base.id
+  const warning = rowQualityIssues(row).length || row.termsError
+  if (await saveRow(row)) {
+    batchSummary.value = `已保存 ${label}` + (row.base.overwroteConflict ? '；已覆盖远端新修改。' : '') +
+      (warning ? '；保存前有 QA 提示或术语检查未完成，请核对该词条。' : '')
+    await refreshFiles(); await loadPage()
+  }
+}
 function hasVersionConflict(row: WorkRow) { return /已被其他人修改|请重新载入|版本信息/.test(row.error) }
 async function reloadRemote(row: WorkRow) {
   if (row.reloading || row.saving) return
@@ -383,7 +397,7 @@ onBeforeUnmount(() => {
           <AppSelect :model-value="pageSize" :options="pageSizeOptions" label="每页词条数量" @update:model-value="pageSize = Number($event); page = 1" />
           <button class="button primary" :disabled="!changedRows.length || hasPendingWork || !canEdit" @click="saveAll"><LoaderCircle v-if="savingAll" class="spin" :size="14" /><Save v-else :size="14" />{{ saveAllLabel }}</button>
         </div>
-        <p class="project-text-hint">可搜索整个项目并编辑任意文件中的译文；未提交的修改会保存为本地草稿。锁定词条不能编辑。</p>
+        <p class="project-text-hint">可搜索整个项目并编辑任意文件中的译文；未提交的修改会保存为本地草稿。提交时若远端已有新修改，当前译文仍会覆盖。锁定词条不能编辑。</p>
         <div v-if="error" class="sidebar-message error project-text-error" role="alert">{{ error }}</div>
         <div v-if="batchSummary" class="sidebar-message project-text-error" role="status">{{ batchSummary }}</div>
         <div class="project-text-summary"><span>{{ rowCount.toLocaleString() }} 条文本</span><span>第 {{ page }} / {{ pageCount }} 页</span><span v-if="changedRows.length" class="project-text-dirty">{{ changedRows.length }} 条有未提交修改</span><span v-if="editor.requestCount" class="project-text-request">正在与 ParaTranz 同步…</span></div>

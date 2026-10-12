@@ -2,7 +2,7 @@ name: Build all desktop versions
 
 on:
   push:
-    branches: ['**']
+    branches: [master, main]
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -65,6 +65,8 @@ jobs:
         run: npm ci
       - name: Check desktop state and proxy behavior
         run: npm run test:electron
+      - name: Check list request cancellation
+        run: npm run test:logic
       - name: Check frontend types
         run: npm run typecheck
       - name: Set up Rust

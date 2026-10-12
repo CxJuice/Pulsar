@@ -21,6 +21,7 @@ export interface StringItem {
   project: number; fileId?: number; file?: { id: number; name: string; project: number }
   context: string; words: number; createdAt: string; updatedAt: string | null
   history?: HistoryEntry[]; comments?: CommentEntry[]; user?: TinyUser; version?: number
+  overwroteConflict?: boolean
 }
 export interface StringPage { results: StringItem[]; page: number; pageSize: number; rowCount: number; pageCount: number }
 export interface ProjectInfo { id: number; name: string; source: string; dest: string; desc?: string; tagRules?: Array<{type:number;source?:string;string?:string}> }

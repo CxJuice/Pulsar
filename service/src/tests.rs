@@ -179,17 +179,20 @@ async fn list_preserves_file_stage_and_search_protocol() {
     handle.abort();
 }
 #[tokio::test]
-async fn conflict_blocks_remote_write_and_valid_save_is_narrow() {
+async fn conflict_overwrites_remote_write_and_valid_save_is_narrow() {
     let (state, mock, handle) = setup().await;
     let mut payload = json!({"projectId":8340,"stringId":1088220072,"translation":"德尔斐 RS-10","stage":1,"expectedUpdatedAt":null,"expectedTranslation":"outdated","expectedStage":0,"expectedOriginal":"Delphi RS-10"});
-    let (status, _) = request(state.clone(), "save", payload.clone()).await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert!(mock.writes.lock().await.is_empty());
+    let (status, conflicted) = request(state.clone(), "save", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(mock.writes.lock().await.len(), 1);
+    assert_eq!(conflicted["overwroteConflict"], true);
     payload["expectedTranslation"] = json!("");
     let (status, saved) = request(state, "save", payload).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(saved["translation"], "德尔斐 RS-10");
+    assert_eq!(saved["overwroteConflict"], false);
     let writes = mock.writes.lock().await;
+    assert_eq!(writes.len(), 2);
     assert_eq!(writes[0], json!({"translation":"德尔斐 RS-10","stage":1}));
     handle.abort();
 }
