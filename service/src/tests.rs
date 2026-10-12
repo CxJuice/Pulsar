@@ -82,6 +82,7 @@ async fn setup() -> (Arc<AppState>, Arc<MockState>, tokio::task::JoinHandle<()>)
             token: "test-token".into(),
             ..Default::default()
         })),
+        active_account_id: RwLock::new(Some(1)),
         drafts: Mutex::new(BTreeMap::new()),
         draft_path: std::env::temp_dir().join(format!(
             "sckit-test-{}-{}.json",
@@ -178,17 +179,20 @@ async fn list_preserves_file_stage_and_search_protocol() {
     handle.abort();
 }
 #[tokio::test]
-async fn conflict_blocks_remote_write_and_valid_save_is_narrow() {
+async fn conflict_overwrites_remote_write_and_valid_save_is_narrow() {
     let (state, mock, handle) = setup().await;
     let mut payload = json!({"projectId":8340,"stringId":1088220072,"translation":"德尔斐 RS-10","stage":1,"expectedUpdatedAt":null,"expectedTranslation":"outdated","expectedStage":0,"expectedOriginal":"Delphi RS-10"});
-    let (status, _) = request(state.clone(), "save", payload.clone()).await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert!(mock.writes.lock().await.is_empty());
+    let (status, conflicted) = request(state.clone(), "save", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(mock.writes.lock().await.len(), 1);
+    assert_eq!(conflicted["overwroteConflict"], true);
     payload["expectedTranslation"] = json!("");
     let (status, saved) = request(state, "save", payload).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(saved["translation"], "德尔斐 RS-10");
+    assert_eq!(saved["overwroteConflict"], false);
     let writes = mock.writes.lock().await;
+    assert_eq!(writes.len(), 2);
     assert_eq!(writes[0], json!({"translation":"德尔斐 RS-10","stage":1}));
     handle.abort();
 }
@@ -218,10 +222,28 @@ async fn drafts_persist_and_invalid_identifiers_are_rejected() {
     let (state, _, handle) = setup().await;
     let (status, _) = request(state.clone(), "strings", json!({"projectId":"../../etc"})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let (status,_)=request(state.clone(),"draft",json!({"projectId":8340,"stringId":1088220072,"translation":"draft","stage":2,"updatedAt":"2026-10-11"})).await;
+    let (status,_)=request(state.clone(),"draft",json!({"accountId":1,"projectId":8340,"stringId":1088220072,"translation":"draft","stage":2,"updatedAt":"2026-10-11"})).await;
     assert_eq!(status, StatusCode::OK);
     let disk: Value = serde_json::from_slice(&std::fs::read(&state.draft_path).unwrap()).unwrap();
-    assert_eq!(disk["8340/1088220072"]["translation"], "draft");
+    assert_eq!(disk["1/8340/1088220072"]["translation"], "draft");
+    let (status, own) = request(state.clone(), "drafts", json!({"accountId":1})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(own["8340/1088220072"]["translation"], "draft");
+    let (status, _) = request(state.clone(), "drafts", json!({"accountId":2})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = request(state.clone(), "draft", json!({"accountId":2,"projectId":8340,"stringId":1088220072,"translation":"other","stage":2})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    state.drafts.lock().await.insert("8340/22".into(), json!({"translation":"unassigned","stage":1,"updatedAt":"2026-10-10"}));
+    let (status, legacy) = request(state.clone(), "legacyDrafts", json!({"accountId":1,"projectId":8340})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(legacy["count"], 1);
+    let (status, imported) = request(state.clone(), "claimLegacyDrafts", json!({"accountId":1,"projectId":8340})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(imported["imported"], 1);
+    let (status, own) = request(state.clone(), "drafts", json!({"accountId":1})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(own["8340/22"]["translation"], "unassigned");
+    assert!(state.drafts.lock().await.contains_key("8340/22"));
     let _ = std::fs::remove_file(&state.draft_path);
     let _ = std::fs::remove_file(state.draft_path.with_extension("bak"));
     handle.abort();

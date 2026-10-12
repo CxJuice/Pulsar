@@ -21,7 +21,7 @@ const dictionaryTerm = ref(dictionarySelection.value), dictionaryError = ref('')
 const dictionaryQueried = ref(false), dictionaryBusy = ref(false)
 const dictionaryData = ref<CambridgeDictionaryData | null>(null)
 const translationMode = ref<'translate' | 'dictionary'>('translate')
-const translationSource = ref(''), translationResult = ref(''), translationError = ref('')
+const translationSource = ref(''), translationResult = ref(''), translationError = ref(''), translationResultNotice = ref('')
 const translationBusy = ref(false)
 const translationProvider = ref<TranslationProvider>('google'), translationAccessMode = ref<TranslationMode>('web')
 const useTermTranslations = ref(true)
@@ -45,7 +45,11 @@ const activeDockPanels = ref<string[]>([props.editor.panel])
 function panelBusyFor(panel: string) { return panel === 'terms' ? props.editor.termsBusy : panel === 'suggestions' ? props.editor.suggestionsBusy : panel === 'history' ? props.editor.historyBusy : false }
 function panelHasDataFor(panel: string) { return panel === 'terms' ? props.editor.terms.length > 0 : panel === 'history' ? props.editor.history.length > 0 : props.editor.suggestions.length > 0 }
 function panelErrorFor(panel: string) { return panel === 'terms' ? props.editor.termsError : panel === 'suggestions' ? props.editor.suggestionsError : panel === 'history' ? props.editor.historyError : '' }
-function retryPanel(panel: string) { if (panel === 'terms') props.editor.loadTerms(true); else props.editor.loadAux() }
+function retryPanel(panel: string) {
+  if (panel === 'terms') void props.editor.loadTerms(true)
+  else if (panel === 'suggestions') void props.editor.loadSuggestions(true)
+  else if (panel === 'history') void props.editor.loadHistory(true)
+}
 function searchKeydown(event: KeyboardEvent) {
   if (props.editor.panel !== 'suggestions' || !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'f') return
   event.preventDefault(); event.stopPropagation()
@@ -203,6 +207,7 @@ function applyTranslationSettings(settings: TranslationSettings) {
     prefillFollowsSelection = false
     translationBusy.value = false
     translationResult.value = ''
+    translationResultNotice.value = ''
     translationApiProvider.value = null
   }
   nextTick(scheduleDictionaryBounds)
@@ -278,10 +283,9 @@ function openTranslation() {
 }
 async function sourceWithConfiguredTerms(source: string, translationEntry: StringItem | null, isCurrent: () => boolean) {
   if (translationProvider.value !== 'llm' && useTermTranslations.value && translationEntry && props.editor.connected) {
-    await props.editor.loadTerms()
+    const terms = await props.editor.termsFor(translationEntry)
     if (!isCurrent()) return null
-    if (props.editor.termsError) throw new Error(`项目术语加载失败，无法使用登记译名：${props.editor.termsError}`)
-    source = replaceSourceTerms(source, props.editor.terms).text
+    source = replaceSourceTerms(source, terms).text
   }
   return source
 }
@@ -289,34 +293,33 @@ async function requestConfiguredTranslation(source: string, translationEntry: St
   const preparedSource = await sourceWithConfiguredTerms(source, translationEntry, isCurrent)
   if (preparedSource === null) return null
   source = preparedSource
-  if (translationProvider.value === 'llm' && translationEntry) {
-    await Promise.allSettled([
-      translationLlmContext.value.recommendations && props.editor.selected?.id === translationEntry.id ? props.editor.loadSuggestions() : Promise.resolve(),
-      translationLlmContext.value.terms ? props.editor.loadTerms() : Promise.resolve(),
-    ])
-  }
+  const [suggestions, terms] = translationProvider.value === 'llm' && translationEntry
+    ? await Promise.all([
+      translationLlmContext.value.recommendations ? props.editor.suggestionsFor(translationEntry) : Promise.resolve([]),
+      translationLlmContext.value.terms ? props.editor.termsFor(translationEntry) : Promise.resolve([]),
+    ]) : [[], []]
   if (!isCurrent()) return null
   if (requireSelected && translationEntry && (props.editor.selected?.id !== translationEntry.id || props.editor.selected?.project !== translationEntry.project)) throw new Error('当前词条已切换，请重新发起翻译')
   const context: TranslationPromptContext = {}
   if (translationProvider.value === 'llm' && translationEntry && translationLlmContext.value.key && translationEntry.key) context.key = translationEntry.key
-  if (translationProvider.value === 'llm' && translationEntry && translationLlmContext.value.recommendations && props.editor.selected?.id === translationEntry.id) {
-    context.recommendations = [...props.editor.suggestions]
+  if (translationProvider.value === 'llm' && translationEntry && translationLlmContext.value.recommendations) {
+    context.recommendations = [...suggestions]
       .sort((first, second) => (second.localMatching ?? 0) - (first.localMatching ?? 0))
       .slice(0, translationLlmContext.value.recommendationCount)
       .map(suggestion => ({ original: suggestion.original, translation: suggestion.translation, similarity: suggestion.localMatching ?? 0 }))
   }
   if (translationProvider.value === 'llm' && translationEntry && translationLlmContext.value.terms) {
-    const unresolved = matchLocalUnresolvedTerms(source, readLocalUnresolvedTerms(props.editor.project.id))
+    const unresolved = matchLocalUnresolvedTerms(source, readLocalUnresolvedTerms(translationEntry.project))
     const unresolvedBySource = new Map(unresolved.map(entry => [entry.source.trim().toLocaleLowerCase(), entry]))
     const unresolvedNote = (entry: LocalUnresolvedTerm) => {
       const candidates = entry.candidates.filter(Boolean).slice(0, 8)
       return `社区未定译名（${entry.sourceType}，尚未确认）；候选：${candidates.join('、') || '暂无'}。请根据当前语境参考，无法确认时保留原文。`
     }
-    const confirmedTerms = props.editor.terms.map(term => {
+    const confirmedTerms = terms.map(term => {
       const candidate = unresolvedBySource.get(term.term.trim().toLocaleLowerCase())
       return { term: term.term, translation: term.translation, note: [term.note, candidate ? unresolvedNote(candidate) : ''].filter(Boolean).join('；') }
     })
-    const confirmedSources = new Set(props.editor.terms.map(term => term.term.trim().toLocaleLowerCase()))
+    const confirmedSources = new Set(terms.map(term => term.term.trim().toLocaleLowerCase()))
     const unresolvedTerms = unresolved
       .filter(entry => !confirmedSources.has(entry.source.trim().toLocaleLowerCase()))
       .map(entry => ({ term: entry.source.trim(), translation: entry.source.trim(), note: unresolvedNote(entry) }))
@@ -331,7 +334,7 @@ async function requestConfiguredTranslation(source: string, translationEntry: St
   if (!result?.ok || !result.data?.text) throw new Error(result?.message || '翻译服务不可用')
   return result.data
 }
-async function translateSelectedText(value = translationSource.value) {
+async function translateSelectedText(value = translationSource.value, autoFill = false) {
   if (translationBusy.value || translationStarting) return
   if (!value.trim()) { translationError.value = '请输入要翻译的文本'; return }
   translationStarting = true
@@ -339,9 +342,12 @@ async function translateSelectedText(value = translationSource.value) {
   translationMode.value = 'translate'
   translationResult.value = ''
   translationError.value = ''
+  translationResultNotice.value = ''
   translationApiProvider.value = null
   const entryVersion = translationEntryVersion
   const translationEntry = props.editor.selected
+  const translationProjectId = props.editor.project.id
+  const translationTextBeforeRequest = props.editor.text
   let request = 0, requestId: string | null = null
   try {
     if (!translationSettingsReady.value) await loadTranslationSelection()
@@ -370,6 +376,13 @@ async function translateSelectedText(value = translationSource.value) {
     if (result) {
       translationResult.value = result.text
       translationApiProvider.value = result.provider
+      if (autoFill) {
+        if (!translationEntry) translationResultNotice.value = '译文已生成；当前没有选中的词条，无法自动填入。'
+        else if (props.editor.project.id !== translationProjectId || props.editor.selected?.id !== translationEntry.id) translationResultNotice.value = '译文已生成；当前词条已切换，未自动填入以避免写错词条。'
+        else if (props.editor.text !== translationTextBeforeRequest) translationResultNotice.value = '译文已生成；翻译期间编辑区已有修改，未自动覆盖。'
+        else if (props.editor.locked || props.editor.listBusy || props.editor.initializing || props.editor.reloadBusy) translationResultNotice.value = '译文已生成；当前词条不可编辑，译文保留在翻译栏。'
+        else emit('replace', result.text)
+      }
     }
   } catch (reason) {
     if (entryVersion === translationEntryVersion && (!request || request === translationRequest)) translationError.value = (reason as Error).message || '翻译失败'
@@ -409,6 +422,7 @@ async function translatePrefillEntry(value: string, translationEntry: StringItem
     translationSource.value = source
     translationResult.value = ''
     translationError.value = ''
+    translationResultNotice.value = ''
     translationApiProvider.value = null
   }
   const request = ++prefillRequest
@@ -483,6 +497,20 @@ onMounted(() => {
   })
   document.addEventListener('pointerdown', closeAuxCustomizationOnOutside)
 })
+onDeactivated(() => {
+  endDockDrag()
+  customizationOpen.value = false
+  dictionaryRequest++
+  translationRequest++
+  cancelTranslationRequest(activeTranslationRequestId)
+  activeTranslationRequestId = null
+  cancelPrefillTranslation()
+  translationBusy.value = false
+  window.scKit?.translatorView({ visible: false, bounds: null })
+  window.scKit?.auxCustomizationOverlay({ visible: false, bounds: null, items: [], theme: {} })
+  dictionaryObserver?.disconnect()
+})
+onActivated(() => { observeBlockingModals(); nextTick(scheduleDictionaryBounds) })
 onBeforeUnmount(() => {
   window.removeEventListener('sckit:translation-settings-updated', onTranslationSettingsUpdated)
   window.removeEventListener('dragend', endDockDrag, true)
@@ -934,17 +962,18 @@ function handleAuxCustomizationAction(action: AuxCustomizationAction) {
         </template>
         <template v-else>
           <div v-if="translationAccessMode === 'web'" class="translation-web-content">
-            <p class="translation-web-note">在编辑区选中文本后右键选择“翻译”，文本会自动发送到 {{ translationProvider === 'google' ? 'Google' : 'DeepL' }} 网页。</p>
+            <p class="translation-web-note">文本会发送到 {{ translationProvider === 'google' ? 'Google' : 'DeepL' }} 网页；网页模式无法读取返回译文。如需自动填入编辑区，请在设置中切换到 API 模式。</p>
             <div ref="translatorHost" class="cambridge-view-host translation-web-host" :aria-label="translationProvider === 'google' ? 'Google 翻译网页' : 'DeepL 网页翻译'"><p v-if="!editor.desktop" class="cambridge-preview-note">内嵌翻译网页仅在桌面应用中显示。</p></div>
           </div>
           <template v-else>
-            <form class="translation-form" @submit.prevent="translateSelectedText(translationSource)" @keydown.ctrl.enter.stop.prevent="translateSelectedText(translationSource)">
+            <form class="translation-form" @submit.prevent="translateSelectedText(translationSource, true)" @keydown.ctrl.enter.stop.prevent="translateSelectedText(translationSource, true)">
               <label for="translation-source">当前句子或选中的文本</label>
               <textarea id="translation-source" v-model="translationSource" rows="5" placeholder="输入或从编辑区右键选择文本" />
-              <div class="translation-form-actions"><button v-if="translationResult" class="button compact translation-prefill-button" type="button" aria-label="一键将译文预填充到编辑区译文框" title="一键将译文预填充到编辑区译文框" :disabled="editor.locked || editor.listBusy || editor.initializing || editor.reloadBusy" @click="emit('replace', translationResult)"><ArrowDownToLine :size="16" /></button><button class="button compact primary" :disabled="translationBusy || !translationSource.trim()" type="submit"><LoadingIndicator v-if="translationBusy" :size="13" label="正在翻译" /><Languages v-else :size="14" />{{ translationBusy ? '翻译中…' : translationProvider === 'llm' ? '通过 LLM 翻译' : '通过 API 翻译' }}</button><button v-if="translationBusy" class="button compact" type="button" @click="cancelSelectedTranslation"><X :size="14" />停止翻译</button></div>
+              <div class="translation-form-actions"><button v-if="translationResult" class="button compact translation-prefill-button" type="button" aria-label="再次将译文填入编辑区译文框" title="再次将译文填入编辑区译文框" :disabled="editor.locked || editor.listBusy || editor.initializing || editor.reloadBusy" @click="emit('replace', translationResult)"><ArrowDownToLine :size="16" /></button><button class="button compact primary" :disabled="translationBusy || !translationSource.trim()" type="submit"><LoadingIndicator v-if="translationBusy" :size="13" label="正在翻译" /><Languages v-else :size="14" />{{ translationBusy ? '翻译中…' : translationProvider === 'llm' ? 'LLM 翻译并填入' : 'API 翻译并填入' }}</button><button v-if="translationBusy" class="button compact" type="button" @click="cancelSelectedTranslation"><X :size="14" />停止翻译</button></div>
             </form>
           <section class="translation-result" aria-live="polite">
             <div class="translation-result-heading"><strong>中文译文</strong><span v-if="translationApiProvider" class="subtle">{{ translationApiProvider === 'google' ? 'Google API' : translationApiProvider === 'deepl' ? 'DeepL API' : `LLM · ${translationLlmModel}` }}</span></div>
+            <p v-if="translationResultNotice" class="sidebar-message" role="status">{{ translationResultNotice }}</p>
             <div v-if="translationBusy" class="panel-loading"><LoadingIndicator :size="20" label="正在翻译文本" /><span>正在翻译…</span></div>
             <p v-else-if="translationError" class="sidebar-message error" role="alert">{{ translationError }}</p>
             <p v-else-if="translationResult" class="translation-result-text">{{ translationResult }}</p>

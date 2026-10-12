@@ -42,6 +42,7 @@ struct AppState {
     base_url: String,
     secret: String,
     credentials: RwLock<Option<Credentials>>,
+    active_account_id: RwLock<Option<u64>>,
     drafts: Mutex<DraftMap>,
     draft_path: PathBuf,
     suggestions: Mutex<BTreeMap<String, CachedSuggestion>>,
@@ -278,6 +279,7 @@ async fn connect(
     } else {
         "token"
     };
+    *state.active_account_id.write().await = user.get("id").and_then(Value::as_u64);
     *state.credentials.write().await = Some(credentials);
     state.suggestions.lock().await.clear();
     Ok(Json(json!({"authenticated":true,"mode":mode,"user":user})))
@@ -285,6 +287,7 @@ async fn connect(
 
 async fn disconnect(State(state): State<Arc<AppState>>) -> AppResult {
     *state.credentials.write().await = None;
+    *state.active_account_id.write().await = None;
     state.suggestions.lock().await.clear();
     Ok(Json(json!({"authenticated":false,"mode":"none"})))
 }
@@ -401,14 +404,46 @@ async fn rpc(
         return Ok(Json(json!({"authenticated":false,"mode":"none"})));
     }
     if action == "drafts" {
-        return Ok(Json(
-            serde_json::to_value(&*state.drafts.lock().await).unwrap_or(json!({})),
-        ));
+        let account = id(&payload, "accountId")?;
+        if *state.active_account_id.read().await != Some(account) { return Err(ApiError::new(StatusCode::FORBIDDEN, "草稿账号与当前登录账号不一致")); }
+        let prefix = format!("{account}/");
+        let drafts = state.drafts.lock().await;
+        let visible: DraftMap = drafts.iter().filter_map(|(key, value)|
+            key.strip_prefix(&prefix).and_then(|rest| (rest.matches('/').count() == 1).then(|| (rest.to_owned(), value.clone())))
+        ).collect();
+        return Ok(Json(json!(visible)));
+    }
+    if action == "legacyDrafts" {
+        let account = id(&payload, "accountId")?;
+        if *state.active_account_id.read().await != Some(account) { return Err(ApiError::new(StatusCode::FORBIDDEN, "草稿账号与当前登录账号不一致")); }
+        let project = id(&payload, "projectId")?;
+        let prefix = format!("{project}/");
+        let drafts = state.drafts.lock().await;
+        let count = drafts.keys().filter(|key| key.starts_with(&prefix) && key.matches('/').count() == 1 && !drafts.contains_key(&format!("{account}/{key}"))).count();
+        return Ok(Json(json!({"count":count})));
+    }
+    if action == "claimLegacyDrafts" {
+        let account = id(&payload, "accountId")?;
+        if *state.active_account_id.read().await != Some(account) { return Err(ApiError::new(StatusCode::FORBIDDEN, "草稿账号与当前登录账号不一致")); }
+        let project = id(&payload, "projectId")?;
+        let prefix = format!("{project}/");
+        let mut drafts = state.drafts.lock().await;
+        let mut next = drafts.clone();
+        let mut imported = 0;
+        for (key, value) in drafts.iter().filter(|(key, _)| key.starts_with(&prefix) && key.matches('/').count() == 1) {
+            let scoped = format!("{account}/{key}");
+            if !next.contains_key(&scoped) { next.insert(scoped, value.clone()); imported += 1; }
+        }
+        write_drafts(&state, &next).await?;
+        *drafts = next;
+        return Ok(Json(json!({"imported":imported})));
     }
     let project = if action == "projects" { 0 } else { id(&payload, "projectId")? };
     if action == "draft" {
         let string = id(&payload, "stringId")?;
-        let key = format!("{project}/{string}");
+        let account = id(&payload, "accountId")?;
+        if *state.active_account_id.read().await != Some(account) { return Err(ApiError::new(StatusCode::FORBIDDEN, "草稿账号与当前登录账号不一致")); }
+        let key = format!("{account}/{project}/{string}");
         let mut drafts = state.drafts.lock().await;
         let mut next = drafts.clone();
         if payload.get("remove").and_then(Value::as_bool) == Some(true) {
@@ -627,6 +662,7 @@ async fn rpc(
             let string = id(&payload, "stringId")?;
             let target = format!("{project_path}/strings/{string}");
             let current = remote(&state, &credentials, Method::GET, &target, &[], None).await?;
+            let mut overwrote_conflict = false;
             for (expected, field) in [
                 ("expectedUpdatedAt", "updatedAt"),
                 ("expectedTranslation", "translation"),
@@ -636,21 +672,20 @@ async fn rpc(
                 let provided = payload
                     .get(expected)
                     .ok_or_else(|| ApiError::invalid("缺少远端版本信息，请重新载入词条"))?;
-                if provided != current.get(field).unwrap_or(&Value::Null) {
-                    return Err(ApiError::new(
-                        StatusCode::CONFLICT,
-                        "这条词条已被其他人修改。请重新载入后合并译文；本地草稿已保留。",
-                    ));
-                }
+                overwrote_conflict |= provided != current.get(field).unwrap_or(&Value::Null);
             }
             let body = json!({"translation":translation(&payload)?,"stage":stage(&payload)?});
             let saved = remote(&state, &credentials, Method::PUT, &target, &[], Some(body)).await?;
             state.suggestions.lock().await.clear();
-            if saved.is_null() {
+            let mut saved = if saved.is_null() {
                 remote(&state, &credentials, Method::GET, &target, &[], None).await?
             } else {
                 saved
+            };
+            if let Some(item) = saved.as_object_mut() {
+                item.insert("overwroteConflict".into(), Value::Bool(overwrote_conflict));
             }
+            saved
         }
         _ => return Err(ApiError::new(StatusCode::NOT_FOUND, "不存在的服务操作")),
     };
@@ -692,7 +727,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .timeout(Duration::from_secs(45))
         .connect_timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none())
-        .user_agent("ScTranslateKit/0.1.0");
+        .user_agent(format!("ScTranslateKit/{}", env!("CARGO_PKG_VERSION")));
     if let Ok(proxy) = std::env::var("SCKIT_PROXY") {
         if !proxy.is_empty() {
             builder = builder.proxy(reqwest::Proxy::all(proxy)?);
@@ -703,6 +738,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         base_url: "https://paratranz.cn/api".into(),
         secret,
         credentials: RwLock::new(None),
+        active_account_id: RwLock::new(None),
         drafts: Mutex::new(drafts),
         draft_path,
         suggestions: Mutex::new(BTreeMap::new()),

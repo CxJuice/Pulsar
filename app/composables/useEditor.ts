@@ -4,6 +4,7 @@ import { matchSuggestions } from '~/utils/textWorker'
 import { toParaTranzText } from '~/utils/translationText'
 import { sortFilesByCompletion } from '~/utils/fileSort'
 import { EntryAuxCache } from '~/utils/entryAuxCache'
+import { ListRequestCoordinator } from '~/utils/listRequestCoordinator'
 
 const emptyProject = (): ProjectInfo => ({ id: 0, name: '', source: '', dest: '' })
 const emptyFile = (): FileInfo => ({ id: 0, name: '', project: 0, total: 0, translated: 0, disputed: 0, checked: 0, reviewed: 0, hidden: 0, locked: 0, words: 0 })
@@ -21,14 +22,16 @@ export function useEditor() {
   const selected = ref<StringItem | null>(items.value[0] || null)
   const text = ref(''), editStage = ref(0), translationDisplayCleared = ref(false), stageFilter = ref<number | null>(0), search = ref(''), searchMode = ref('text')
   const page = ref(1), pageSize = ref(50), pageCount = ref(1), rowCount = ref(0), fileId = ref(0), sort = ref('default')
-  const listBusy = ref(false), error = ref(''), notice = ref(''), draftStatus = ref('')
+  const listBusy = ref(false), listProgress = ref(''), error = ref(''), notice = ref(''), draftStatus = ref('')
   const pendingSubmissions = ref<Submission[]>([]), submissionFailures = ref<SubmissionFailure[]>([])
   const pendingCount = computed(() => pendingSubmissions.value.length)
   const submissionQueue: Array<{ submission: Submission; persisted: Promise<boolean> }> = []
   const submittedVersions = new Map<string, StringItem>()
   let submissionId = 0, processingSubmissions = false
+  const submissionProcessing = ref(false)
   const requestCount = ref(0), reloadBusy = ref(false), exportBusy = ref(false)
   const selectedIds = ref<number[]>([]), drafts = ref<Record<string, Draft>>({})
+  const legacyDraftCount = ref(0)
   const panel = ref<'context' | 'suggestions' | 'history' | 'terms' | 'quality' | 'comments' | 'dictionary'>('suggestions')
   const suggestions = ref<Suggestion[]>([]), terms = ref<Term[]>([]), history = ref<HistoryEntry[]>([])
   const termsBusy = ref(false), termsError = ref('')
@@ -49,12 +52,14 @@ export function useEditor() {
   const detachedNeighbors = shallowRef<{ previousId?: number; nextId?: number; index: number; page: number } | null>(null)
   const termsCache = new EntryAuxCache<Term[]>(), suggestionsCache = new EntryAuxCache<Suggestion[]>(), disputedStringsCache = new EntryAuxCache<StringItem[]>(120_000, 8)
   const updatedStringsCache = shallowRef<{ key: string; items: StringItem[] } | null>(null)
+  const listRequests = new ListRequestCoordinator(id => { void window.scKit?.cancelRequest?.(id) })
+  const globalSortLimit = 20_000
   let updatedSortNeedsRefresh = false
   let prefetchTimer: ReturnType<typeof setTimeout> | undefined, prefetchSequence = 0, disposed = false
   const auxiliaryKey = (item: StringItem) => JSON.stringify([sessionInfo.value.user?.id, sessionInfo.value.mode, item.project, item.id, item.original])
 
   function updatedStringsQueryKey() {
-    return JSON.stringify([project.value.id, fileId.value, stageFilter.value, searchMode.value, search.value])
+    return JSON.stringify([project.value.id, fileId.value, stageFilter.value, searchMode.value, search.value, sort.value])
   }
   function compareUpdated(a: StringItem, b: StringItem) {
     const aTime = Date.parse(a.updatedAt || '') || 0, bTime = Date.parse(b.updatedAt || '') || 0
@@ -129,18 +134,24 @@ export function useEditor() {
     return !!latest && latest.translation === toParaTranzText(text.value) && latest.stage === stage
   }
 
-  async function api<T>(action: RequestAction, payload: Record<string, unknown> = {}): Promise<T> {
+  async function api<T>(action: RequestAction, payload: Record<string, unknown> = {}, requestId?: string): Promise<T> {
     const bridge = window.scKit
     if (!bridge) throw new Error('请在 Electron 应用中连接 ParaTranz')
     requestCount.value++
     try {
-      const result = await bridge.request<T>(action, payload)
+      const result = await bridge.request<T>(action, payload, requestId)
       if (!result.ok) {
         if (result.status === 401) sessionInfo.value.authenticated = false
         throw new Error(result.message || '请求失败')
       }
       return result.data as T
     } finally { requestCount.value-- }
+  }
+  function stopListRequests() {
+    listRequests.cancelAll()
+  }
+  async function listPage(payload: Record<string, unknown>): Promise<StringPage> {
+    return listRequests.run(id => api<StringPage>('strings', payload, id))
   }
   function choose(item: StringItem | null, clearTranslation = false) {
     ++selectionSequence
@@ -173,24 +184,39 @@ export function useEditor() {
   }
   async function persistDraft(item: StringItem, translation: string, stage: number, remove = false) {
     translation = toParaTranzText(translation)
+    const accountId = sessionInfo.value.user?.id
+    if (!accountId) { draftStatus.value = '草稿保存失败：请先登录'; return false }
     const key = draftKey(item)
     const generation = ++draftGeneration
     const draft = { translation, stage, updatedAt: new Date().toISOString() }
+    const previousDraft = drafts.value[key]
     if (remove) delete drafts.value[key]; else drafts.value[key] = draft
     try {
-      const write = async () => { await api('draft', { projectId: item.project, stringId: item.id, ...draft, remove }) }
+      const write = async () => { await api('draft', { accountId, projectId: item.project, stringId: item.id, ...draft, remove }) }
       const pending = draftWrites.then(write, write)
       draftWrites = pending.catch(() => {})
       await pending
       if (generation === draftGeneration && selected.value?.id === item.id) draftStatus.value = remove ? '' : '草稿已保存到本地'
       return true
-    } catch (reason) { if (generation === draftGeneration && selected.value?.project === item.project && selected.value.id === item.id) draftStatus.value = `草稿保存失败：${(reason as Error).message}`; return false }
+    } catch (reason) {
+      if (generation === draftGeneration) {
+        if (previousDraft) drafts.value[key] = previousDraft
+        else delete drafts.value[key]
+        if (selected.value?.project === item.project && selected.value.id === item.id) draftStatus.value = `草稿保存失败：${(reason as Error).message}`
+      }
+      return false
+    }
   }
-  async function savePrefillDraft(item: StringItem, translation: string) {
+  async function savePrefillDraft(item: StringItem, translation: string, expectedDraftVersion?: string | null) {
     const normalized = toParaTranzText(translation), current = selected.value?.project === item.project && selected.value.id === item.id
+    if (expectedDraftVersion !== undefined &&
+      ((drafts.value[draftKey(item)]?.updatedAt ?? null) !== expectedDraftVersion ||
+        (current && dirty.value) || !!item.translation.trim())) {
+      throw new Error('翻译期间已有新的人工编辑或草稿，已跳过此词条')
+    }
     const wasClean = current && !dirty.value
     if (!await persistDraft(item, normalized, 0)) throw new Error(draftStatus.value || '本机草稿保存失败')
-    if (wasClean && selected.value?.project === item.project && selected.value.id === item.id) {
+    if (wasClean && selected.value?.project === item.project && selected.value.id === item.id && !dirty.value) {
       changing = true
       translationDisplayCleared.value = false
       text.value = normalized
@@ -198,13 +224,13 @@ export function useEditor() {
       changing = false
     }
   }
-  async function savePrefillToParaTranz(item: StringItem, translation: string) {
+  async function savePrefillToParaTranz(item: StringItem, translation: string, expectedDraftVersion?: string | null) {
     if (!connected.value || !sessionInfo.value.authenticated) throw new Error('请先登录 ParaTranz')
     if ([9, -1].includes(item.stage)) throw new Error('此词条已锁定，无法保存')
     const accountId = sessionInfo.value.user?.id
     if (!accountId) throw new Error('请重新登录后提交')
     const normalized = toParaTranzText(translation)
-    await savePrefillDraft(item, normalized)
+    await savePrefillDraft(item, normalized, expectedDraftVersion)
     const saved = await api<StringItem>('save', { projectId: item.project, stringId: item.id, translation: normalized, stage: 0,
       expectedUserId: accountId, expectedUpdatedAt: item.updatedAt ?? null, expectedTranslation: item.translation,
       expectedStage: item.stage, expectedOriginal: item.original })
@@ -259,7 +285,7 @@ export function useEditor() {
   async function select(item: StringItem, clearTranslation = false) {
     if (listBusy.value || initializing.value || reloadBusy.value || selected.value?.id === item.id) return
     const sequence = ++selectionSequence
-    await flushDraft()
+    try { await flushDraft(true) } catch (reason) { error.value = (reason as Error).message; return }
     if (sequence !== selectionSequence || listBusy.value || initializing.value || reloadBusy.value) return
     choose(item, clearTranslation)
   }
@@ -283,12 +309,14 @@ export function useEditor() {
   }, { flush: 'sync' })
 
   async function loadStrings(preferredId?: number, retainedSelection?: StringItem, edge: 'first' | 'last' = 'first', clearTranslation = false, force = true) {
-    await flushDraft()
-    if (!connected.value) return
     const sequence = ++listSequence
-    listBusy.value = true; error.value = ''; selectedIds.value = []
+    stopListRequests()
+    listBusy.value = false; listProgress.value = ''
+    try { await flushDraft(true) } catch (reason) { error.value = (reason as Error).message; return }
+    if (!connected.value || sequence !== listSequence) return
+    listBusy.value = true; listProgress.value = ''; error.value = ''; selectedIds.value = []
     try {
-      if (sort.value === 'updated') {
+      if (sort.value !== 'default') {
         const key = updatedStringsQueryKey()
         let all = !force && updatedStringsCache.value?.key === key ? updatedStringsCache.value.items : undefined
         if (!all) {
@@ -296,43 +324,81 @@ export function useEditor() {
           updatedStringsCache.value = null
           const remotePageSize = 800
           const query = { projectId: project.value.id, fileId: fileId.value, pageSize: remotePageSize, stage: stageFilter.value, text: search.value, searchMode: searchMode.value }
-          const first = await api<StringPage>('strings', { ...query, page: 1 })
+          const first = await listPage({ ...query, page: 1 })
           if (sequence !== listSequence) return
+          if (first.rowCount > globalSortLimit || first.pageCount * remotePageSize > globalSortLimit + remotePageSize) {
+            throw new Error(`全局排序最多处理 ${globalSortLimit.toLocaleString()} 条词条；请先按状态或搜索缩小范围。`)
+          }
+          listProgress.value = `已读取 1 / ${first.pageCount} 页，正在按${sort.value === 'key' ? '键值' : sort.value === 'length' ? '原文长度' : '修改时间'}排序`
           const fetched = new Map(first.results.map(item => [item.id, item]))
           for (let currentPage = 2; currentPage <= first.pageCount; currentPage++) {
-            const data = await api<StringPage>('strings', { ...query, page: currentPage })
+            const data = await listPage({ ...query, page: currentPage })
             if (sequence !== listSequence) return
             for (const item of data.results) fetched.set(item.id, item)
+            listProgress.value = `已读取 ${currentPage} / ${first.pageCount} 页，正在整理排序`
           }
-          all = sortByUpdated([...fetched.values()])
+          all = orderedItems([...fetched.values()])
           updatedStringsCache.value = { key, items: all }
           updatedSortNeedsRefresh = false
         }
         if (sequence !== listSequence) return
         rowCount.value = all.length
         pageCount.value = Math.max(1, Math.ceil(rowCount.value / pageSize.value))
+        if (retainedSelection) {
+          const index = all.findIndex(item => item.id === retainedSelection.id && item.project === retainedSelection.project)
+          if (index >= 0) page.value = Math.floor(index / pageSize.value) + 1
+          else notice.value = '当前筛选结果不包含此前选中的词条。'
+        }
         page.value = Math.max(1, Math.min(page.value, pageCount.value))
         items.value = all.slice((page.value - 1) * pageSize.value, page.value * pageSize.value)
       } else {
-        const data = await api<StringPage>('strings', { projectId: project.value.id, fileId: fileId.value, page: page.value, pageSize: pageSize.value, stage: stageFilter.value, text: search.value, searchMode: searchMode.value })
+        if (retainedSelection) {
+          const query = { projectId: project.value.id, fileId: fileId.value, pageSize: 800, stage: stageFilter.value, text: search.value, searchMode: searchMode.value }
+          const first = await listPage({ ...query, page: 1 })
+          if (sequence !== listSequence) return
+          if (first.rowCount > globalSortLimit) throw new Error(`定位原选中词条需要扫描超过 ${globalSortLimit.toLocaleString()} 条记录；请先缩小筛选范围。`)
+          let index = first.results.findIndex(item => item.id === retainedSelection.id && item.project === retainedSelection.project)
+          for (let remotePage = 2; index < 0 && remotePage <= first.pageCount; remotePage++) {
+            const data = await listPage({ ...query, page: remotePage })
+            if (sequence !== listSequence) return
+            listProgress.value = `正在定位所选词条：${remotePage} / ${first.pageCount} 页`
+            const match = data.results.findIndex(item => item.id === retainedSelection.id && item.project === retainedSelection.project)
+            if (match >= 0) index = (remotePage - 1) * 800 + match
+          }
+          if (index >= 0) page.value = Math.floor(index / pageSize.value) + 1
+          else notice.value = '当前筛选结果不包含此前选中的词条。'
+        }
+        const data = await listPage({ projectId: project.value.id, fileId: fileId.value, page: page.value, pageSize: pageSize.value, stage: stageFilter.value, text: search.value, searchMode: searchMode.value })
         if (sequence !== listSequence) return
         items.value = data.results; rowCount.value = data.rowCount; pageCount.value = Math.max(1, data.pageCount); page.value = data.page
       }
       const rows = visibleItems.value
-      choose(retainedSelection || rows.find(item => item.id === preferredId) || (edge === 'last' ? rows.at(-1) : rows[0]) || null, clearTranslation)
+      choose(rows.find(item => item.id === preferredId) || (edge === 'last' ? rows.at(-1) : rows[0]) || null, clearTranslation)
     } catch (reason) { if (sequence === listSequence) error.value = (reason as Error).message }
-    finally { if (sequence === listSequence) listBusy.value = false }
+    finally { if (sequence === listSequence) { listBusy.value = false; listProgress.value = '' } }
+  }
+  function cancelListLoad(silent = false) {
+    if (!listBusy.value) return
+    ++listSequence
+    stopListRequests()
+    listBusy.value = false
+    listProgress.value = ''
+    notice.value = silent ? '' : '已停止加载词条列表。'
   }
   async function bootstrap(projectId: number, newFileId: number) {
     if (!sessionInfo.value.authenticated || initializing.value && connected.value) return
-    await flushDraft()
+    try { await flushDraft(true) } catch (reason) { error.value = (reason as Error).message; return }
     clearAuxiliaryCache()
     updatedStringsCache.value = null
     initializing.value = true; error.value = ''
     try {
-      const [newProject, newFiles, localDrafts] = await Promise.all([api<ProjectInfo>('project', { projectId }), api<FileInfo[]>('files', { projectId }), api<Record<string, Draft>>('drafts')])
+      const accountId = sessionInfo.value.user?.id
+      const [newProject, newFiles, localDrafts, legacy] = await Promise.all([
+        api<ProjectInfo>('project', { projectId }), api<FileInfo[]>('files', { projectId }),
+        api<Record<string, Draft>>('drafts', { accountId }), api<{ count: number }>('legacyDrafts', { accountId, projectId }),
+      ])
       if (!newFiles.length) throw new Error('项目中没有可翻译的文件')
-      project.value = newProject; files.value = newFiles; drafts.value = localDrafts
+      project.value = newProject; files.value = newFiles; drafts.value = localDrafts; legacyDraftCount.value = legacy.count
       file.value = newFiles.find(entry => entry.id === newFileId) || newFiles[0]!
       fileId.value = file.value.id; connected.value = true; choose(null); page.value = 1
       clearTimeout(searchTimer); search.value = ''; selectedIds.value = []
@@ -344,7 +410,8 @@ export function useEditor() {
   }
   async function changeFile(id: number) {
     if (initializing.value || listBusy.value || id === fileId.value || !files.value.some(entry => entry.id === id)) return
-    await flushDraft(); updatedStringsCache.value = null; fileId.value = id; file.value = files.value.find(entry => entry.id === id) || file.value
+    try { await flushDraft(true) } catch (reason) { error.value = (reason as Error).message; return }
+    updatedStringsCache.value = null; fileId.value = id; file.value = files.value.find(entry => entry.id === id) || file.value
     page.value = 1; await loadStrings(); localStorage.setItem('sckit-workspace', JSON.stringify({ projectId: project.value.id, fileId: id }))
   }
   async function refreshFiles() {
@@ -356,7 +423,13 @@ export function useEditor() {
     file.value = refreshed.find(entry => entry.id === fileId.value) || file.value
   }
   function filter(stage: number | null) { stageFilter.value = stage; page.value = 1; loadStrings() }
-  watch([search, searchMode], () => { clearTimeout(searchTimer); if (initializing.value) return; searchTimer = setTimeout(() => { page.value = 1; loadStrings() }, 350) })
+  watch([search, searchMode], (_value, previous) => {
+    clearTimeout(searchTimer)
+    if (initializing.value) return
+    if (listBusy.value) cancelListLoad(true)
+    const preserve = !search.value.trim() && !!previous?.[0] ? selected.value || undefined : undefined
+    searchTimer = setTimeout(() => { page.value = 1; void loadStrings(preserve?.id, preserve) }, 350)
+  })
   watch(sort, () => { page.value = 1; void loadStrings(selected.value?.id) })
   async function paginate(newPage: number, edge: 'first' | 'last' = 'first', clearTranslation = false) { if (listBusy.value) return; page.value = Math.max(1, Math.min(newPage, pageCount.value)); await loadStrings(undefined, undefined, edge, clearTranslation, false) }
   async function changePageSize(size: number) { pageSize.value = size; page.value = 1; await loadStrings(undefined, undefined, 'first', false, false) }
@@ -381,6 +454,9 @@ export function useEditor() {
     await promise
     if (termsRequest?.sequence === sequence) termsRequest = undefined
     if (force) scheduleNextPrefetch()
+  }
+  function termsFor(item: StringItem): Promise<Term[]> {
+    return termsCache.load(auxiliaryKey(item), () => api<Term[]>('terms', { projectId: item.project, stringId: item.id }))
   }
   function scheduleTerms() {
     ++termsSequence
@@ -408,6 +484,9 @@ export function useEditor() {
     await promise
     if (suggestionsRequest?.sequence === sequence) suggestionsRequest = undefined
     if (force) scheduleNextPrefetch()
+  }
+  function suggestionsFor(item: StringItem): Promise<Suggestion[]> {
+    return suggestionsCache.load(auxiliaryKey(item), () => fetchSuggestions(item))
   }
   async function fetchSuggestions(item: StringItem) {
     const [data, disputed] = await Promise.all([
@@ -542,6 +621,7 @@ export function useEditor() {
   async function processSubmissions() {
     if (processingSubmissions) return
     processingSubmissions = true
+    submissionProcessing.value = true
     try {
       while (submissionQueue.length) {
         const { submission: job, persisted } = submissionQueue.shift()!
@@ -553,6 +633,7 @@ export function useEditor() {
           const saved = await api<StringItem>('save', { projectId: job.item.project, stringId: job.item.id,
             translation: job.translation, stage: job.stage, expectedUserId: job.accountId,
             expectedUpdatedAt: base.updatedAt ?? null, expectedTranslation: base.translation, expectedStage: base.stage, expectedOriginal: base.original })
+          if (saved.overwroteConflict) notice.value = `已覆盖 ${job.item.key || '#' + job.item.id} 的远端新修改。`
           submittedVersions.set(versionKey, saved)
           // The saved translation can now be a suggestion for another entry.
           suggestionsCache.clear(); disputedStringsCache.clear()
@@ -601,6 +682,7 @@ export function useEditor() {
       }
     } finally {
       processingSubmissions = false
+      submissionProcessing.value = false
       if (updatedSortNeedsRefresh && sort.value === 'updated' && workspaceReady.value && connected.value && sessionInfo.value.authenticated) {
         updatedSortNeedsRefresh = false
         await loadStrings(selected.value?.id)
@@ -662,18 +744,37 @@ export function useEditor() {
     clearAuxiliaryCache()
     updatedStringsCache.value = null
     updatedSortNeedsRefresh = false
-    await flushDraft(); connected.value = false; sessionInfo.value = { authenticated: false, mode: 'none' }
+    await flushDraft(true); connected.value = false; sessionInfo.value = { authenticated: false, mode: 'none' }
     workspaceReady.value = false
-    items.value = []; project.value = emptyProject(); file.value = emptyFile(); files.value = []; drafts.value = {}
+    items.value = []; project.value = emptyProject(); file.value = emptyFile(); files.value = []; drafts.value = {}; legacyDraftCount.value = 0
     fileId.value = 0; stageFilter.value = 0; search.value = ''; page.value = 1; rowCount.value = 0; pageCount.value = 1; error.value = ''; notice.value = ''; selectedIds.value = []; draftStatus.value = ''
     choose(null)
   }
   async function restoreSession(session: SessionStatus) {
     clearAuxiliaryCache()
-    await flushDraft()
+    await flushDraft(true)
     sessionInfo.value = session; connected.value = session.authenticated; workspaceReady.value = false
     choose(null)
-    if (connected.value) drafts.value = await api<Record<string, Draft>>('drafts')
+    if (connected.value) drafts.value = await api<Record<string, Draft>>('drafts', { accountId: sessionInfo.value.user?.id })
+  }
+  function waitForSubmissions(): Promise<void> {
+    if (!pendingCount.value && !submissionProcessing.value) return Promise.resolve()
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => { stop(); reject(new Error('后台提交仍在进行，请稍后重试关闭')) }, 55_000)
+      const stop = watch([pendingCount, submissionProcessing], ([count, processing]) => {
+        if (count === 0 && !processing) { clearTimeout(timeout); stop(); resolve() }
+      }, { flush: 'post' })
+    })
+  }
+  async function claimLegacyDrafts() {
+    const accountId = sessionInfo.value.user?.id, projectId = project.value.id
+    if (!accountId || !projectId) return
+    await flushDraft(true)
+    const result = await api<{ imported: number }>('claimLegacyDrafts', { accountId, projectId })
+    drafts.value = await api<Record<string, Draft>>('drafts', { accountId })
+    legacyDraftCount.value = (await api<{ count: number }>('legacyDrafts', { accountId, projectId })).count
+    if (selected.value) choose(selected.value)
+    notice.value = `已将 ${result.imported} 条旧草稿归入当前账号`
   }
   async function exportPage() {
     if (exportBusy.value) return
@@ -710,7 +811,7 @@ export function useEditor() {
     }
     initializing.value = false
   })
-  onBeforeUnmount(() => { disposed = true; clearAuxiliaryCache(); clearTimeout(draftTimer); clearTimeout(searchTimer); ++auxSequence; ++historySequence; ++termsSequence; flushDraft() })
-  return { desktop, connected, initializing, workspaceReady, project, file, files, sortedFiles, items, visibleItems, selected, text, editStage, stageFilter, search, searchMode, page, pageSize, pageCount, rowCount, fileId, sort, listBusy, pendingCount, submissionFailures, error, notice, draftStatus, dirty, locked, issues, untranslated, selectedIds, panel, suggestions, suggestionsBusy, suggestionsError, terms, history, historyBusy, historyError, auxBusy, auxError, termsBusy, termsError, sessionInfo, drafts,
-    presence, presenceProjectId, presenceLoginBusy, loginPresence, requestCount, reloadBusy, exportBusy, api, input, select, loadStrings, bootstrap, changeFile, refreshFiles, filter, paginate, changePageSize, loadAux, loadTerms, loadSuggestions, submissionQueued, dismissSubmission, openSubmission, save, move, reloadSelected, discardDraft, restoreClearedTranslation, savePrefillDraft, savePrefillToParaTranz, translationDisplayCleared, resetWorkspace, restoreSession, flushDraft, exportPage }
+  onBeforeUnmount(() => { disposed = true; stopListRequests(); clearAuxiliaryCache(); clearTimeout(draftTimer); clearTimeout(searchTimer); ++auxSequence; ++historySequence; ++termsSequence; flushDraft() })
+  return { desktop, connected, initializing, workspaceReady, project, file, files, sortedFiles, items, visibleItems, selected, text, editStage, stageFilter, search, searchMode, page, pageSize, pageCount, rowCount, fileId, sort, listBusy, listProgress, cancelListLoad, pendingCount, submissionFailures, error, notice, draftStatus, dirty, locked, issues, untranslated, selectedIds, panel, suggestions, suggestionsBusy, suggestionsError, terms, history, historyBusy, historyError, auxBusy, auxError, termsBusy, termsError, sessionInfo, drafts, legacyDraftCount, claimLegacyDrafts,
+    presence, presenceProjectId, presenceLoginBusy, loginPresence, requestCount, reloadBusy, exportBusy, api, input, select, loadStrings, bootstrap, changeFile, refreshFiles, filter, paginate, changePageSize, loadAux, loadTerms, loadSuggestions, loadHistory, termsFor, suggestionsFor, submissionQueued, dismissSubmission, openSubmission, save, move, reloadSelected, discardDraft, restoreClearedTranslation, savePrefillDraft, savePrefillToParaTranz, translationDisplayCleared, resetWorkspace, restoreSession, flushDraft, waitForSubmissions, exportPage }
 }

@@ -5,17 +5,24 @@ import type { WorkspaceNavigation } from '~/composables/useWorkspaceNavigation'
 import type { LocalFontData, ProxyTestResult, TranslationMode, TranslationProvider, TranslationProxyMode, TranslationSettings, TranslationSettingsUpdate } from '~/types/editor'
 import { appearanceStorageKey, cssFontFamily, defaultAccentColors, defaultAppearanceSettings, defaultBackgroundColors, defaultFontFamily, safeFontFamily } from '~/utils/appearance'
 import type { AppearanceSettings, AppearanceTextRegion, AppearanceTheme } from '~/utils/appearance'
+import { compileTermExemptionRules, defaultTermExemptionRules } from '~/utils/termHighlights'
 import packageInfo from '../../package.json'
 
 const props = defineProps<{ editor: UnwrapNestedRefs<ReturnType<typeof useEditor>> }>()
+const flushWorkspace = inject<() => Promise<void>>('workspace-flush-surfaces', () => props.editor.flushDraft(true))
 const navigation = inject<WorkspaceNavigation>('workspace-navigation')!
 const theme = inject<Ref<string>>('workspace-theme')!
 const translationLayout = inject<Ref<'horizontal' | 'vertical'>>('workspace-translation-layout')!
 const appearance = inject<Ref<AppearanceSettings>>('workspace-appearance')!
 const termRecognitionEnabled = inject<Ref<boolean>>('workspace-term-recognition')!
+const termExemptionRules = inject<Ref<string[]>>('workspace-term-exemption-rules')!
+const termExemptionPatterns = inject<Ref<RegExp[]>>('workspace-term-exemption-patterns')!
 const appearanceError = ref('')
 const termRecognitionError = ref('')
+const termExemptionDraft = ref(termExemptionRules.value.join('\n'))
+const termExemptionError = ref(''), termExemptionNotice = ref('')
 const systemFonts = ref<string[]>([]), systemFontsBusy = ref(false), systemFontsError = ref(false), systemFontsMessage = ref('')
+const buildInfo = ref<{ commit: string; sourceFingerprint: string; builtAt: string } | null>(null)
 const typographyRegions: { key: AppearanceTextRegion; title: string }[] = [
   { key: 'ui', title: '界面默认' },
   { key: 'listSource', title: '字符串列表 · 原文' },
@@ -34,6 +41,11 @@ const translationProviderOptions: { value: TranslationProvider; label: string; d
 ]
 const translationConfig = reactive({ provider: 'google' as TranslationProvider, mode: 'web' as TranslationMode, deeplPlan: 'free' as 'free' | 'pro', proxyMode: 'system' as TranslationProxyMode, proxyHost: '127.0.0.1', proxyPort: 7890, googleConfigured: false, deeplConfigured: false, llmRequestUrl: '', llmModel: '', llmPrefixPrompt: '', llmConfigured: false, clearAfterSaveNext: true, useTermTranslations: true, llmContext: { key: true, recommendations: true, recommendationCount: 1, terms: true, notes: true } })
 const googleApiKey = ref(''), deeplApiKey = ref(''), llmApiKey = ref(''), clearGoogleApiKey = ref(false), clearDeepLApiKey = ref(false), clearLlmApiKey = ref(false)
+const loadedTranslationConfig = ref('')
+const hasUnsavedTranslationSettings = computed(() => !!loadedTranslationConfig.value && (
+  JSON.stringify(translationConfig) !== loadedTranslationConfig.value ||
+  !!googleApiKey.value || !!deeplApiKey.value || !!llmApiKey.value ||
+  clearGoogleApiKey.value || clearDeepLApiKey.value || clearLlmApiKey.value))
 const translationBusy = ref(false), translationError = ref(''), translationNotice = ref('')
 const proxyTestBusy = ref(false), proxyTestError = ref(''), proxyTestResult = ref<ProxyTestResult | null>(null)
 let proxyTestRequest = 0
@@ -46,8 +58,6 @@ watch(() => [translationConfig.proxyMode, translationConfig.proxyHost, translati
 const translationProxySummary = computed(() => translationConfig.proxyMode === 'system' ? '使用系统代理' : translationConfig.proxyMode === 'direct' ? '直连' : `${translationConfig.proxyMode.toUpperCase()} · ${translationConfig.proxyHost}:${translationConfig.proxyPort}`)
 watch(() => translationConfig.provider, provider => {
   if (provider === 'llm') translationConfig.mode = 'api'
-  googleApiKey.value = ''; deeplApiKey.value = ''; llmApiKey.value = ''
-  clearGoogleApiKey.value = false; clearDeepLApiKey.value = false; clearLlmApiKey.value = false
 })
 const accountName = computed(() => props.editor.sessionInfo.user?.nickname || props.editor.sessionInfo.user?.username)
 const connectionStatus = computed(() => props.editor.initializing ? '正在恢复登录…' : props.editor.connected ? props.editor.sessionInfo.authenticated ? '已连接 ParaTranz' : '登录已过期' : '未连接')
@@ -66,6 +76,23 @@ function saveTermRecognitionSetting() {
   termRecognitionError.value = ''
   try { localStorage.setItem('sckit-term-recognition-enabled', termRecognitionEnabled.value ? '1' : '0') }
   catch { termRecognitionError.value = '设置已应用，但无法保存到本设备。' }
+}
+function saveTermExemptionRules() {
+  termExemptionError.value = ''
+  termExemptionNotice.value = ''
+  const rules = termExemptionDraft.value.split(/\r?\n/u).map(rule => rule.trim()).filter(Boolean)
+  const compiled = compileTermExemptionRules(rules)
+  if (compiled.error) { termExemptionError.value = compiled.error; return }
+  termExemptionRules.value = rules
+  termExemptionPatterns.value = compiled.patterns
+  try {
+    localStorage.setItem('sckit-term-exemption-rules', JSON.stringify(rules))
+    termExemptionNotice.value = `已应用 ${rules.length} 条豁免规则。`
+  } catch { termExemptionError.value = '规则已应用，但无法保存到本设备。' }
+}
+function resetTermExemptionRules() {
+  termExemptionDraft.value = defaultTermExemptionRules.join('\n')
+  saveTermExemptionRules()
 }
 function saveAppearance() {
   appearanceError.value = ''
@@ -189,11 +216,19 @@ function formatProxyTestResult(result: ProxyTestResult) {
 }
 async function loadTranslationSettings() {
   if (!window.scKit) return
+  if (translationBusy.value) return
+  if (hasUnsavedTranslationSettings.value) { translationNotice.value = '表单中有未保存修改，已保留输入。'; return }
+  const formBefore = JSON.stringify([translationConfig, googleApiKey.value, deeplApiKey.value, llmApiKey.value, clearGoogleApiKey.value, clearDeepLApiKey.value, clearLlmApiKey.value])
   translationBusy.value = true
   try {
     const result = await window.scKit.getTranslationSettings()
     if (!result.ok || !result.data) throw new Error(result.message || '无法读取翻译设置')
+    if (formBefore !== JSON.stringify([translationConfig, googleApiKey.value, deeplApiKey.value, llmApiKey.value, clearGoogleApiKey.value, clearDeepLApiKey.value, clearLlmApiKey.value])) {
+      translationNotice.value = '读取设置期间表单发生修改，已保留输入。'
+      return
+    }
     applyTranslationSettings(result.data)
+    loadedTranslationConfig.value = JSON.stringify(translationConfig)
   } catch (reason) { translationError.value = (reason as Error).message || '无法读取翻译设置' }
   finally { translationBusy.value = false }
 }
@@ -216,16 +251,22 @@ async function saveTranslationSettings() {
     ...(translationConfig.provider === 'llm' ? llmApiKey.value.trim() ? { llmApiKey: llmApiKey.value.trim() } : clearLlmApiKey.value ? { clearLlmApiKey: true } : {} : {}),
   }
   try {
+    await flushWorkspace()
+    await props.editor.waitForSubmissions()
     const result = await window.scKit.saveTranslationSettings(update)
     if (!result.ok || !result.data) throw new Error(result.message || '保存翻译设置失败')
     applyTranslationSettings(result.data)
+    if (translationConfig.provider === 'google') { googleApiKey.value = ''; clearGoogleApiKey.value = false }
+    if (translationConfig.provider === 'deepl') { deeplApiKey.value = ''; clearDeepLApiKey.value = false }
+    if (translationConfig.provider === 'llm') { llmApiKey.value = ''; clearLlmApiKey.value = false }
+    loadedTranslationConfig.value = JSON.stringify(translationConfig)
     window.dispatchEvent(new CustomEvent('sckit:translation-settings-updated', { detail: result.data }))
-    googleApiKey.value = ''; deeplApiKey.value = ''; llmApiKey.value = ''; clearGoogleApiKey.value = false; clearDeepLApiKey.value = false; clearLlmApiKey.value = false
     translationNotice.value = '翻译服务设置已保存。'
   } catch (reason) { translationError.value = (reason as Error).message || '保存翻译设置失败' }
   finally { translationBusy.value = false }
 }
 onMounted(() => {
+  void window.scKit?.getBuildInfo?.().then(info => { buildInfo.value = info })
   theme.value = localStorage.getItem('sckit-theme') || 'light'
   try {
     const savedLayout = localStorage.getItem('sckit-translation-layout')
@@ -233,6 +274,7 @@ onMounted(() => {
   } catch { /* Keep the default layout when storage is unavailable. */ }
   void loadTranslationSettings()
 })
+onActivated(() => { if (loadedTranslationConfig.value) void loadTranslationSettings() })
 </script>
 <template>
   <main class="settings-page" aria-label="应用设置">
@@ -251,8 +293,8 @@ onMounted(() => {
         <div class="appearance-typography-grid">
           <div v-for="region in typographyRegions" :key="region.key" class="appearance-typography-row">
             <strong>{{ region.title }}</strong>
-            <label><span>字体</span><input :value="fontFamilyInput(region.key)" :style="{ fontFamily: fontFamilyPreview(region.key) }" list="appearance-font-suggestions" :placeholder="region.key === 'ui' ? '系统默认字体' : '继承界面默认'" autocomplete="off" @input="setFontFamily(region.key, $event)" /></label>
-            <label><span>字号</span><input :value="appearance.typography[region.key].fontSize ?? ''" type="number" :min="region.key === 'ui' ? 10 : 8" :max="region.key === 'ui' ? 32 : 48" step="1" :placeholder="region.key === 'ui' ? '13' : '继承'" @change="setFontSize(region.key, $event)" /><small>px</small></label>
+            <label><span>字体</span><input :aria-label="`${region.title}字体`" :value="fontFamilyInput(region.key)" :style="{ fontFamily: fontFamilyPreview(region.key) }" list="appearance-font-suggestions" :placeholder="region.key === 'ui' ? '系统默认字体' : '继承界面默认'" autocomplete="off" @input="setFontFamily(region.key, $event)" /></label>
+            <label><span>字号</span><input :aria-label="`${region.title}字号`" :value="appearance.typography[region.key].fontSize ?? ''" type="number" :min="region.key === 'ui' ? 10 : 8" :max="region.key === 'ui' ? 32 : 48" step="1" :placeholder="region.key === 'ui' ? '13' : '继承'" @change="setFontSize(region.key, $event)" /><small>px</small></label>
           </div>
         </div>
         <p v-if="appearanceError" class="sidebar-message error" role="alert">{{ appearanceError }}</p>
@@ -260,6 +302,13 @@ onMounted(() => {
       <section class="settings-card" aria-labelledby="term-recognition-title">
         <div class="settings-card-heading"><Languages :size="20" /><h2 id="term-recognition-title">术语识别</h2></div>
         <div class="settings-row"><div><h3>自动识别与拆分术语</h3><p>在原文和译文中匹配项目术语，并将用“/”或“／”分隔的译名拆成独立候选。关闭后不再自动匹配、标记或拆分候选。</p></div><label class="term-recognition-toggle"><input v-model="termRecognitionEnabled" type="checkbox" @change="saveTermRecognitionSetting" /><span>启用</span></label></div>
+        <div class="term-exemption-rules">
+          <label for="term-exemption-rules"><strong>斜杠分割豁免规则</strong><small>每行一条 JavaScript 正则表达式，不含首尾斜杠。规则会检查术语原文、变体和译文：原文或变体命中时，关联译文整体作为一个候选；译文命中的片段内“/”和“／”不会用于拆分。规则忽略大小写。默认保护括号内的方向组合和单词/s。</small></label>
+          <textarea id="term-exemption-rules" v-model="termExemptionDraft" rows="4" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="每行一条正则表达式" />
+          <div class="term-exemption-actions"><button class="button" type="button" @click="resetTermExemptionRules">恢复默认</button><button class="button primary" type="button" @click="saveTermExemptionRules">应用规则</button></div>
+          <p v-if="termExemptionError" class="sidebar-message error" role="alert">{{ termExemptionError }}</p>
+          <p v-else-if="termExemptionNotice" class="sidebar-message" role="status">{{ termExemptionNotice }}</p>
+        </div>
         <p v-if="termRecognitionError" class="sidebar-message error" role="alert">{{ termRecognitionError }}</p>
       </section>
       <section class="settings-card" aria-labelledby="connection-settings-title">
@@ -375,6 +424,7 @@ onMounted(() => {
         <div class="settings-card-heading"><Settings :size="20" /><h2 id="about-title">关于</h2></div>
         <div class="settings-row"><div><h3>ScTranslateKit</h3></div><span class="settings-version">版本 {{ packageInfo.version }}</span></div>
         <div class="settings-row"><div><h3>运行方式</h3><p><Monitor :size="14" />{{ editor.desktop ? '桌面应用' : '浏览器预览' }}</p></div></div>
+        <div v-if="buildInfo" class="settings-row"><div><h3>运行中的构建</h3><p>提交 {{ buildInfo.commit.slice(0, 12) }} · 源码指纹 {{ buildInfo.sourceFingerprint.slice(0, 12) }}</p></div></div>
       </section>
     </div>
   </main>

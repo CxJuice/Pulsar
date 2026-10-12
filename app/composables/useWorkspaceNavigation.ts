@@ -3,7 +3,7 @@ import type { FileInfo, ProjectInfo, ProjectSummary } from '~/types/editor'
 import { sortFilesByCompletion } from '~/utils/fileSort'
 
 // Owned by app.vue: navigation never recreates the sidebar or its directory state.
-export function useWorkspaceNavigation(e: UnwrapNestedRefs<ReturnType<typeof useEditor>>) {
+export function useWorkspaceNavigation(e: UnwrapNestedRefs<ReturnType<typeof useEditor>>, flushSurfaces: () => Promise<void> = () => e.flushDraft(true)) {
   const projectChosen = ref(false), collapsed = ref(false)
   const projects = ref<ProjectSummary[]>([]), browse = ref<ProjectInfo>({ ...e.project }), files = ref<FileInfo[]>([])
   const catalogBusy = ref(false), busy = ref(false), saving = ref(false)
@@ -46,7 +46,7 @@ export function useWorkspaceNavigation(e: UnwrapNestedRefs<ReturnType<typeof use
   async function run(action: () => Promise<void>, label = '') {
     if (blocked.value) return
     busy.value = true; loadingLabel.value = label; error.value = ''
-    try { await e.flushDraft(true); await action() }
+    try { await flushSurfaces(); await action() }
     catch (reason) { error.value = (reason as Error).message }
     finally { busy.value = false; loadingLabel.value = '' }
   }

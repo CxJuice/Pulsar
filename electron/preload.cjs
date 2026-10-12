@@ -4,7 +4,8 @@ contextBridge.exposeInMainWorld('scKit', {
   presence: target => ipcRenderer.invoke('sc:presence', target),
   loginPresence: project => ipcRenderer.invoke('sc:presence-login', project),
   onPresence: callback => { const listener = (_event, state) => callback(state); ipcRenderer.on('sc:presence-state', listener); return () => ipcRenderer.removeListener('sc:presence-state', listener); },
-  request: (action, payload = {}) => ipcRenderer.invoke('sc:request', action, payload),
+  request: (action, payload = {}, requestId) => ipcRenderer.invoke('sc:request', action, payload, requestId),
+  cancelRequest: requestId => ipcRenderer.invoke('sc:request-cancel', requestId),
   connect: (token, remember, project) => ipcRenderer.invoke('sc:connect', token, remember, project),
   login: (project) => ipcRenderer.invoke('sc:login', project),
   disconnect: () => ipcRenderer.invoke('sc:disconnect'),
@@ -23,4 +24,8 @@ contextBridge.exposeInMainWorld('scKit', {
   openExternal: (url) => ipcRenderer.invoke('sc:external', url),
   exportData: (content, defaultName) => ipcRenderer.invoke('sc:export', content, defaultName),
   window: (action) => ipcRenderer.send('sc:window', action),
+  onBeforeClose: callback => { const listener = () => callback(); ipcRenderer.on('sc:prepare-close', listener); return () => ipcRenderer.removeListener('sc:prepare-close', listener); },
+  closeResponse: (ok, message = '') => ipcRenderer.send('sc:close-response', { ok, message }),
+  getBuildInfo: () => ipcRenderer.invoke('sc:build-info'),
+  onSessionRestored: callback => { const listener = (_event, result) => callback(result); ipcRenderer.on('sc:session-restored', listener); return () => ipcRenderer.removeListener('sc:session-restored', listener); },
 });

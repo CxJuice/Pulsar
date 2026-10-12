@@ -49,7 +49,7 @@ function harness(t, overrides = {}) {
       return requireFromMain(name);
     },
     process: { argv: [], env: overrides.env || {}, platform: 'win32' },
-    __dirname: path.dirname(mainPath), Buffer, URL, AbortSignal,
+    __dirname: path.dirname(mainPath), Buffer, URL, AbortSignal, AbortController,
     setTimeout, clearTimeout, fetch: overrides.fetch || fetch,
   });
   vm.runInContext(source, context, { filename: mainPath });
@@ -152,6 +152,19 @@ test('Token login submits the website form, follows redirects and connects using
   assert.equal(JSON.parse(fs.readFileSync(path.join(h.folder, 'connection.json'), 'utf8')).mode, 'token');
 });
 
+test('manual Token login waits for startup connection restoration before submitting', async t => {
+  const h = tokenLoginHarness(t);
+  h.run('connectionRestoration = new Promise(resolve => { globalThis.finishRestoration = resolve; })');
+  const pending = h.ipcHandlers.get('sc:connect')({}, '0'.repeat(32), false, 0);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.submissions.length, 0);
+  assert.equal(h.credentialCalls.length, 0);
+  h.run('finishRestoration()');
+  assert.equal((await pending).ok, true);
+  assert.equal(h.submissions.length, 1);
+  assert.equal(h.credentialCalls[0].body.cookie, 'sid=new-session');
+});
+
 test('a rejected Token cannot reuse or overwrite an existing login or saved Token', async t => {
   const h = tokenLoginHarness(t, { redirect: '/login?fail=1&message=Token%20error', cookies: false });
   fs.writeFileSync(path.join(h.folder, 'credentials.bin'), 'previous archive');
@@ -237,6 +250,22 @@ test('global proxy settings cover all desktop sessions and encode IPv6 correctly
   assert.equal(h.run(`serviceProxyUrl({ proxy: { mode: 'socks5', host: '[::1]', port: 1080 } })`), 'socks5h://[::1]:1080');
   assert.throws(() => h.run(`proxyForTest({ mode: 'http', host: 'http://127.0.0.1', port: 7890 })`));
   assert.throws(() => h.run(`proxyForTest({ mode: 'socks5', host: '127.0.0.1', port: 65536 })`));
+});
+
+test('proxy change rolls settings back when service restoration fails', async t => {
+  const h = harness(t);
+  h.run(`validateSender = () => {}; globalThis.restartCount = 0;
+    configureGlobalProxy = async settings => { globalThis.lastProxy = settings.proxy.mode; };
+    restartService = async () => { if (++restartCount === 1) throw new Error('simulated restart failure'); };
+    registerIpc()`);
+  const result = await h.ipcHandlers.get('sc:translation-settings:save')({}, {
+    ...h.run('defaultTranslationSettings()'), proxy: { mode: 'direct' },
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.message, /已恢复原设置/);
+  assert.equal(h.run('readTranslationSettings().proxy.mode'), 'system');
+  assert.equal(h.run('lastProxy'), 'system');
+  assert.equal(h.run('restartCount'), 2);
 });
 
 test('connectivity probes finish at response headers and enforce an overall deadline', async t => {
@@ -348,4 +377,46 @@ test('direct mode removes inherited proxy environment when restarting the servic
   assert.equal(h.run('activeServiceCredentials'), null);
   h.run('closing = true');
   await h.run('stopService()');
+});
+
+test('translation request rejects when a response disconnects before its body completes', async t => {
+  const h = harness(t);
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': '1000' });
+    response.write('{"partial":');
+    setTimeout(() => response.destroy(), 10);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const target = new URL(`http://127.0.0.1:${server.address().port}/`);
+  await assert.rejects(
+    Promise.race([
+      h.context.postTranslationJson(target, {}, {}),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('request remained pending')), 1000)),
+    ]),
+    /翻译服务响应中途断开/,
+  );
+});
+
+test('canceling one list request aborts it without affecting another sender', async t => {
+  const signals = [];
+  const h = harness(t, {
+    fetch: (_url, options) => new Promise(resolve => {
+      signals.push(options.signal);
+      options.signal.addEventListener('abort', () => resolve({ ok: false, status: 499, json: async () => ({ message: 'canceled' }) }), { once: true });
+    }),
+  });
+  h.run('validateSender = () => {}; serviceUrl = "http://127.0.0.1:12345"; registerIpc()');
+  const request = h.ipcHandlers.get('sc:request');
+  const cancel = h.ipcHandlers.get('sc:request-cancel');
+  const first = request({ sender: { id: 1 } }, 'strings', { page: 1 }, 'list-1');
+  const second = request({ sender: { id: 2 } }, 'strings', { page: 1 }, 'list-1');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(signals.length, 2);
+  assert.equal(cancel({ sender: { id: 1 } }, 'list-1').ok, true);
+  assert.equal(signals[0].aborted, true);
+  assert.equal(signals[1].aborted, false);
+  assert.equal((await first).status, 499);
+  cancel({ sender: { id: 2 } }, 'list-1');
+  assert.equal((await second).status, 499);
 });

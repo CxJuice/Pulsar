@@ -3,6 +3,7 @@ from pathlib import Path
 import hashlib
 import json
 import os
+import re
 import subprocess
 from urllib.parse import quote
 
@@ -87,8 +88,13 @@ def main() -> None:
     title = f'ScTranslateKit {tag.removeprefix("v")}'
     notes = ROOT / 'release-notes.md'
     run_url = f'https://github.com/{repository}/actions/runs/{os.environ["GITHUB_RUN_ID"]}'
+    changelog = (ROOT / 'CHANGELOG.md').read_text(encoding='utf-8')
+    section = re.search(rf'(?ms)^## {re.escape(version)}\s*\n(.*?)(?=^## |\Z)', changelog)
+    if not section:
+        raise RuntimeError(f'CHANGELOG.md has no entry for {version}')
     notes.write_text(
         f'自动构建发布，源码提交：`{commit}`。\n\n'
+        f'{section.group(1).strip()}\n\n'
         f'[构建记录]({run_url})\n\n'
         '- Windows：x64、ARM64（安装 EXE、便携 EXE、ZIP）\n'
         '- macOS：x64、ARM64、Universal（DMG、ZIP）\n'
