@@ -71,21 +71,34 @@ export function highlightTerms(text: string, terms: Term[], side: 'source' | 'tr
     }
   }
   if (!variants.size || !text) return [{ text }]
-  const choices = [...variants.keys()].sort((a, b) => b.length - a.length)
-  const pattern = new RegExp(choices.map(escapePattern).join('|'), 'giu')
+  const occurrences: Array<{ start: number; end: number; text: string; terms: Term[] }> = []
+  for (const spelling of variants.keys()) {
+    const pattern = new RegExp(escapePattern(spelling), 'giu')
+    for (const match of text.matchAll(pattern)) {
+      const start = match.index!, value = match[0], end = start + value.length
+      const before = Array.from(text.slice(Math.max(0, start - 2), start)).at(-1) || ''
+      const after = Array.from(text.slice(end, end + 2))[0] || ''
+      const first = Array.from(value)[0]!, last = Array.from(value).at(-1)!
+      if ((wordCharacter.test(first) && wordCharacter.test(before)) || (wordCharacter.test(last) && wordCharacter.test(after))) continue
+      const matched = variants.get(value.toLocaleLowerCase())?.filter(term => !term.caseSensitive || spellings(term).includes(value)) || []
+      if (matched.length) occurrences.push({ start, end, text: value, terms: matched })
+    }
+  }
+  // Resolve overlaps longest-first so a phrase such as "Silver Strike" wins
+  // over shorter glossary entries for "Silver" and "Strike".
+  occurrences.sort((left, right) => (right.end - right.start) - (left.end - left.start) || left.start - right.start)
+  const selected: typeof occurrences = []
+  for (const occurrence of occurrences) {
+    if (selected.some(existing => occurrence.start < existing.end && occurrence.end > existing.start)) continue
+    selected.push(occurrence)
+  }
+  selected.sort((left, right) => left.start - right.start || right.end - left.end)
   const result: TermTextPart[] = []
   let start = 0
-  for (const match of text.matchAll(pattern)) {
-    const index = match.index!, value = match[0], end = index + value.length
-    const before = Array.from(text.slice(Math.max(0, index - 2), index)).at(-1) || ''
-    const after = Array.from(text.slice(end, end + 2))[0] || ''
-    const first = Array.from(value)[0]!, last = Array.from(value).at(-1)!
-    if ((wordCharacter.test(first) && wordCharacter.test(before)) || (wordCharacter.test(last) && wordCharacter.test(after))) continue
-    const matched = variants.get(value.toLocaleLowerCase())?.filter(term => !term.caseSensitive || spellings(term).includes(value)) || []
-    if (!matched.length) continue
-    if (index > start) result.push({ text: text.slice(start, index) })
-    result.push({ text: value, terms: matched })
-    start = end
+  for (const occurrence of selected) {
+    if (occurrence.start > start) result.push({ text: text.slice(start, occurrence.start) })
+    result.push({ text: occurrence.text, terms: occurrence.terms })
+    start = occurrence.end
   }
   if (start < text.length) result.push({ text: text.slice(start) })
   return result.length ? result : [{ text }]

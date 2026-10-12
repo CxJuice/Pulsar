@@ -21,7 +21,7 @@ const dictionaryTerm = ref(dictionarySelection.value), dictionaryError = ref('')
 const dictionaryQueried = ref(false), dictionaryBusy = ref(false)
 const dictionaryData = ref<CambridgeDictionaryData | null>(null)
 const translationMode = ref<'translate' | 'dictionary'>('translate')
-const translationSource = ref(''), translationResult = ref(''), translationError = ref('')
+const translationSource = ref(''), translationResult = ref(''), translationError = ref(''), translationResultNotice = ref('')
 const translationBusy = ref(false)
 const translationProvider = ref<TranslationProvider>('google'), translationAccessMode = ref<TranslationMode>('web')
 const useTermTranslations = ref(true)
@@ -207,6 +207,7 @@ function applyTranslationSettings(settings: TranslationSettings) {
     prefillFollowsSelection = false
     translationBusy.value = false
     translationResult.value = ''
+    translationResultNotice.value = ''
     translationApiProvider.value = null
   }
   nextTick(scheduleDictionaryBounds)
@@ -333,7 +334,7 @@ async function requestConfiguredTranslation(source: string, translationEntry: St
   if (!result?.ok || !result.data?.text) throw new Error(result?.message || '翻译服务不可用')
   return result.data
 }
-async function translateSelectedText(value = translationSource.value) {
+async function translateSelectedText(value = translationSource.value, autoFill = false) {
   if (translationBusy.value || translationStarting) return
   if (!value.trim()) { translationError.value = '请输入要翻译的文本'; return }
   translationStarting = true
@@ -341,9 +342,12 @@ async function translateSelectedText(value = translationSource.value) {
   translationMode.value = 'translate'
   translationResult.value = ''
   translationError.value = ''
+  translationResultNotice.value = ''
   translationApiProvider.value = null
   const entryVersion = translationEntryVersion
   const translationEntry = props.editor.selected
+  const translationProjectId = props.editor.project.id
+  const translationTextBeforeRequest = props.editor.text
   let request = 0, requestId: string | null = null
   try {
     if (!translationSettingsReady.value) await loadTranslationSelection()
@@ -372,6 +376,13 @@ async function translateSelectedText(value = translationSource.value) {
     if (result) {
       translationResult.value = result.text
       translationApiProvider.value = result.provider
+      if (autoFill) {
+        if (!translationEntry) translationResultNotice.value = '译文已生成；当前没有选中的词条，无法自动填入。'
+        else if (props.editor.project.id !== translationProjectId || props.editor.selected?.id !== translationEntry.id) translationResultNotice.value = '译文已生成；当前词条已切换，未自动填入以避免写错词条。'
+        else if (props.editor.text !== translationTextBeforeRequest) translationResultNotice.value = '译文已生成；翻译期间编辑区已有修改，未自动覆盖。'
+        else if (props.editor.locked || props.editor.listBusy || props.editor.initializing || props.editor.reloadBusy) translationResultNotice.value = '译文已生成；当前词条不可编辑，译文保留在翻译栏。'
+        else emit('replace', result.text)
+      }
     }
   } catch (reason) {
     if (entryVersion === translationEntryVersion && (!request || request === translationRequest)) translationError.value = (reason as Error).message || '翻译失败'
@@ -411,6 +422,7 @@ async function translatePrefillEntry(value: string, translationEntry: StringItem
     translationSource.value = source
     translationResult.value = ''
     translationError.value = ''
+    translationResultNotice.value = ''
     translationApiProvider.value = null
   }
   const request = ++prefillRequest
@@ -950,17 +962,18 @@ function handleAuxCustomizationAction(action: AuxCustomizationAction) {
         </template>
         <template v-else>
           <div v-if="translationAccessMode === 'web'" class="translation-web-content">
-            <p class="translation-web-note">在编辑区选中文本后右键选择“翻译”，文本会自动发送到 {{ translationProvider === 'google' ? 'Google' : 'DeepL' }} 网页。</p>
+            <p class="translation-web-note">文本会发送到 {{ translationProvider === 'google' ? 'Google' : 'DeepL' }} 网页；网页模式无法读取返回译文。如需自动填入编辑区，请在设置中切换到 API 模式。</p>
             <div ref="translatorHost" class="cambridge-view-host translation-web-host" :aria-label="translationProvider === 'google' ? 'Google 翻译网页' : 'DeepL 网页翻译'"><p v-if="!editor.desktop" class="cambridge-preview-note">内嵌翻译网页仅在桌面应用中显示。</p></div>
           </div>
           <template v-else>
-            <form class="translation-form" @submit.prevent="translateSelectedText(translationSource)" @keydown.ctrl.enter.stop.prevent="translateSelectedText(translationSource)">
+            <form class="translation-form" @submit.prevent="translateSelectedText(translationSource, true)" @keydown.ctrl.enter.stop.prevent="translateSelectedText(translationSource, true)">
               <label for="translation-source">当前句子或选中的文本</label>
               <textarea id="translation-source" v-model="translationSource" rows="5" placeholder="输入或从编辑区右键选择文本" />
-              <div class="translation-form-actions"><button v-if="translationResult" class="button compact translation-prefill-button" type="button" aria-label="一键将译文预填充到编辑区译文框" title="一键将译文预填充到编辑区译文框" :disabled="editor.locked || editor.listBusy || editor.initializing || editor.reloadBusy" @click="emit('replace', translationResult)"><ArrowDownToLine :size="16" /></button><button class="button compact primary" :disabled="translationBusy || !translationSource.trim()" type="submit"><LoadingIndicator v-if="translationBusy" :size="13" label="正在翻译" /><Languages v-else :size="14" />{{ translationBusy ? '翻译中…' : translationProvider === 'llm' ? '通过 LLM 翻译' : '通过 API 翻译' }}</button><button v-if="translationBusy" class="button compact" type="button" @click="cancelSelectedTranslation"><X :size="14" />停止翻译</button></div>
+              <div class="translation-form-actions"><button v-if="translationResult" class="button compact translation-prefill-button" type="button" aria-label="再次将译文填入编辑区译文框" title="再次将译文填入编辑区译文框" :disabled="editor.locked || editor.listBusy || editor.initializing || editor.reloadBusy" @click="emit('replace', translationResult)"><ArrowDownToLine :size="16" /></button><button class="button compact primary" :disabled="translationBusy || !translationSource.trim()" type="submit"><LoadingIndicator v-if="translationBusy" :size="13" label="正在翻译" /><Languages v-else :size="14" />{{ translationBusy ? '翻译中…' : translationProvider === 'llm' ? 'LLM 翻译并填入' : 'API 翻译并填入' }}</button><button v-if="translationBusy" class="button compact" type="button" @click="cancelSelectedTranslation"><X :size="14" />停止翻译</button></div>
             </form>
           <section class="translation-result" aria-live="polite">
             <div class="translation-result-heading"><strong>中文译文</strong><span v-if="translationApiProvider" class="subtle">{{ translationApiProvider === 'google' ? 'Google API' : translationApiProvider === 'deepl' ? 'DeepL API' : `LLM · ${translationLlmModel}` }}</span></div>
+            <p v-if="translationResultNotice" class="sidebar-message" role="status">{{ translationResultNotice }}</p>
             <div v-if="translationBusy" class="panel-loading"><LoadingIndicator :size="20" label="正在翻译文本" /><span>正在翻译…</span></div>
             <p v-else-if="translationError" class="sidebar-message error" role="alert">{{ translationError }}</p>
             <p v-else-if="translationResult" class="translation-result-text">{{ translationResult }}</p>
