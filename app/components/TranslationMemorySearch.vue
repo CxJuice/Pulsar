@@ -5,6 +5,7 @@ import type { useEditor } from '~/composables/useEditor'
 import type { MemoryEntry, MemoryPage } from '~/types/editor'
 import { displayDate, stageLabels } from '~/utils/text'
 const props = defineProps<{ editor: UnwrapNestedRefs<ReturnType<typeof useEditor>> }>()
+const navigation = inject<import('~/composables/useWorkspaceNavigation').WorkspaceNavigation>('workspace-navigation')!
 const emit = defineEmits<{ replace: [text: string] }>()
 const query = ref(''), field = ref('')
 const fieldOptions = [{ value: '', label: '文本或键值' }, { value: 'original', label: '原文' }, { value: 'translation', label: '译文' }, { value: 'key', label: '键值' }]
@@ -31,7 +32,7 @@ async function search() {
 }
 function clear() { ++sequence; query.value = ''; activeQuery.value = ''; busy.value = false; error.value = ''; searched.value = false; result.value = null; searchInput.value?.focus() }
 watch(query, value => { if (!value) clear() })
-function openEntry(entry: MemoryEntry) { window.scKit?.openExternal(`https://paratranz.cn/projects/${entry.project.id}/strings?id=${entry.id}`) }
+function openEntry(entry: MemoryEntry) { return navigation.openString(entry.project.id, entry.id) }
 watch(() => props.editor.project.id, clear)
 watch(() => props.editor.connected, clear)
 onMounted(() => searchInput.value?.focus())
@@ -55,7 +56,7 @@ defineExpose({ focus: () => searchInput.value?.focus() })
         <div class="memory-result-original"><SearchHighlightedText :text="entry.original" :query="activeQuery" /></div>
         <div class="suggestion-translation"><SearchHighlightedText :text="entry.translation" :query="activeQuery" /></div>
         <div class="memory-result-meta"><span>{{ stageLabels[entry.stage] || '历史翻译' }}</span><span v-if="entry.user">{{ entry.user.nickname || entry.user.username }}</span><time>{{ displayDate(entry.updatedAt || entry.createdAt) }}</time></div>
-        <div class="memory-result-footer"><button class="suggestion-origin" :disabled="!editor.desktop" @click="openEntry(entry)">{{ entry.project.name }}</button><button class="button compact" :disabled="!entry.translation || editor.locked" @click="emit('replace', entry.translation)"><ArrowDownToLine :size="14" />使用译文</button></div>
+        <div class="memory-result-footer"><button class="suggestion-origin" :disabled="!editor.connected || navigation.blocked" :title="`在本地编辑器中定位 ${entry.key}`" @click="openEntry(entry)">{{ entry.project.name }}</button><button class="button compact" :disabled="!entry.translation || editor.locked" @click="emit('replace', entry.translation)"><ArrowDownToLine :size="14" />使用译文</button></div>
       </article>
       
     </template>

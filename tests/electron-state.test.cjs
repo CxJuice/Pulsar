@@ -481,10 +481,54 @@ test('LLM translation retries HTTP 504 with the same source and reference contex
   assert.equal(bodies.length, 3);
   assert.deepEqual(bodies[1], bodies[0]);
   assert.deepEqual(bodies[2], bodies[0]);
-  const reference = JSON.parse(bodies[0].messages[1].content).reference;
-  assert.equal(reference.key, context.key);
-  assert.equal(reference.recommendations[0].translation, '参考译文');
-  assert.equal(reference.terms[0].translation, '测试');
+  const input = JSON.parse(bodies[0].messages[1].content);
+  assert.equal(input.entry.key, context.key);
+  assert.equal(input.reference.recommendations[0].translation, '参考译文');
+  assert.equal(input.reference.terms[0].translation, '测试');
+});
+
+test('Chat Completions and Responses preserve the same shared prefix with independent variant details', async t => {
+  const h = harness(t), bodies = [];
+  const server = http.createServer((request, response) => {
+    let body = '';
+    request.setEncoding('utf8');
+    request.on('data', part => { body += part; });
+    request.on('end', () => {
+      bodies.push(JSON.parse(body));
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify(request.url.endsWith('/responses') ? { output_text: '合成测试译文' } : { choices: [{ message: { content: '合成测试译文' } }] }));
+    });
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const shared = { exemplar: 'Avenger Combat Helmet Red', variantTemplate: 'avenger combat helmet [variant]',
+    recommendations: [{ original: 'Avenger Combat Helmet Red', translation: '复仇者战斗头盔 红色', similarity: 1 }],
+    terms: [{ term: 'Avenger', translation: '复仇者' }] };
+  for (const protocol of ['chat/completions', 'responses']) {
+    h.run(`saveTranslationSettings({ ...defaultTranslationSettings(), provider: 'llm', mode: 'api', llmRequestUrl: 'http://127.0.0.1:${server.address().port}/v1/${protocol}', llmModel: 'synthetic-model' })`);
+    for (const variant of ['Red', 'Blue']) {
+      h.context.variantSource = `Avenger Combat Helmet ${variant}`;
+      h.context.variantContext = { shared, key: `HELMET_${variant}`, terms: [{ term: variant, translation: variant === 'Red' ? '红色' : '蓝色' }], notes: { entryContext: `Only ${variant}` } };
+      await h.run('translateToChinese(variantSource, variantContext)');
+    }
+    const [a, b] = bodies.slice(-2);
+    const inputA = protocol === 'responses' ? a.input : a.messages[1].content;
+    const inputB = protocol === 'responses' ? b.input : b.messages[1].content;
+    assert.equal(inputA.slice(0, inputA.indexOf(',"source":')), inputB.slice(0, inputB.indexOf(',"source":')));
+    assert.equal(JSON.parse(inputB).source, 'Avenger Combat Helmet Blue');
+    assert.equal(JSON.parse(inputB).entry.terms[0].translation, '蓝色');
+    assert.equal(JSON.parse(inputB).entry.notes.entryContext, 'Only Blue');
+    assert.equal(JSON.parse(inputB).reference.recommendations[0].translation, shared.recommendations[0].translation);
+    assert.match(protocol === 'responses' ? b.instructions : b.messages[0].content, /preserve all differences/);
+    assert.deepEqual(Object.keys(a).sort(), (protocol === 'responses' ? ['input', 'instructions', 'model'] : ['messages', 'model']).sort());
+  }
+  h.context.variantContext = { shared, key: 'HIDDEN', terms: [{ term: 'Blue', translation: '蓝色' }], notes: { entryContext: 'HIDDEN' } };
+  h.run('saveTranslationSettings({ ...readTranslationSettings(), llmContext: { key: false, terms: false, recommendations: false, recommendationCount: 1, notes: false } })');
+  const disabled = JSON.parse(h.run("llmTranslationInput('Avenger Combat Helmet Blue', variantContext, readTranslationSettings())"));
+  assert.equal(disabled.reference.terms, undefined);
+  assert.equal(disabled.reference.recommendations, undefined);
+  assert.deepEqual(Object.keys(disabled.reference), []);
+  assert.deepEqual(Object.keys(disabled.entry), []);
 });
 
 test('canceling one list request aborts it without affecting another sender', async t => {
@@ -508,4 +552,70 @@ test('canceling one list request aborts it without affecting another sender', as
   assert.equal((await first).status, 499);
   cancel({ sender: { id: 2 } }, 'list-1');
   assert.equal((await second).status, 499);
+});
+
+test('exact translation results reuse a real HTTP reply, isolate scope/context/settings, and support forced requests', async t => {
+  const h = harness(t), bodies = [];
+  const server = http.createServer((request, response) => {
+    let body = '';
+    request.setEncoding('utf8'); request.on('data', part => { body += part; });
+    request.on('end', () => {
+      bodies.push(JSON.parse(body));
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ choices: [{ message: { content: `Reply ${bodies.length}` } }], usage: { prompt_cache_hit_tokens: 32 } }));
+    });
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  h.run(`saveTranslationSettings({ ...defaultTranslationSettings(), provider: 'llm', mode: 'api', llmRequestUrl: 'http://127.0.0.1:${server.address().port}/v1/chat/completions', llmModel: 'synthetic-model' })`);
+  h.context.cacheTestContext = { cacheScope: 'account-one:file-one', key: 'HELMET', terms: [{ term: 'Blue', translation: '蓝色' }] };
+  const translate = () => h.run("translateToChinese('Avenger Combat Helmet Blue', cacheTestContext)");
+  const first = await translate();
+  assert.equal(first.localCacheHit, false); assert.equal(first.providerCachedInputTokens, 32);
+  const cached = await translate();
+  assert.equal(cached.text, 'Reply 1'); assert.equal(cached.localCacheHit, true); assert.equal(bodies.length, 1);
+  assert.equal(cached.providerCachedInputTokens, undefined);
+  h.context.cacheTestContext.bypassCache = true;
+  assert.equal((await translate()).text, 'Reply 2');
+  delete h.context.cacheTestContext.bypassCache;
+  assert.equal((await translate()).text, 'Reply 2'); assert.equal(bodies.length, 2);
+  h.context.cacheTestContext.cacheScope = 'account-two:file-one';
+  assert.equal((await translate()).localCacheHit, false); assert.equal(bodies.length, 3);
+  h.context.cacheTestContext.terms[0].translation = '新蓝色译名';
+  await translate(); assert.equal(bodies.length, 4);
+  h.context.cacheTestContext.notes = { entryContext: 'Updated source context' };
+  await translate(); assert.equal(bodies.length, 5);
+  h.run("saveTranslationSettings({ ...readTranslationSettings(), llmPrefixPrompt: 'New style' })");
+  await translate(); assert.equal(bodies.length, 6);
+  h.run("saveTranslationSettings({ ...readTranslationSettings(), llmApiKey: 'replacement-test-key' })");
+  await translate(); assert.equal(bodies.length, 7);
+  h.run("saveTranslationSettings({ ...readTranslationSettings(), llmModel: 'different-model' })");
+  await translate(); assert.equal(bodies.length, 8);
+  for (const body of bodies) {
+    assert.equal(JSON.stringify(body).includes('cacheScope'), false);
+    assert.equal(JSON.stringify(body).includes('bypassCache'), false);
+  }
+  assert.ok([...h.run('translationResultCache.entries.keys()')].every(key => /^[a-f\d]{64}$/.test(key)));
+});
+
+test('canceled, failed and invalidated pending translations cannot populate the result cache', async t => {
+  const h = harness(t);
+  h.run("saveTranslationSettings({ ...defaultTranslationSettings(), provider: 'llm', mode: 'api', llmRequestUrl: 'http://127.0.0.1:12345/v1/chat/completions', llmModel: 'synthetic-model' })");
+  let resolve, sends = 0;
+  h.context.fakeSend = async () => { sends++; await new Promise(done => { resolve = done; }); return { choices: [{ message: { content: 'Late reply' } }] }; };
+  h.run('postTranslationJson = fakeSend');
+  const controller = new AbortController(); h.context.cacheTestSignal = controller.signal;
+  const canceled = h.run("translateToChinese('Original', {}, cacheTestSignal)");
+  const rejected = assert.rejects(canceled, /翻译已取消/);
+  await new Promise(done => setImmediate(done)); controller.abort(); resolve(); await rejected;
+  assert.equal(h.run('translationResultCache.entries.size'), 0);
+  const pending = h.run("translateToChinese('Original')");
+  await new Promise(done => setImmediate(done));
+  h.run('persistTranslationSettings(readTranslationSettings())');
+  resolve(); await pending;
+  assert.equal(h.run('translationResultCache.entries.size'), 0);
+  h.context.fakeSend = async () => { sends++; throw Object.assign(new Error('Synthetic unauthorized'), { status: 401 }); };
+  h.run('postTranslationJson = fakeSend');
+  for (let index = 0; index < 2; index++) await assert.rejects(h.run("translateToChinese('Original')"), /Synthetic unauthorized/);
+  assert.equal(h.run('translationResultCache.entries.size'), 0); assert.equal(sends, 4);
 });

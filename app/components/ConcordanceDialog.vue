@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { Search, X, ExternalLink, ChevronLeft, ChevronRight } from 'lucide-vue-next'
+import { Search, X, ArrowRight, ChevronLeft, ChevronRight } from 'lucide-vue-next'
 import type { UnwrapNestedRefs } from 'vue'
 import type { useEditor } from '~/composables/useEditor'
 import type { StringItem, StringPage } from '~/types/editor'
 import { stageLabels } from '~/utils/text'
 const props = defineProps<{ editor: UnwrapNestedRefs<ReturnType<typeof useEditor>>; original: string; projectId: number; projectName: string }>()
+const navigation = inject<import('~/composables/useWorkspaceNavigation').WorkspaceNavigation>('workspace-navigation')!
 const emit = defineEmits<{ close: []; use: [text: string] }>()
 const query = ref(props.original), results = ref<StringItem[]>([]), busy = ref(false), error = ref('')
 const page = ref(1), pageCount = ref(1), rowCount = ref(0), searched = ref('')
@@ -25,7 +26,10 @@ async function search(newPage = 1) {
   } catch (reason) { if (request === sequence) error.value = (reason as Error).message }
   finally { if (request === sequence) busy.value = false }
 }
-function open(item: StringItem) { window.scKit?.openExternal(`https://paratranz.cn/projects/${item.project}/strings?id=${item.id}`) }
+async function open(item: StringItem) {
+  if (await navigation.openString(item.project, item.id)) emit('close')
+  else if (navigation.error) error.value = navigation.error
+}
 function escape(event: KeyboardEvent) { if (event.key === 'Escape') { event.stopPropagation(); emit('close') } }
 function trapFocus(event: KeyboardEvent) {
   if (event.key !== 'Tab') return
@@ -44,7 +48,7 @@ onBeforeUnmount(() => { sequence++; document.removeEventListener('keydown', esca
     <form class="concordance-search" @submit.prevent="search()"><Search :size="16" /><input ref="input" v-model="query" aria-label="查询原文" placeholder="输入原文或片段" /><button class="button" :disabled="busy">查询</button></form>
     <p v-if="searched" class="concordance-summary">{{ rowCount }} 条结果</p>
     <LoadingRegion :busy="busy" :initial="!searched" label="正在查询…"><div v-if="error" class="panel-error" role="alert">{{ error }}</div>
-    <div v-else class="concordance-results"><p v-if="!results.length" class="empty-state">没有匹配的词条</p><article v-for="item in results" :key="item.id" class="concordance-row"><div class="concordance-pair"><div><ProtectedText :text="item.original" /></div><div>{{ item.translation || '尚无译文' }}</div></div><div class="concordance-meta"><span>{{ item.file?.name || `词条 ${item.id}` }} · {{ stageLabels[item.stage] }}</span><button class="text-button" :disabled="!editor.desktop" @click="open(item)">查看词条 <ExternalLink :size="12" /></button><button class="text-button" :disabled="!item.translation || editor.locked" @click="emit('use', item.translation); emit('close')">使用译文</button></div></article></div></LoadingRegion>
+    <div v-else class="concordance-results"><p v-if="!results.length" class="empty-state">没有匹配的词条</p><article v-for="item in results" :key="item.id" class="concordance-row"><div class="concordance-pair"><div><ProtectedText :text="item.original" /></div><div>{{ item.translation || '尚无译文' }}</div></div><div class="concordance-meta"><span>{{ item.file?.name || `词条 ${item.id}` }} · {{ stageLabels[item.stage] }}</span><button class="text-button" :disabled="!editor.connected || navigation.blocked" title="在本地编辑器中定位此词条" @click="open(item)">查看词条 <ArrowRight :size="12" /></button><button class="text-button" :disabled="!item.translation || editor.locked" @click="emit('use', item.translation); emit('close')">使用译文</button></div></article></div></LoadingRegion>
     <footer><span>{{ page }} / {{ pageCount }} 页</span><button class="icon-button" aria-label="上一页查询结果" :disabled="busy || page <= 1 || query.trim() !== searched" @click="search(page - 1)"><ChevronLeft :size="18" /></button><button class="icon-button" aria-label="下一页查询结果" :disabled="busy || page >= pageCount || query.trim() !== searched" @click="search(page + 1)"><ChevronRight :size="18" /></button></footer>
   </section></div>
 </template>

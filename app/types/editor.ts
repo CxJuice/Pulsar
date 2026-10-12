@@ -35,10 +35,10 @@ export interface Term { id: number; term: string; translation: string; note?: st
 export interface TermPage { results: Term[]; page: number; pageSize: number; rowCount: number; pageCount: number }
 export interface CommunityTranslationCandidate {
   id: number; source: string; category: string; candidates: string[]
-  topicTitle: string; topicUrl: string; sourceType: '征集' | '投票'
+  topicTitle: string; topicUrl: string; sourceType: '征集' | '投票' | '归档'; updatedAt?: string
 }
 export interface LocalUnresolvedTerm extends CommunityTranslationCandidate { syncedAt: string }
-export interface CommunityTranslationFeed { entries: CommunityTranslationCandidate[]; warnings: string[]; fetchedAt: string }
+export interface CommunityTranslationFeed { entries: CommunityTranslationCandidate[]; warnings: string[]; fetchedAt: string; latestModifiedAt?: string; changed?: boolean }
 export interface MemoryEntry {
   id: number; key: string; original: string; translation: string; stage: number
   project: { id: number; name: string }; user?: TinyUser; createdAt: string; updatedAt: string | null
@@ -76,11 +76,19 @@ export interface ProxyTestResult {
   results: Array<{ target: string; ok: boolean; status?: number; elapsedMs: number; message?: string }>
 }
 export interface TranslationSelectionUpdate { provider?: TranslationProvider; mode?: TranslationMode }
-export interface TranslationPromptContext {
-  key?: string
+export interface TranslationSharedReference {
   recommendations?: Array<{ original: string; translation: string; similarity?: number }>
   terms?: Array<{ term: string; translation: string; note?: string }>
+  exemplar?: string
+  variantTemplate?: string
+}
+export interface TranslationPromptContext extends TranslationSharedReference {
+  key?: string
+  shared?: TranslationSharedReference
   notes?: { entryContext?: string; comments?: string[] }
+  // Local cache controls, never included in the provider prompt.
+  cacheScope?: string
+  bypassCache?: boolean
 }
 export interface AuxCustomizationOverlayItem { id: string; label: string; checked: boolean; disabled: boolean; first: boolean; last: boolean }
 export interface AuxCustomizationOverlayState {
@@ -125,13 +133,14 @@ export interface DesktopBridge {
   lookupCambridge(query: string): Promise<ServiceResult<CambridgeDictionaryData>>
   openCambridgeOriginal(query: string): Promise<void>
   fetchCommunityTranslationCandidates(): Promise<ServiceResult<CommunityTranslationFeed>>
+  fetchArchivedTranslationCandidates(): Promise<ServiceResult<CommunityTranslationFeed>>
   auxCustomizationOverlay(state: AuxCustomizationOverlayState): void
   onAuxCustomizationAction(callback: (action: AuxCustomizationAction) => void): () => void
   getTranslationSettings(): Promise<ServiceResult<TranslationSettings>>
   testProxy(proxy: TranslationSettingsUpdate['proxy']): Promise<ServiceResult<ProxyTestResult>>
   saveTranslationSettings(settings: TranslationSettingsUpdate): Promise<ServiceResult<TranslationSettings>>
   saveTranslationSelection(selection: TranslationSelectionUpdate): Promise<ServiceResult<TranslationSettings>>
-  translateToChinese(text: string, context: TranslationPromptContext | undefined, requestId: string): Promise<ServiceResult<{ text: string; provider: TranslationProvider }>>
+  translateToChinese(text: string, context: TranslationPromptContext | undefined, requestId: string): Promise<ServiceResult<{ text: string; provider: TranslationProvider; localCacheHit?: boolean; elapsedMs?: number; providerCachedInputTokens?: number }>>
   cancelTranslation(requestId: string): Promise<ServiceResult>
   openExternal(url: string): Promise<void>
   translatorView(state: { visible: boolean; bounds: { x: number; y: number; width: number; height: number } | null; provider?: TranslationProvider; text?: string; forceText?: boolean }): void

@@ -12,6 +12,13 @@ interface Submission {
   id: number; item: StringItem; fileId: number; accountId: number; translation: string; stage: number
 }
 interface SubmissionFailure extends Submission { message: string }
+interface WorkspaceLocation {
+  projectId: number
+  fileId: number
+  stringId?: number
+  key?: string
+  fileName?: string
+}
 
 export function useEditor() {
   const desktop = ref(false), connected = ref(false), initializing = ref(true)
@@ -20,8 +27,52 @@ export function useEditor() {
   const files = ref<FileInfo[]>([]), items = ref<StringItem[]>([])
   const sortedFiles = computed(() => sortFilesByCompletion(files.value))
   const selected = ref<StringItem | null>(items.value[0] || null)
+  const navigationHistory = ref<WorkspaceLocation[]>([])
+  const canGoBack = computed(() => navigationHistory.value.length > 0)
+  const backNavigationTitle = computed(() => {
+    const previous = navigationHistory.value.at(-1)
+    if (!previous) return '返回上一个词条和文件'
+    return `返回 ${previous.fileName || `文件 ${previous.fileId}`} · ${previous.key || '此前位置'}`
+  })
   const text = ref(''), editStage = ref(0), translationDisplayCleared = ref(false), stageFilter = ref<number | null>(0), search = ref(''), searchMode = ref('text')
   const page = ref(1), pageSize = ref(50), pageCount = ref(1), rowCount = ref(0), fileId = ref(0), sort = ref('default')
+  const aggregateMode = computed(() => project.value.id > 0 && fileId.value === 0)
+  const aggregateFile = computed<FileInfo>(() => {
+    const summary = { ...emptyFile(), name: '全文聚合', project: project.value.id }
+    for (const entry of files.value) {
+      summary.total += entry.total; summary.translated += entry.translated
+      summary.disputed += entry.disputed; summary.checked += entry.checked; summary.reviewed += entry.reviewed
+      summary.hidden += entry.hidden; summary.locked += entry.locked; summary.words += entry.words
+    }
+    return summary
+  })
+  watch(aggregateFile, summary => { if (aggregateMode.value) file.value = summary }, { flush: 'sync' })
+  function stringFileName(item: StringItem) {
+    const sourceFileId = item.fileId || item.file?.id
+    return item.file?.name || files.value.find(entry => entry.id === sourceFileId)?.name
+      || (sourceFileId ? `文件 ${sourceFileId}` : aggregateMode.value ? '未知文件' : file.value.name)
+  }
+  function inCurrentScope(item: StringItem, fallbackFileId = fileId.value) {
+    return project.value.id === item.project && (aggregateMode.value || fileId.value === (item.fileId || item.file?.id || fallbackFileId))
+  }
+  function captureWorkspaceLocation(): WorkspaceLocation | null {
+    if (!workspaceReady.value || project.value.id <= 0) return null
+    const item = selected.value
+    const sourceFileId = item?.fileId || item?.file?.id || fileId.value
+    const sourceFile = item?.file?.name || files.value.find(entry => entry.id === sourceFileId)?.name || file.value.name
+    return {
+      projectId: project.value.id,
+      fileId: sourceFileId,
+      ...(item ? { stringId: item.id, key: item.key } : {}),
+      ...(sourceFile ? { fileName: sourceFile } : {}),
+    }
+  }
+  function rememberWorkspaceLocation(previous: WorkspaceLocation | null, target?: { projectId: number; fileId: number; stringId?: number }) {
+    if (!previous) return
+    if (target && previous.projectId === target.projectId &&
+      (previous.stringId === target.stringId || (!previous.stringId && previous.fileId === target.fileId))) return
+    navigationHistory.value = [...navigationHistory.value, previous]
+  }
   const listBusy = ref(false), listProgress = ref(''), error = ref(''), notice = ref(''), draftStatus = ref('')
   const pendingSubmissions = ref<Submission[]>([]), submissionFailures = ref<SubmissionFailure[]>([])
   const pendingCount = computed(() => pendingSubmissions.value.length)
@@ -34,6 +85,7 @@ export function useEditor() {
   const legacyDraftCount = ref(0)
   const panel = ref<'context' | 'suggestions' | 'history' | 'terms' | 'quality' | 'comments' | 'dictionary'>('suggestions')
   const suggestions = ref<Suggestion[]>([]), terms = ref<Term[]>([]), history = ref<HistoryEntry[]>([])
+  const auxiliaryCacheVersion = ref(0)
   const termsBusy = ref(false), termsError = ref('')
   const suggestionsBusy = ref(false), suggestionsError = ref(''), historyBusy = ref(false), historyError = ref('')
   const auxBusy = computed(() => panel.value === 'suggestions' ? suggestionsBusy.value : panel.value === 'history' ? historyBusy.value : false)
@@ -44,7 +96,7 @@ export function useEditor() {
   const presence = reactive(usePresence(presenceProjectId, computed(() => selected.value?.id || null), computed(() => desktop.value && connected.value && sessionInfo.value.authenticated), computed(() => workspaceReady.value && ![9, -1].includes(selected.value?.stage ?? 0))))
   let draftTimer: ReturnType<typeof setTimeout>, searchTimer: ReturnType<typeof setTimeout>
   let listSequence = 0, auxSequence = 0, historySequence = 0, termsSequence = 0, selectionSequence = 0, changing = false, draftGeneration = 0, termsLoaded = false
-  let suggestionsLoaded = false, historyLoaded = false
+  let suggestionsLoaded = false, historyLoaded = false, openingString = false
   let suggestionsRequest: { sequence: number; promise: Promise<void> } | undefined
   let historyRequest: { sequence: number; promise: Promise<void> } | undefined
   let termsRequest: { sequence: number; promise: Promise<void> } | undefined
@@ -160,16 +212,61 @@ export function useEditor() {
     translationDisplayCleared.value = false
     selected.value = item
     const draft = item ? drafts.value[draftKey(item)] : undefined
-    text.value = toParaTranzText(draft?.translation ?? item?.translation ?? '')
-    editStage.value = draft?.stage ?? item?.stage ?? 0
-    if (clearTranslation && item) {
+    // An empty local draft must not hide a translation that still exists remotely.
+    // Keep the draft intact, but load the remote value as the editor baseline.
+    const blankDraft = !!draft && !draft.translation.trim()
+    const blankDraftWithRemoteTranslation = blankDraft && !!item?.translation.trim()
+    const visibleDraft = blankDraft ? undefined : draft
+    text.value = toParaTranzText(visibleDraft?.translation ?? item?.translation ?? '')
+    editStage.value = visibleDraft?.stage ?? item?.stage ?? 0
+    // A stage-0 list row can omit its translation; confirm blank entries by ID
+    // before treating the editor as empty or allowing a blank submission.
+    if (item && item.stage === 0 && connected.value && sessionInfo.value.authenticated && !text.value.trim()) {
+      translationDisplayCleared.value = true
+      draftStatus.value = '正在核对远端译文…'
+      void confirmBlankUntranslatedItem(item, selectionSequence)
+    // Clearing after submit must not hide the next entry's translation or prefilled draft.
+    } else if (clearTranslation && item && !draft && !text.value) {
       text.value = ''
       translationDisplayCleared.value = true
-      draftStatus.value = draft ? '译文框已清空，本地草稿已保留' : '译文框已清空'
-    } else draftStatus.value = draft ? '已恢复本地草稿' : ''
+      draftStatus.value = '译文框已清空'
+    } else draftStatus.value = blankDraftWithRemoteTranslation
+      ? '已显示远端译文（本地空草稿仍保留）'
+      : draft ? '已恢复本地草稿' : ''
     changing = false
     scheduleAux()
     scheduleTerms()
+  }
+  async function confirmBlankUntranslatedItem(item: StringItem, sequence: number) {
+    try {
+      const latest = await api<StringItem>('string', { projectId: item.project, stringId: item.id })
+      if (sequence !== selectionSequence || selected.value?.project !== item.project || selected.value.id !== item.id) return
+
+      const cacheHandled = updateUpdatedStringsCache(latest)
+      const index = items.value.findIndex(row => row.project === latest.project && row.id === latest.id)
+      if (!cacheHandled && index >= 0) items.value[index] = latest
+      selected.value = latest
+
+      // Keep any typing the user started while the verification request was in flight.
+      if (!translationDisplayCleared.value || text.value.trim()) return
+      const draft = drafts.value[draftKey(latest)]
+      const blankDraft = !!draft && !draft.translation.trim()
+      const visibleDraft = blankDraft ? undefined : draft
+      changing = true
+      text.value = toParaTranzText(visibleDraft?.translation ?? latest.translation ?? '')
+      editStage.value = visibleDraft?.stage ?? latest.stage ?? 0
+      translationDisplayCleared.value = !text.value.trim()
+      draftStatus.value = text.value.trim()
+        ? blankDraft ? '已显示远端译文（本地空草稿仍保留）' : visibleDraft ? '已恢复本地草稿' : '已加载远端译文'
+        : '远端译文为空；译文框已清空'
+      changing = false
+    } catch {
+      if (sequence === selectionSequence && selected.value?.project === item.project && selected.value.id === item.id && translationDisplayCleared.value) {
+        draftStatus.value = '远端译文读取失败，已阻止空提交'
+      }
+    } finally {
+      changing = false
+    }
   }
   function restoreClearedTranslation() {
     const item = selected.value
@@ -235,7 +332,7 @@ export function useEditor() {
       expectedUserId: accountId, expectedUpdatedAt: item.updatedAt ?? null, expectedTranslation: item.translation,
       expectedStage: item.stage, expectedOriginal: item.original })
     const key = draftKey(item), sameSelection = selected.value?.project === item.project && selected.value.id === item.id
-    if (project.value.id === item.project && fileId.value === (item.fileId || item.file?.id || fileId.value)) {
+    if (inCurrentScope(item)) {
       const priorVisible = visibleItems.value
       const priorVisibleIndex = priorVisible.findIndex(row => row.project === item.project && row.id === item.id)
       if (sameSelection && stageFilter.value !== null && saved.stage !== stageFilter.value && priorVisibleIndex >= 0) {
@@ -385,7 +482,7 @@ export function useEditor() {
     listProgress.value = ''
     notice.value = silent ? '' : '已停止加载词条列表。'
   }
-  async function bootstrap(projectId: number, newFileId: number) {
+  async function bootstrap(projectId: number, newFileId: number, query?: { text: string; searchMode: 'key' | 'original'; item?: StringItem }) {
     if (!sessionInfo.value.authenticated || initializing.value && connected.value) return
     try { await flushDraft(true) } catch (reason) { error.value = (reason as Error).message; return }
     clearAuxiliaryCache()
@@ -398,21 +495,43 @@ export function useEditor() {
         api<Record<string, Draft>>('drafts', { accountId }), api<{ count: number }>('legacyDrafts', { accountId, projectId }),
       ])
       if (!newFiles.length) throw new Error('项目中没有可翻译的文件')
+      if (query?.item && !newFiles.some(entry => entry.id === newFileId)) throw new Error('目标文件不可用，无法定位词条')
       project.value = newProject; files.value = newFiles; drafts.value = localDrafts; legacyDraftCount.value = legacy.count
-      file.value = newFiles.find(entry => entry.id === newFileId) || newFiles[0]!
+      file.value = newFileId === 0 ? aggregateFile.value : newFiles.find(entry => entry.id === newFileId) || newFiles[0]!
       fileId.value = file.value.id; connected.value = true; choose(null); page.value = 1
-      clearTimeout(searchTimer); search.value = ''; selectedIds.value = []
+      if (aggregateMode.value) stageFilter.value = null
+      clearTimeout(searchTimer); search.value = query?.text || ''; selectedIds.value = []
+      if (query) { searchMode.value = query.searchMode; stageFilter.value = null }
       localStorage.setItem('sckit-workspace', JSON.stringify({ projectId, fileId: file.value.id }))
-      await loadStrings()
+      await loadStrings(query?.item?.id, query?.item)
       workspaceReady.value = !error.value
     } catch (reason) { error.value = (reason as Error).message }
     finally { initializing.value = false }
   }
-  async function changeFile(id: number) {
-    if (initializing.value || listBusy.value || id === fileId.value || !files.value.some(entry => entry.id === id)) return
+  async function changeFile(id: number, recordHistory = true) {
+    if (initializing.value || listBusy.value || id === fileId.value || (id !== 0 && !files.value.some(entry => entry.id === id))) return
+    const previousLocation = recordHistory ? captureWorkspaceLocation() : null
+    error.value = ''
     try { await flushDraft(true) } catch (reason) { error.value = (reason as Error).message; return }
-    updatedStringsCache.value = null; fileId.value = id; file.value = files.value.find(entry => entry.id === id) || file.value
-    page.value = 1; await loadStrings(); localStorage.setItem('sckit-workspace', JSON.stringify({ projectId: project.value.id, fileId: id }))
+    updatedStringsCache.value = null; fileId.value = id; file.value = id === 0 ? aggregateFile.value : files.value.find(entry => entry.id === id) || file.value
+    if (aggregateMode.value) stageFilter.value = null
+    page.value = 1; await loadStrings()
+    if (error.value) return
+    rememberWorkspaceLocation(previousLocation, { projectId: project.value.id, fileId: id })
+    localStorage.setItem('sckit-workspace', JSON.stringify({ projectId: project.value.id, fileId: id }))
+  }
+  async function openFile(projectId: number, id: number, recordHistory = true) {
+    if (initializing.value || listBusy.value || reloadBusy.value) return false
+    if (!connected.value || !sessionInfo.value.authenticated) throw new Error('请先登录 ParaTranz')
+    if (workspaceReady.value && project.value.id === projectId && fileId.value === id) return true
+    const previousLocation = recordHistory ? captureWorkspaceLocation() : null
+    error.value = ''
+    if (workspaceReady.value && project.value.id === projectId) await changeFile(id, false)
+    else await bootstrap(projectId, id)
+    if (error.value) throw new Error(error.value)
+    if (!workspaceReady.value || project.value.id !== projectId || fileId.value !== id) return false
+    rememberWorkspaceLocation(previousLocation, { projectId, fileId: id })
+    return true
   }
   async function refreshFiles() {
     if (!connected.value) return
@@ -420,22 +539,99 @@ export function useEditor() {
     const refreshed = await api<FileInfo[]>('files', { projectId })
     if (project.value.id !== projectId) return
     files.value = refreshed
-    file.value = refreshed.find(entry => entry.id === fileId.value) || file.value
+    file.value = aggregateMode.value ? aggregateFile.value : refreshed.find(entry => entry.id === fileId.value) || file.value
+  }
+  async function openString(projectId: number, stringId: number, recordHistory = true) {
+    if (initializing.value || listBusy.value || reloadBusy.value) return false
+    if (!connected.value || !sessionInfo.value.authenticated) throw new Error('请先登录 ParaTranz')
+    const previousLocation = recordHistory ? captureWorkspaceLocation() : null
+    reloadBusy.value = true; openingString = true; error.value = ''; notice.value = ''
+    clearTimeout(searchTimer)
+    try {
+      const item = await api<StringItem>('string', { projectId, stringId })
+      if (!item || item.id !== stringId || item.project !== projectId) throw new Error('未找到目标词条')
+      const targetFileId = item.fileId || item.file?.id
+      if (!targetFileId) throw new Error('目标词条缺少文件信息，无法定位')
+      await flushDraft(true)
+      if (!workspaceReady.value || project.value.id !== projectId) {
+        await bootstrap(projectId, targetFileId, { text: item.key, searchMode: 'key', item })
+        if (error.value) throw new Error(error.value)
+      }
+      const targetFile = files.value.find(entry => entry.id === targetFileId)
+      if (!targetFile) throw new Error('目标文件不可用，无法定位词条')
+      fileId.value = targetFileId; file.value = targetFile
+      updatedStringsCache.value = null
+      // Search by key so a jump does not need to scan every page of a large file.
+      stageFilter.value = null; searchMode.value = 'key'; search.value = item.key; page.value = 1
+      await nextTick()
+      await loadStrings(item.id, item)
+      if (error.value) throw new Error(error.value)
+      choose(item)
+      rememberWorkspaceLocation(previousLocation, { projectId, fileId: targetFileId, stringId: item.id })
+      localStorage.setItem('sckit-workspace', JSON.stringify({ projectId, fileId: targetFileId }))
+      return true
+    } finally { openingString = false; reloadBusy.value = false }
+  }
+  async function openOccurrences(projectId: number, original: string) {
+    if (initializing.value || listBusy.value || reloadBusy.value) return false
+    if (!connected.value || !sessionInfo.value.authenticated) throw new Error('请先登录 ParaTranz')
+    const query = original.trim()
+    if (!query) throw new Error('请输入要查询的原文')
+    if (new TextEncoder().encode(query).length > 1000) throw new Error('原文过长，请选择较短的片段查询（最多 1000 UTF-8 字节）')
+    const previousLocation = captureWorkspaceLocation()
+    reloadBusy.value = true; openingString = true; error.value = ''; notice.value = ''
+    clearTimeout(searchTimer)
+    try {
+      await flushDraft(true)
+      sort.value = 'default'
+      await nextTick()
+      if (!workspaceReady.value || project.value.id !== projectId) {
+        await bootstrap(projectId, 0, { text: query, searchMode: 'original' })
+      } else {
+        updatedStringsCache.value = null
+        fileId.value = 0; file.value = aggregateFile.value
+        stageFilter.value = null; searchMode.value = 'original'; search.value = query; page.value = 1
+        await nextTick()
+        await loadStrings()
+      }
+      if (error.value) throw new Error(error.value)
+      rememberWorkspaceLocation(previousLocation)
+      localStorage.setItem('sckit-workspace', JSON.stringify({ projectId, fileId: 0 }))
+      return true
+    } finally { openingString = false; reloadBusy.value = false }
+  }
+  async function goBack() {
+    const previous = navigationHistory.value.at(-1)
+    if (!previous || initializing.value || listBusy.value || reloadBusy.value) return false
+    let restored = false
+    if (previous.stringId) {
+      restored = await openString(previous.projectId, previous.stringId, false)
+    } else if (!workspaceReady.value || project.value.id !== previous.projectId) {
+      error.value = ''
+      await bootstrap(previous.projectId, previous.fileId)
+      restored = workspaceReady.value && project.value.id === previous.projectId && fileId.value === previous.fileId && !error.value
+    } else {
+      error.value = ''
+      await changeFile(previous.fileId, false)
+      restored = project.value.id === previous.projectId && fileId.value === previous.fileId && !error.value
+    }
+    if (restored) navigationHistory.value = navigationHistory.value.slice(0, -1)
+    return restored
   }
   function filter(stage: number | null) { stageFilter.value = stage; page.value = 1; loadStrings() }
   watch([search, searchMode], (_value, previous) => {
     clearTimeout(searchTimer)
-    if (initializing.value) return
+    if (initializing.value || openingString) return
     if (listBusy.value) cancelListLoad(true)
     const preserve = !search.value.trim() && !!previous?.[0] ? selected.value || undefined : undefined
     searchTimer = setTimeout(() => { page.value = 1; void loadStrings(preserve?.id, preserve) }, 350)
   })
-  watch(sort, () => { page.value = 1; void loadStrings(selected.value?.id) })
+  watch(sort, () => { if (openingString) return; page.value = 1; void loadStrings(selected.value?.id) })
   async function paginate(newPage: number, edge: 'first' | 'last' = 'first', clearTranslation = false) { if (listBusy.value) return; page.value = Math.max(1, Math.min(newPage, pageCount.value)); await loadStrings(undefined, undefined, edge, clearTranslation, false) }
   async function changePageSize(size: number) { pageSize.value = size; page.value = 1; await loadStrings(undefined, undefined, 'first', false, false) }
 
   async function loadTerms(force = false): Promise<void> {
-    if (force) { termsCache.clear(); ++termsSequence; termsLoaded = false; termsRequest = undefined }
+    if (force) { auxiliaryCacheVersion.value++; termsCache.clear(); ++termsSequence; termsLoaded = false; termsRequest = undefined }
     const item = selected.value, sequence = termsSequence
     if (!item || !connected.value) { termsBusy.value = false; return }
     if (termsRequest?.sequence === sequence) return termsRequest.promise
@@ -465,7 +661,7 @@ export function useEditor() {
     if (selected.value) void loadTerms()
   }
   async function loadSuggestions(force = false): Promise<void> {
-    if (force) { suggestionsCache.clear(); ++auxSequence; suggestionsLoaded = false; suggestionsRequest = undefined }
+    if (force) { auxiliaryCacheVersion.value++; suggestionsCache.clear(); ++auxSequence; suggestionsLoaded = false; suggestionsRequest = undefined }
     const item = selected.value, sequence = auxSequence
     if (!item || !connected.value) return
     if (suggestionsRequest?.sequence === sequence) return suggestionsRequest.promise
@@ -500,7 +696,7 @@ export function useEditor() {
       candidates.set(entry.id, existing ? { ...existing, stage: 2 } : {
         id: entry.id, key: entry.key, original: entry.original, translation: entry.translation,
         matching: 0, stage: 2, project: { id: entry.project, name: project.value.name },
-        file: entry.file || { id: item.fileId || item.file?.id || fileId.value, name: file.value.name, project: entry.project },
+        file: entry.file || { id: entry.fileId || item.fileId || item.file?.id || fileId.value, name: stringFileName(entry), project: entry.project },
         user: entry.user, updatedAt: entry.updatedAt || undefined,
       })
     }
@@ -521,6 +717,7 @@ export function useEditor() {
     })
   }
   function clearAuxiliaryCache() {
+    auxiliaryCacheVersion.value++
     clearTimeout(prefetchTimer); ++prefetchSequence
     termsCache.clear(); suggestionsCache.clear(); disputedStringsCache.clear()
   }
@@ -639,7 +836,7 @@ export function useEditor() {
           suggestionsCache.clear(); disputedStringsCache.clear()
           if (sessionInfo.value.user?.id === job.accountId) {
             const sameSelection = selected.value?.project === job.item.project && selected.value.id === job.item.id
-            if (project.value.id === job.item.project && fileId.value === job.fileId) {
+            if (inCurrentScope(job.item, job.fileId)) {
               const priorVisible = visibleItems.value
               const priorVisibleIndex = priorVisible.findIndex(row => row.id === job.item.id)
               if (sameSelection && stageFilter.value !== null && saved.stage !== stageFilter.value && priorVisibleIndex >= 0) {
@@ -744,6 +941,7 @@ export function useEditor() {
     clearAuxiliaryCache()
     updatedStringsCache.value = null
     updatedSortNeedsRefresh = false
+    navigationHistory.value = []
     await flushDraft(true); connected.value = false; sessionInfo.value = { authenticated: false, mode: 'none' }
     workspaceReady.value = false
     items.value = []; project.value = emptyProject(); file.value = emptyFile(); files.value = []; drafts.value = {}; legacyDraftCount.value = 0
@@ -753,6 +951,7 @@ export function useEditor() {
   async function restoreSession(session: SessionStatus) {
     clearAuxiliaryCache()
     await flushDraft(true)
+    navigationHistory.value = []
     sessionInfo.value = session; connected.value = session.authenticated; workspaceReady.value = false
     choose(null)
     if (connected.value) drafts.value = await api<Record<string, Draft>>('drafts', { accountId: sessionInfo.value.user?.id })
@@ -812,6 +1011,7 @@ export function useEditor() {
     initializing.value = false
   })
   onBeforeUnmount(() => { disposed = true; stopListRequests(); clearAuxiliaryCache(); clearTimeout(draftTimer); clearTimeout(searchTimer); ++auxSequence; ++historySequence; ++termsSequence; flushDraft() })
-  return { desktop, connected, initializing, workspaceReady, project, file, files, sortedFiles, items, visibleItems, selected, text, editStage, stageFilter, search, searchMode, page, pageSize, pageCount, rowCount, fileId, sort, listBusy, listProgress, cancelListLoad, pendingCount, submissionFailures, error, notice, draftStatus, dirty, locked, issues, untranslated, selectedIds, panel, suggestions, suggestionsBusy, suggestionsError, terms, history, historyBusy, historyError, auxBusy, auxError, termsBusy, termsError, sessionInfo, drafts, legacyDraftCount, claimLegacyDrafts,
-    presence, presenceProjectId, presenceLoginBusy, loginPresence, requestCount, reloadBusy, exportBusy, api, input, select, loadStrings, bootstrap, changeFile, refreshFiles, filter, paginate, changePageSize, loadAux, loadTerms, loadSuggestions, loadHistory, termsFor, suggestionsFor, submissionQueued, dismissSubmission, openSubmission, save, move, reloadSelected, discardDraft, restoreClearedTranslation, savePrefillDraft, savePrefillToParaTranz, translationDisplayCleared, resetWorkspace, restoreSession, flushDraft, waitForSubmissions, exportPage }
+  const translationCacheState = { auxiliaryCacheVersion }
+  return { ...translationCacheState, desktop, connected, initializing, workspaceReady, project, file, files, sortedFiles, aggregateMode, aggregateFile, stringFileName, items, visibleItems, selected, canGoBack, backNavigationTitle, text, editStage, stageFilter, search, searchMode, page, pageSize, pageCount, rowCount, fileId, sort, listBusy, listProgress, cancelListLoad, pendingCount, submissionFailures, error, notice, draftStatus, dirty, locked, issues, untranslated, selectedIds, panel, suggestions, suggestionsBusy, suggestionsError, terms, history, historyBusy, historyError, auxBusy, auxError, termsBusy, termsError, sessionInfo, drafts, legacyDraftCount, claimLegacyDrafts,
+    presence, presenceProjectId, presenceLoginBusy, loginPresence, requestCount, reloadBusy, exportBusy, api, input, select, loadStrings, bootstrap, changeFile, openFile, refreshFiles, openString, openOccurrences, goBack, filter, paginate, changePageSize, loadAux, loadTerms, loadSuggestions, loadHistory, termsFor, suggestionsFor, submissionQueued, dismissSubmission, openSubmission, save, move, reloadSelected, discardDraft, restoreClearedTranslation, savePrefillDraft, savePrefillToParaTranz, translationDisplayCleared, resetWorkspace, restoreSession, flushDraft, waitForSubmissions, exportPage }
 }

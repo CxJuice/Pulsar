@@ -276,7 +276,7 @@ async function saveRow(row: WorkRow, refreshWorkspace = true) {
         if (stayedAtBase) { props.editor.text = saved.translation; props.editor.editStage = saved.stage }
       }
       const currentFileId = base.fileId || base.file?.id
-      if (refreshWorkspace && props.editor.workspaceReady && currentFileId === props.editor.fileId) {
+      if (refreshWorkspace && props.editor.workspaceReady && (props.editor.aggregateMode || currentFileId === props.editor.fileId)) {
         await props.editor.loadStrings(props.editor.selected?.id)
       }
     }
@@ -301,7 +301,7 @@ async function saveAll() {
   if (savingAll.value || !changedRows.value.length) return
   const batch = [...changedRows.value]
   const refreshWorkspace = props.editor.workspaceReady && props.editor.project.id === props.project.id &&
-    batch.some(row => (row.base.fileId || row.base.file?.id) === props.editor.fileId)
+    batch.some(row => props.editor.aggregateMode || (row.base.fileId || row.base.file?.id) === props.editor.fileId)
   savingAll.value = true
   let savedCount = 0
   const qaRows: string[] = [], failedRows: string[] = [], overwrittenRows: string[] = []

@@ -14,7 +14,7 @@
     "generate": "nuxt generate",
     "typecheck": "nuxt typecheck",
     "test:electron": "node --test tests/electron-state.test.cjs",
-    "test:logic": "node --disable-warning=ExperimentalWarning --test tests/list-request-coordinator.test.mjs tests/batch-prefill.test.mjs",
+    "test:logic": "node --disable-warning=ExperimentalWarning --test tests/list-request-coordinator.test.mjs tests/batch-prefill.test.mjs tests/single-translation-cache.test.mjs",
     "build:service": "cargo build --release --locked --manifest-path service/Cargo.toml",
     "build": "npm run generate && npm run build:service && node scripts/write-build-info.mjs",
     "start": "electron .",

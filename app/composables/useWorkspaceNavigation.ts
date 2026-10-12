@@ -91,9 +91,7 @@ export function useWorkspaceNavigation(e: UnwrapNestedRefs<ReturnType<typeof use
   async function chooseFile(file: FileInfo) {
     await run(async () => {
       e.error = ''
-      if (!e.connected || !e.sessionInfo.authenticated) throw new Error('请先登录 ParaTranz')
-      if (e.workspaceReady && e.project.id === browse.value.id) await e.changeFile(file.id)
-      else await e.bootstrap(browse.value.id, file.id)
+      if (!await e.openFile(browse.value.id, file.id)) return
       if (e.error) throw new Error(e.error)
       remember(); await navigateTo('/editor')
     }, '正在打开文件…')
@@ -104,6 +102,46 @@ export function useWorkspaceNavigation(e: UnwrapNestedRefs<ReturnType<typeof use
       alignEditor()
       await navigateTo('/editor')
     })
+  }
+  async function openString(projectId: number, stringId: number) {
+    if (blocked.value) return false
+    let opened = false
+    await run(async () => {
+      if (!await e.openString(projectId, stringId)) return
+      alignEditor()
+      await navigateTo('/editor')
+      await nextTick()
+      document.querySelector<HTMLElement>('.string-list .string-row[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' })
+      opened = true
+    }, '正在定位词条…')
+    if (!opened && error.value) e.error = error.value
+    return opened
+  }
+  async function goBack() {
+    if (blocked.value || !e.canGoBack) return false
+    let returned = false
+    await run(async () => {
+      if (!await e.goBack()) return
+      alignEditor()
+      await navigateTo('/editor')
+      await nextTick()
+      document.querySelector<HTMLElement>('.string-list .string-row[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' })
+      returned = true
+    }, '正在返回上一个词条…')
+    if (!returned && error.value) e.error = error.value
+    return returned
+  }
+  async function openOccurrences(projectId: number, original: string) {
+    if (blocked.value) return false
+    let opened = false
+    await run(async () => {
+      if (!await e.openOccurrences(projectId, original)) return
+      alignEditor()
+      await navigateTo('/editor')
+      opened = true
+    }, '正在查找所有出现的情况…')
+    if (!opened && error.value) e.error = error.value
+    return opened
   }
   function alignEditor() {
     if (!e.workspaceReady) return
@@ -145,7 +183,7 @@ export function useWorkspaceNavigation(e: UnwrapNestedRefs<ReturnType<typeof use
   })
   return { projectChosen, collapsed, projects, browse, files, catalogBusy, busy, saving, loadingLabel, catalogError, error, notice,
     projectSearch, fileSearch, expandedFolders, showConnection, showGuide, guideReady, loginBusy, blocked, filteredProjects, fileGroups,
-    folderOpen, toggleFolder, expandFolders, collapseFolders, goHome, goSettings, openGuide, finishGuide, loadCatalog, inspectProject, chooseFile, continueEditing, alignEditor, connected, disconnect }
+    folderOpen, toggleFolder, expandFolders, collapseFolders, goHome, goSettings, openGuide, finishGuide, loadCatalog, inspectProject, chooseFile, continueEditing, openString, goBack, openOccurrences, alignEditor, connected, disconnect }
 }
 
 export type WorkspaceNavigation = UnwrapNestedRefs<ReturnType<typeof useWorkspaceNavigation>>

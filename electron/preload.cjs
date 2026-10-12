@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('scKit', {
   lookupCambridge: query => ipcRenderer.invoke('sc:cambridge-lookup', query),
   openCambridgeOriginal: query => ipcRenderer.invoke('sc:cambridge-open-original', query),
   fetchCommunityTranslationCandidates: () => ipcRenderer.invoke('sc:community-translation-candidates'),
+  fetchArchivedTranslationCandidates: () => ipcRenderer.invoke('sc:archived-translation-candidates'),
   auxCustomizationOverlay: state => ipcRenderer.send('sc:aux-customization-overlay', state),
   onAuxCustomizationAction: callback => { const listener = (_event, action) => callback(action); ipcRenderer.on('sc:aux-customization-action', listener); return () => ipcRenderer.removeListener('sc:aux-customization-action', listener); },
   translatorView: state => ipcRenderer.send('sc:translator-view', state),

@@ -21,6 +21,26 @@ export async function runConcurrentPrefill<T>(items: readonly T[], concurrency: 
   if (failed?.status === 'rejected') throw failed.reason
 }
 
+// Keep slow serial writes out of translation slots, while bounding queued text.
+export class PrefillSaveQueue {
+  private tail: Promise<void> = Promise.resolve()
+  private pending = new Set<Promise<void>>()
+  private failure: unknown
+  private capacity: number
+  constructor(capacity: number) { this.capacity = capacity }
+  async enqueue(save: () => Promise<void>): Promise<void> {
+    const job = this.tail.then(save)
+    const settled = job.catch(reason => { this.failure ??= reason }).then(() => { this.pending.delete(settled) })
+    this.pending.add(settled)
+    this.tail = settled
+    while (this.pending.size >= Math.max(1, this.capacity)) await Promise.race(this.pending)
+  }
+  async drain(): Promise<void> {
+    await this.tail
+    if (this.failure !== undefined) throw this.failure
+  }
+}
+
 // Cancellation also settles requests still preparing their translation context.
 // Their eventual context response cannot start a canceled translation.
 export class BatchTranslationRequests {

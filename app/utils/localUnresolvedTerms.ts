@@ -12,7 +12,25 @@ function isCandidate(value: unknown): value is CommunityTranslationCandidate {
   return Number.isInteger(entry.id) && typeof entry.source === 'string' && !!entry.source.trim()
     && typeof entry.category === 'string' && Array.isArray(entry.candidates) && entry.candidates.every(item => typeof item === 'string')
     && typeof entry.topicTitle === 'string' && typeof entry.topicUrl === 'string'
-    && (entry.sourceType === '征集' || entry.sourceType === '投票')
+    && (entry.sourceType === '征集' || entry.sourceType === '投票' || entry.sourceType === '归档')
+}
+
+export function mergeCommunityTranslationCandidate(previous: CommunityTranslationCandidate | undefined, entry: CommunityTranslationCandidate): CommunityTranslationCandidate {
+  if (!previous) return entry
+  const previousArchived = previous.sourceType === '归档', entryArchived = entry.sourceType === '归档'
+  const archived = previousArchived || entryArchived
+  const previousTime = Date.parse(previous.updatedAt || ''), entryTime = Date.parse(entry.updatedAt || '')
+  const preferred = previousArchived && !entryArchived
+    ? previous
+    : entryArchived && !previousArchived
+      ? entry
+      : previousArchived && entryArchived && Number.isFinite(previousTime) && (!Number.isFinite(entryTime) || previousTime > entryTime)
+        ? previous
+        : entry
+  const candidates = archived
+    ? [...new Set(preferred.candidates)]
+    : [...new Set([...previous.candidates, ...entry.candidates])]
+  return { ...previous, ...entry, ...preferred, candidates }
 }
 
 export function readLocalUnresolvedTerms(projectId: number | string): LocalUnresolvedTerm[] {
@@ -33,23 +51,13 @@ export function mergeLocalUnresolvedTerms(projectId: number | string, incoming: 
   for (const entry of incoming) {
     if (!isCandidate(entry)) continue
     const key = entry.source.trim().toLocaleLowerCase()
-    const previousDownload = downloaded.get(key)
-    downloaded.set(key, {
-      ...previousDownload,
-      ...entry,
-      candidates: [...new Set([...(previousDownload?.candidates || []), ...entry.candidates])],
-    })
+    downloaded.set(key, mergeCommunityTranslationCandidate(downloaded.get(key), entry))
   }
   const now = new Date().toISOString()
   for (const entry of downloaded.values()) {
     const key = entry.source.trim().toLocaleLowerCase()
     const previous = bySource.get(key)
-    bySource.set(key, {
-      ...previous,
-      ...entry,
-      candidates: entry.candidates,
-      syncedAt: now,
-    })
+    bySource.set(key, { ...mergeCommunityTranslationCandidate(previous, entry), syncedAt: now })
   }
   const merged = [...bySource.values()].sort((first, second) => first.source.localeCompare(second.source))
   localStorage.setItem(storageKey(projectId), JSON.stringify(merged))

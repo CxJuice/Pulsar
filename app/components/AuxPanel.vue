@@ -3,14 +3,17 @@ import { Lightbulb, History, BookOpen, ShieldCheck, MessageSquare, ArrowDownToLi
 import AuxDockLayout, { type AuxDockNode, type AuxDockTab, type AuxDockZone } from './AuxDockLayout.vue'
 import type { UnwrapNestedRefs } from 'vue'
 import type { useEditor } from '~/composables/useEditor'
-import type { AuxCustomizationAction, AuxCustomizationOverlayState, CambridgeDictionaryData, HistoryEntry, LocalUnresolvedTerm, StringItem, Suggestion, TranslationLlmContextSettings, TranslationMode, TranslationPromptContext, TranslationProvider, TranslationSettings } from '~/types/editor'
+import type { AuxCustomizationAction, AuxCustomizationOverlayState, CambridgeDictionaryData, HistoryEntry, LocalUnresolvedTerm, StringItem, Suggestion, Term, TranslationLlmContextSettings, TranslationMode, TranslationPromptContext, TranslationProvider, TranslationSettings, TranslationSharedReference } from '~/types/editor'
 import { displayDate, stageLabels } from '~/utils/text'
 import { toEditorText, toTranslationRequestText } from '~/utils/translationText'
 import { replaceSourceTerms } from '~/utils/termHighlights'
 import { matchLocalUnresolvedTerms, readLocalUnresolvedTerms } from '~/utils/localUnresolvedTerms'
 import { BatchTranslationRequests } from '~/utils/batchPrefill'
+import { BatchTranslationContextPool } from '~/utils/batchTranslationContext'
+import { TranslationContextCache } from '~/utils/translationContextCache'
 import type { QualityLocation } from '~/utils/quality'
 const props = defineProps<{ editor: UnwrapNestedRefs<ReturnType<typeof useEditor>>; compact?: boolean; breaks?: boolean }>()
+const navigation = inject<import('~/composables/useWorkspaceNavigation').WorkspaceNavigation>('workspace-navigation')!
 const emit = defineEmits<{ insert: [text: string]; replace: [text: string]; locate: [location: QualityLocation]; selectionContextMenu: [event: MouseEvent] }>()
 const layoutPreview = import.meta.dev && useRoute().path === '/layout-preview'
 const termPanel = ref<{ focusTerm: (id: number) => void }>()
@@ -41,6 +44,17 @@ function cancelTranslationRequest(requestId: string | null) {
 }
 function newTranslationRequestId() { return crypto.randomUUID() }
 const batchTranslationRequests = new BatchTranslationRequests(cancelTranslationRequest)
+let batchContextPool: BatchTranslationContextPool<TranslationSharedReference> | undefined
+const singleContextCache = new TranslationContextCache<TranslationSharedReference>()
+let translationSettingsSignature = '', translationCacheEpoch = 0
+function clearSingleContextCache() { singleContextCache.clear(); translationCacheEpoch++ }
+function translationCacheScope(item: StringItem | null) {
+  return JSON.stringify([props.editor.sessionInfo.user?.id ?? null, props.editor.sessionInfo.mode,
+    item?.project ?? props.editor.project.id, item?.fileId || item?.file?.id || props.editor.fileId,
+    props.editor.auxiliaryCacheVersion, translationCacheEpoch])
+}
+watch([() => props.editor.project.id, () => props.editor.fileId, () => props.editor.connected,
+  () => props.editor.sessionInfo.user?.id, () => props.editor.sessionInfo.mode, () => props.editor.auxiliaryCacheVersion], clearSingleContextCache, { flush: 'sync' })
 function openHistorySearch() { props.editor.panel = 'suggestions'; nextTick(() => memorySearch.value?.focus()) }
 const auxRoot = ref<HTMLElement>()
 const activeDockPanels = ref<string[]>([props.editor.panel])
@@ -66,7 +80,8 @@ function lookup(suggestion?: Suggestion) {
   const e = props.editor
   concordance.value = { original: suggestion?.original || e.selected?.original || '', projectId: suggestion?.project?.id || e.project.id, projectName: suggestion?.project?.name || e.project.name }
 }
-function openSuggestion(suggestion: Suggestion) { window.scKit?.openExternal(`https://paratranz.cn/projects/${suggestion.project?.id || props.editor.project.id}/strings?id=${suggestion.id}`) }
+function openSuggestion(suggestion: Suggestion) { return navigation.openString(suggestion.project?.id || props.editor.project.id, suggestion.id) }
+function showOccurrences(suggestion: Suggestion) { return navigation.openOccurrences(suggestion.project?.id || props.editor.project.id, suggestion.original) }
 function matching(value: number) { return Number.isFinite(value) ? `${Math.floor(Math.min(1, Math.max(0, value)) * 100)}%` : '—' }
 function openComments() { const e = props.editor; if (e.selected) window.scKit?.openExternal(`https://paratranz.cn/projects/${e.project.id}/strings?id=${e.selected.id}`) }
 watch(dictionarySelection, value => { if (value && document.activeElement !== cambridgeSearch.value) dictionaryTerm.value = value })
@@ -191,8 +206,12 @@ async function loadTranslationSelection() {
     translationSettingsReady.value = true
   } catch (reason) { translationError.value = (reason as Error).message || '无法读取翻译设置' }
 }
-function applyTranslationSettings(settings: TranslationSettings) {
-  const changed = settings.provider !== translationProvider.value || settings.mode !== translationAccessMode.value || settings.llmModel !== translationLlmModel.value || settings.useTermTranslations !== useTermTranslations.value
+function applyTranslationSettings(settings: TranslationSettings, forceInvalidate = false) {
+  const signature = JSON.stringify([settings.provider, settings.mode, settings.deeplPlan, settings.proxy, settings.llmRequestUrl,
+    settings.llmModel, settings.llmPrefixPrompt, settings.llmContext, settings.useTermTranslations,
+    settings.googleConfigured, settings.deeplConfigured, settings.llmConfigured])
+  const changed = forceInvalidate || signature !== translationSettingsSignature
+  translationSettingsSignature = signature
   translationSettingsReady.value = true
   translationProvider.value = settings.provider
   translationAccessMode.value = settings.mode
@@ -200,6 +219,7 @@ function applyTranslationSettings(settings: TranslationSettings) {
   useTermTranslations.value = settings.useTermTranslations
   translationLlmContext.value = { ...settings.llmContext }
   if (changed) {
+    clearSingleContextCache()
     translationRequest++
     prefillRequest++
     cancelTranslationRequest(activeTranslationRequestId)
@@ -217,7 +237,7 @@ function applyTranslationSettings(settings: TranslationSettings) {
 }
 function onTranslationSettingsUpdated(event: Event) {
   const settings = (event as CustomEvent<TranslationSettings>).detail
-  if (settings) applyTranslationSettings(settings)
+  if (settings) applyTranslationSettings(settings, true)
 }
 function normalizeDictionaryTerm(value: string) {
   const term = value.replace(/\s+/g, ' ').trim()
@@ -292,42 +312,90 @@ async function sourceWithConfiguredTerms(source: string, translationEntry: Strin
   }
   return source
 }
-async function requestConfiguredTranslation(source: string, translationEntry: StringItem | null, isCurrent: () => boolean, requestId: string, requireSelected = true) {
+function promptTerms(source: string, translationEntry: StringItem, terms: Term[]): NonNullable<TranslationSharedReference['terms']> {
+    const community = matchLocalUnresolvedTerms(source, readLocalUnresolvedTerms(translationEntry.project))
+    const communityBySource = new Map(community.map(entry => [entry.source.trim().toLocaleLowerCase(), entry]))
+    const communityNote = (entry: LocalUnresolvedTerm) => entry.sourceType === '归档'
+      ? `CitizenWiki 译名归档（${entry.category}）：${entry.candidates[0] || '暂无译名'}。这是已确认的可用译名。`
+      : `社区未定译名（${entry.sourceType}，尚未确认）；候选：${entry.candidates.filter(Boolean).slice(0, 8).join('、') || '暂无'}。请根据当前语境参考，无法确认时保留原文。`
+    const confirmedTerms = terms.map(term => {
+      const communityEntry = communityBySource.get(term.term.trim().toLocaleLowerCase())
+      return { term: term.term, translation: term.translation, note: [term.note, communityEntry ? communityNote(communityEntry) : ''].filter(Boolean).join('；') }
+    })
+    const confirmedSources = new Set(terms.map(term => term.term.trim().toLocaleLowerCase()))
+    const additionalTerms = community
+      .filter(entry => !confirmedSources.has(entry.source.trim().toLocaleLowerCase()))
+      .map(entry => ({
+        term: entry.source.trim(),
+        translation: entry.sourceType === '归档' ? entry.candidates[0] || entry.source.trim() : entry.source.trim(),
+        note: communityNote(entry),
+      }))
+    return [...confirmedTerms, ...additionalTerms].slice(0, 50)
+}
+async function loadTranslationReference(source: string, item: StringItem, includeTerms = true): Promise<TranslationSharedReference> {
+  const [suggestions, terms] = await Promise.all([
+    translationLlmContext.value.recommendations ? props.editor.suggestionsFor(item) : Promise.resolve([]),
+    includeTerms && translationLlmContext.value.terms ? props.editor.termsFor(item) : Promise.resolve([]),
+  ])
+  const reference: TranslationSharedReference = {}
+  if (translationLlmContext.value.recommendations) reference.recommendations = [...suggestions]
+    .sort((first, second) => (second.localMatching ?? 0) - (first.localMatching ?? 0) || first.id - second.id)
+    .slice(0, translationLlmContext.value.recommendationCount)
+    .map(suggestion => ({ original: suggestion.original.slice(0, 1200), translation: suggestion.translation.slice(0, 1200), similarity: suggestion.localMatching ?? 0 }))
+  if (includeTerms && translationLlmContext.value.terms) reference.terms = promptTerms(source, item, terms)
+  return reference
+}
+function beginBatchPrefill(items: readonly StringItem[]) {
+  batchContextPool = translationProvider.value === 'llm' ? new BatchTranslationContextPool(items, async group => {
+    const item = group.representative
+    const source = toTranslationRequestText(item.original, props.breaks !== false)
+    const reference = await loadTranslationReference(source, item)
+    if (group.items.length > 1) {
+      reference.exemplar = source
+      if (group.variantTemplate) reference.variantTemplate = group.variantTemplate
+      // Variant-only glossary terms belong to the individual entry. Share only
+      // terms present in every source, so a model/color-specific name cannot leak.
+      if (reference.terms) reference.terms = reference.terms.filter(term => group.items.every(member => member.original.toLowerCase().includes(term.term.toLowerCase())))
+    }
+    return reference
+  }) : undefined
+}
+function endBatchPrefill() { batchContextPool = undefined }
+async function requestConfiguredTranslation(source: string, translationEntry: StringItem | null, isCurrent: () => boolean, requestId: string, requireSelected = true, pool?: BatchTranslationContextPool<TranslationSharedReference>, bypassCache = false) {
+  const cacheScope = translationCacheScope(translationEntry)
   const preparedSource = await sourceWithConfiguredTerms(source, translationEntry, isCurrent)
   if (preparedSource === null) return null
   source = preparedSource
-  const [suggestions, terms] = translationProvider.value === 'llm' && translationEntry
-    ? await Promise.all([
-      translationLlmContext.value.recommendations ? props.editor.suggestionsFor(translationEntry) : Promise.resolve([]),
-      translationLlmContext.value.terms ? props.editor.termsFor(translationEntry) : Promise.resolve([]),
-    ]) : [[], []]
+  const context: TranslationPromptContext = { cacheScope, ...(bypassCache ? { bypassCache: true } : {}) }
+  if (translationProvider.value === 'llm' && translationEntry) {
+    if (pool) {
+      const [shared, terms] = await Promise.all([
+        pool.load(translationEntry),
+        translationLlmContext.value.terms ? props.editor.termsFor(translationEntry) : Promise.resolve([]),
+      ])
+      context.shared = shared
+      if (translationLlmContext.value.terms) {
+        const common = new Set((shared.terms || []).map(term => JSON.stringify(term)))
+        context.terms = promptTerms(source, translationEntry, terms).filter(term => !common.has(JSON.stringify(term)))
+      }
+    } else if (source === toTranslationRequestText(translationEntry.original, props.breaks !== false)) {
+      const [shared, terms] = await Promise.all([
+        singleContextCache.load(cacheScope, translationEntry, async representative => {
+          const exemplar = toTranslationRequestText(representative.original, props.breaks !== false)
+          const reference = await loadTranslationReference(exemplar, representative, false)
+          return { ...reference, exemplar: exemplar.slice(0, 1200) }
+        }),
+        translationLlmContext.value.terms ? props.editor.termsFor(translationEntry) : Promise.resolve([]),
+      ])
+      context.shared = shared
+      // Each entry keeps its entire matched glossary. A rolling group cannot know
+      // which terms will apply to future entries, so it shares recommendations only.
+      if (translationLlmContext.value.terms) context.terms = promptTerms(source, translationEntry, terms)
+    } else Object.assign(context, await loadTranslationReference(source, translationEntry))
+  }
   if (!isCurrent()) return null
   if (requireSelected && translationEntry && (props.editor.selected?.id !== translationEntry.id || props.editor.selected?.project !== translationEntry.project)) throw new Error('当前词条已切换，请重新发起翻译')
-  const context: TranslationPromptContext = {}
   if (translationProvider.value === 'llm' && translationEntry && translationLlmContext.value.key && translationEntry.key) context.key = translationEntry.key
-  if (translationProvider.value === 'llm' && translationEntry && translationLlmContext.value.recommendations) {
-    context.recommendations = [...suggestions]
-      .sort((first, second) => (second.localMatching ?? 0) - (first.localMatching ?? 0))
-      .slice(0, translationLlmContext.value.recommendationCount)
-      .map(suggestion => ({ original: suggestion.original, translation: suggestion.translation, similarity: suggestion.localMatching ?? 0 }))
-  }
-  if (translationProvider.value === 'llm' && translationEntry && translationLlmContext.value.terms) {
-    const unresolved = matchLocalUnresolvedTerms(source, readLocalUnresolvedTerms(translationEntry.project))
-    const unresolvedBySource = new Map(unresolved.map(entry => [entry.source.trim().toLocaleLowerCase(), entry]))
-    const unresolvedNote = (entry: LocalUnresolvedTerm) => {
-      const candidates = entry.candidates.filter(Boolean).slice(0, 8)
-      return `社区未定译名（${entry.sourceType}，尚未确认）；候选：${candidates.join('、') || '暂无'}。请根据当前语境参考，无法确认时保留原文。`
-    }
-    const confirmedTerms = terms.map(term => {
-      const candidate = unresolvedBySource.get(term.term.trim().toLocaleLowerCase())
-      return { term: term.term, translation: term.translation, note: [term.note, candidate ? unresolvedNote(candidate) : ''].filter(Boolean).join('；') }
-    })
-    const confirmedSources = new Set(terms.map(term => term.term.trim().toLocaleLowerCase()))
-    const unresolvedTerms = unresolved
-      .filter(entry => !confirmedSources.has(entry.source.trim().toLocaleLowerCase()))
-      .map(entry => ({ term: entry.source.trim(), translation: entry.source.trim(), note: unresolvedNote(entry) }))
-    context.terms = [...confirmedTerms, ...unresolvedTerms].slice(0, 50)
-  }
   if (translationProvider.value === 'llm' && translationEntry && translationLlmContext.value.notes) {
     const comments = (translationEntry.comments || []).map(comment => comment.content || comment.text || '').filter(Boolean)
     context.notes = { entryContext: translationEntry.context || '', comments }
@@ -337,7 +405,7 @@ async function requestConfiguredTranslation(source: string, translationEntry: St
   if (!result?.ok || !result.data?.text) throw new Error(result?.message || '翻译服务不可用')
   return result.data
 }
-async function translateSelectedText(value = translationSource.value, autoFill = false) {
+async function translateSelectedText(value = translationSource.value, autoFill = false, bypassCache = false) {
   if (translationBusy.value || translationStarting) return
   if (!value.trim()) { translationError.value = '请输入要翻译的文本'; return }
   translationStarting = true
@@ -374,11 +442,12 @@ async function translateSelectedText(value = translationSource.value, autoFill =
     translationSource.value = source
     requestId = newTranslationRequestId()
     activeTranslationRequestId = requestId
-    const result = await requestConfiguredTranslation(source, translationEntry, () => request === translationRequest, requestId)
+    const result = await requestConfiguredTranslation(source, translationEntry, () => request === translationRequest, requestId, true, undefined, bypassCache)
     if (request !== translationRequest) return
     if (result) {
       translationResult.value = result.text
       translationApiProvider.value = result.provider
+      if (result.localCacheHit) translationResultNotice.value = '已复用本机缓存；可点击“重新请求翻译”获取新的译文。'
       if (autoFill) {
         if (!translationEntry) translationResultNotice.value = '译文已生成；当前没有选中的词条，无法自动填入。'
         else if (props.editor.project.id !== translationProjectId || props.editor.selected?.id !== translationEntry.id) translationResultNotice.value = '译文已生成；当前词条已切换，未自动填入以避免写错词条。'
@@ -462,7 +531,7 @@ async function translateEntryForPrefill(item: StringItem) {
   translationBusy.value = true
   try {
     return await batchTranslationRequests.run(async (requestId, isCurrent) => {
-      const result = await requestConfiguredTranslation(source, item, isCurrent, requestId, false)
+      const result = await requestConfiguredTranslation(source, item, isCurrent, requestId, false, batchContextPool)
       if (!result) throw new Error(isCurrent() ? '翻译服务没有返回译文' : '翻译已停止。')
       return result
     })
@@ -493,7 +562,7 @@ watch([() => props.editor.selected?.project, () => props.editor.selected?.id, ()
   translationWebQueried.value = false
   nextTick(scheduleDictionaryBounds)
 }, { immediate: true })
-defineExpose({ focusTerm, openHistorySearch, lookupDictionary, translateSelectedText, cancelSelectedTranslation, translateForPrefill, translateEntryForPrefill, cancelPrefillTranslation, canPrefillTranslation, translationBusy })
+defineExpose({ focusTerm, openHistorySearch, lookupDictionary, translateSelectedText, cancelSelectedTranslation, translateForPrefill, translateEntryForPrefill, beginBatchPrefill, endBatchPrefill, cancelPrefillTranslation, canPrefillTranslation, translationBusy })
 function listenDictionaryLayout() {
   window.addEventListener('resize', scheduleDictionaryBounds)
   document.addEventListener('scroll', scheduleDictionaryBounds, true)
@@ -529,6 +598,7 @@ onDeactivated(() => {
 })
 onActivated(() => { observeBlockingModals(); nextTick(scheduleDictionaryBounds) })
 onBeforeUnmount(() => {
+  clearSingleContextCache()
   window.removeEventListener('sckit:translation-settings-updated', onTranslationSettingsUpdated)
   window.removeEventListener('dragend', endDockDrag, true)
   window.removeEventListener('blur', endDockDrag)
@@ -986,7 +1056,7 @@ function handleAuxCustomizationAction(action: AuxCustomizationAction) {
             <form class="translation-form" @submit.prevent="translateSelectedText(translationSource, true)" @keydown.ctrl.enter.stop.prevent="translateSelectedText(translationSource, true)">
               <label for="translation-source">当前句子或选中的文本</label>
               <textarea id="translation-source" v-model="translationSource" rows="5" placeholder="输入或从编辑区右键选择文本" />
-              <div class="translation-form-actions"><button v-if="translationResult" class="button compact translation-prefill-button" type="button" aria-label="再次将译文填入编辑区译文框" title="再次将译文填入编辑区译文框" :disabled="editor.locked || editor.listBusy || editor.initializing || editor.reloadBusy" @click="emit('replace', translationResult)"><ArrowDownToLine :size="16" /></button><button class="button compact primary" :disabled="translationBusy || !translationSource.trim()" type="submit"><LoadingIndicator v-if="translationBusy" :size="13" label="正在翻译" /><Languages v-else :size="14" />{{ translationBusy ? '翻译中…' : translationProvider === 'llm' ? 'LLM 翻译并填入' : 'API 翻译并填入' }}</button><button v-if="translationBusy" class="button compact" type="button" @click="cancelSelectedTranslation"><X :size="14" />停止翻译</button></div>
+              <div class="translation-form-actions"><button v-if="translationResult" class="button compact translation-prefill-button" type="button" aria-label="再次将译文填入编辑区译文框" title="再次将译文填入编辑区译文框" :disabled="editor.locked || editor.listBusy || editor.initializing || editor.reloadBusy" @click="emit('replace', translationResult)"><ArrowDownToLine :size="16" /></button><button class="button compact primary" :disabled="translationBusy || !translationSource.trim()" type="submit"><LoadingIndicator v-if="translationBusy" :size="13" label="正在翻译" /><Languages v-else :size="14" />{{ translationBusy ? '翻译中…' : translationProvider === 'llm' ? 'LLM 翻译并填入' : 'API 翻译并填入' }}</button><button v-if="translationResult && !translationBusy" class="button compact" type="button" title="忽略本机结果缓存，重新调用翻译服务" @click="translateSelectedText(translationSource, true, true)">重新请求翻译</button><button v-if="translationBusy" class="button compact" type="button" @click="cancelSelectedTranslation"><X :size="14" />停止翻译</button></div>
             </form>
           <section class="translation-result" aria-live="polite">
             <div class="translation-result-heading"><strong>中文译文</strong><span v-if="translationApiProvider" class="subtle">{{ translationApiProvider === 'google' ? 'Google API' : translationApiProvider === 'deepl' ? 'DeepL API' : `LLM · ${translationLlmModel}` }}</span></div>
@@ -1017,7 +1087,7 @@ function handleAuxCustomizationAction(action: AuxCustomizationAction) {
           <div class="suggestion-body" @contextmenu="emit('selectionContextMenu', $event)">
             <div class="suggestion-translation">{{ suggestion.translation.replaceAll('\\n', '\n') }}</div>
             <SuggestionSource :original="suggestion.original" :current="editor.selected?.original || ''" :show-diff="!plainSources.includes(suggestion.id)" />
-            <div class="suggestion-meta"><span v-if="suggestion.stage === 2" class="stage-badge stage-2">有疑问</span><span v-if="suggestion.updatedAt">于 {{ displayDate(suggestion.updatedAt) }} </span><span v-if="suggestion.user">由 {{ suggestion.user.nickname || suggestion.user.username }} </span><span>来自 </span><button class="suggestion-origin" :disabled="!editor.desktop" :title="suggestion.key" @click="openSuggestion(suggestion)">{{ suggestion.project?.name || editor.project.name }}<span v-if="suggestion.file?.name"> / {{ suggestion.file.name }}</span></button><span> · {{ editor.project.dest }}</span><div v-if="!suggestion.file?.name" class="suggestion-key" :title="suggestion.key">{{ suggestion.key }}</div><button class="suggestion-occurrences" @click="lookup(suggestion)">显示所有出现的情况</button></div>
+            <div class="suggestion-meta"><span v-if="suggestion.stage === 2" class="stage-badge stage-2">有疑问</span><span v-if="suggestion.updatedAt">于 {{ displayDate(suggestion.updatedAt) }} </span><span v-if="suggestion.user">由 {{ suggestion.user.nickname || suggestion.user.username }} </span><span>来自 </span><button class="suggestion-origin" :disabled="!editor.connected || navigation.blocked" :title="`在本地编辑器中定位 ${suggestion.key}`" @click="openSuggestion(suggestion)">{{ suggestion.project?.name || editor.project.name }}<span v-if="suggestion.file?.name"> / {{ suggestion.file.name }}</span></button><span> · {{ editor.project.dest }}</span><div v-if="!suggestion.file?.name" class="suggestion-key" :title="suggestion.key">{{ suggestion.key }}</div><button class="suggestion-occurrences" :disabled="!editor.connected || navigation.blocked" title="在本地编辑器中查看所有文件、所有状态的匹配词条" @click="showOccurrences(suggestion)">显示所有出现的情况</button></div>
           </div>
           <div class="suggestion-actions"><button class="icon-button small" :aria-label="`切换建议 ${index + 1} 的原文差异`" :aria-pressed="!plainSources.includes(suggestion.id)" :title="plainSources.includes(suggestion.id) ? '显示与当前原文的差异' : '显示建议原文'" @click="toggleDiff(suggestion.id)"><GitCompareArrows :size="15" /></button><button class="icon-button small" :disabled="!suggestion.translation || editor.locked" :aria-label="`使用建议 ${index + 1}`" title="使用此译文" @click="emit('replace', suggestion.translation)"><ArrowDownToLine :size="15" /></button><span class="memory-label">TM</span></div>
         </article>

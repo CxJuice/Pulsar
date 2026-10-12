@@ -346,7 +346,7 @@ onActivated(() => { if (loadedTranslationConfig.value) void loadTranslationSetti
           <section class="translation-settings-section" aria-labelledby="translation-behavior-heading">
             <header class="translation-section-heading"><span class="translation-section-index">02</span><div><h3 id="translation-behavior-heading">翻译行为</h3><p>调整编辑器提交和全文翻译的默认行为。</p></div></header>
             <div class="translation-context-grid">
-              <label class="translation-context-option"><input v-model="translationConfig.clearAfterSaveNext" :disabled="translationBusy || !editor.desktop" type="checkbox" /><span><strong>提交并下一条后清空译文框</strong><small>清空下一条的显示内容；已有本地草稿会保留，且不会因此提交空译文。</small></span></label>
+              <label class="translation-context-option"><input v-model="translationConfig.clearAfterSaveNext" :disabled="translationBusy || !editor.desktop" type="checkbox" /><span><strong>下一条为空时清空译文框</strong><small>下一条已有译文或本地草稿会自动加载；仅在没有译文和草稿时清空显示。</small></span></label>
               <label class="translation-context-option"><input v-model="translationConfig.useTermTranslations" :disabled="translationBusy || !editor.desktop" type="checkbox" /><span><strong>Google / DeepL 翻译时保留项目译名</strong><small>默认开启；翻译前先替换已登记术语。LLM 使用下方“项目术语”上下文设置。</small></span></label>
             </div>
           </section>

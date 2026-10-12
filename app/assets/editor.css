@@ -172,6 +172,7 @@
 @container workspace-content (max-width:560px) { .appearance-accent-grid { grid-template-columns:minmax(0,1fr); } }
 @container workspace-content (max-width:850px) { .appearance-accent-row>div:first-child { flex:0 1 auto;min-width:0; } .appearance-accent-grid { width:100%;flex:0 1 auto; } }
 .row-content:focus-visible { outline:2px solid var(--accent);outline-offset:2px;border-radius:3px; }
+.row-file { grid-column:1 / -1;display:block;font-size:10px;line-height:1.6;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
 .occupancy-badge>span:not(:first-of-type) { flex-shrink:0; white-space:nowrap; }
 .source-heading { height:34px;flex-wrap:nowrap; }
 .source-heading-title { display:flex;align-items:center;gap:8px;flex:1;min-width:0;white-space:nowrap; }

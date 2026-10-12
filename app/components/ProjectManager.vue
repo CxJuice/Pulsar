@@ -7,7 +7,6 @@ import { fileCompletionPercent } from '~/utils/fileSort'
 const props = defineProps<{ editor: UnwrapNestedRefs<ReturnType<typeof useEditor>> }>()
 const emit = defineEmits<{ close: []; connect: []; pending: [value: boolean] }>()
 const root = ref<HTMLElement>()
-const route = useRoute()
 const navigation = inject<import('~/composables/useWorkspaceNavigation').WorkspaceNavigation>('workspace-navigation')!
 let active = true
 const positions = new Map<number, number>()
@@ -24,7 +23,6 @@ const saving = ref(false)
 const { folderOpen, toggleFolder, expandFolders, collapseFolders, chooseFile } = navigation
 function inspectProject(id: number) { return navigation.inspectProject(id, true) }
 const editProject = ref(false), editFile = ref<FileInfo | null>(null), name = ref(''), description = ref('')
-const showTextEditor = ref(false), textEditorPending = ref(false)
 const canManage = computed(() => props.editor.connected && props.editor.sessionInfo.authenticated && (projects.value.find(entry => entry.id === browse.value.id)?.permission || 0) >= 3)
 const folderCount = computed(() => fileGroups.value.filter(([folder]) => folder !== '').length)
 const allFoldersExpanded = computed(() => fileGroups.value.filter(([folder]) => folder !== '').every(([folder]) => folderOpen(folder)))
@@ -56,24 +54,11 @@ async function saveDetails() {
   finally { saving.value = false }
 }
 function external(kind: 'project' | 'file', file?: FileInfo) { window.scKit?.openExternal(`https://paratranz.cn/projects/${browse.value.id}/${kind === 'file' ? `strings?file=${file!.id}` : ''}`) }
-watch([saving, textEditorPending], ([details, text]) => emit('pending', details || text), { immediate: true })
-watch(() => route.path, path => { if (path !== '/') showTextEditor.value = false })
+watch(saving, value => emit('pending', value), { immediate: true })
 watch(() => browse.value.id, (_id, old) => { if (active) { rememberScroll(old); restoreScroll() } cancelEdit(); notice.value = '' })
-function updateProjectFiles(updated: FileInfo[]) {
-  files.value = updated
-  if (props.editor.project.id === browse.value.id) {
-    props.editor.files = updated
-    props.editor.file = updated.find(file => file.id === props.editor.fileId) || props.editor.file
-  }
-}
 async function openTextEditor() {
   if (saving.value || busy.value) return
-  saving.value = true; error.value = ''; notice.value = ''
-  try {
-    await props.editor.flushDraft(true)
-    showTextEditor.value = true
-  } catch (reason) { error.value = (reason as Error).message }
-  finally { saving.value = false }
+  await navigation.chooseFile({ ...props.editor.aggregateFile, project: browse.value.id })
 }
 async function importLegacyDrafts() {
   if (saving.value || busy.value) return
@@ -86,7 +71,7 @@ async function importLegacyDrafts() {
 <template>
   <section ref="root" class="project-manager" aria-label="项目与文件管理" @keydown.ctrl.s.prevent.stop="(editFile || editProject) && saveDetails()">
     <header class="manager-header"><div><h1>项目主页</h1></div><div class="manager-header-actions"><span class="manager-session"><span class="online-dot" :class="{ offline: !editor.connected }"></span>{{ editor.initializing ? '正在恢复登录…' : editor.connected ? (editor.sessionInfo.authenticated ? '已连接 ParaTranz' : '登录已过期') : '未连接' }}</span><button v-if="editor.workspaceReady" class="button" :disabled="navigation.blocked" @click="emit('close')"><ArrowRight :size="16" />继续翻译</button><button v-if="!editor.connected" class="button primary" :disabled="editor.initializing" @click="emit('connect')">连接 ParaTranz</button></div></header>
-    <div v-show="!showTextEditor" class="manager-body">
+    <div class="manager-body">
       <main class="manager-files" aria-label="项目文件管理" :aria-busy="busy || saving">
         
         <div v-if="error" class="sidebar-message error" role="alert">{{ error }}</div><div v-if="notice" class="sidebar-message" role="status"><Check :size="14" />{{ notice }}</div>
@@ -96,7 +81,7 @@ async function importLegacyDrafts() {
         
         <div v-else :key="browse.id" class="manager-project-content">
         
-        <div class="sidebar-project-summary"><div class="manager-project-heading"><h2>{{ browse.name }}</h2><div><button class="button compact primary" :disabled="busy || saving" @click="openTextEditor"><FileText :size="14" />编辑全部文本</button><button class="button compact" :disabled="busy || saving || !canManage" :title="canManage ? '修改项目名称与说明' : '需要项目管理员权限'" @click="beginProjectEdit"><Pencil :size="14" />修改项目资料</button><button class="button compact" aria-label="在 ParaTranz 查看项目" :disabled="!editor.desktop" @click="external('project')"><ExternalLink :size="13" />ParaTranz</button></div></div><div><span>#{{ browse.id }} · {{ browse.source }} → {{ browse.dest }}</span></div><p v-if="browse.desc">{{ browse.desc }}</p><div class="sidebar-project-totals"><span><strong>{{ files.length.toLocaleString() }}</strong> 个文件</span><span><strong>{{ totals.total.toLocaleString() }}</strong> 条词条</span><span><strong>{{ totals.translated.toLocaleString() }}</strong> 已翻译</span></div></div>
+        <div class="sidebar-project-summary"><div class="manager-project-heading"><h2>{{ browse.name }}</h2><div><button class="button compact primary" :disabled="busy || saving || !editor.connected || !editor.sessionInfo.authenticated" title="在聚合视图中编辑此项目全部文件" @click="openTextEditor"><FileText :size="14" />编辑全部文本</button><button class="button compact" :disabled="busy || saving || !canManage" :title="canManage ? '修改项目名称与说明' : '需要项目管理员权限'" @click="beginProjectEdit"><Pencil :size="14" />修改项目资料</button><button class="button compact" aria-label="在 ParaTranz 查看项目" :disabled="!editor.desktop" @click="external('project')"><ExternalLink :size="13" />ParaTranz</button></div></div><div><span>#{{ browse.id }} · {{ browse.source }} → {{ browse.dest }}</span></div><p v-if="browse.desc">{{ browse.desc }}</p><div class="sidebar-project-totals"><span><strong>{{ files.length.toLocaleString() }}</strong> 个文件</span><span><strong>{{ totals.total.toLocaleString() }}</strong> 条词条</span><span><strong>{{ totals.translated.toLocaleString() }}</strong> 已翻译</span></div></div>
         <Transition name="panel"><form v-if="editProject || editFile" class="sidebar-edit" @submit.prevent="saveDetails"><strong>{{ editFile ? '重命名 / 移动文件' : '修改项目资料' }}</strong><label for="sidebar-edit-name">{{ editFile ? '完整文件路径（使用 / 分隔）' : '项目名称' }}</label><input id="sidebar-edit-name" v-model="name" :disabled="saving" required :maxlength="editFile ? 1000 : 500" /><template v-if="editProject"><label for="sidebar-project-desc">项目说明</label><textarea id="sidebar-project-desc" v-model="description" :disabled="saving" rows="4" maxlength="50000" /></template><div><button type="button" class="button compact" :disabled="saving" @click="cancelEdit">取消</button><button class="button compact primary" :disabled="saving || !name.trim()"><LoadingIndicator v-if="saving" :size="13" label="正在保存项目资料" />{{ saving ? '保存中…' : '保存修改' }}</button></div></form></Transition>
         <div class="manager-files-heading"><div><h3>项目文件</h3></div><span>{{ files.length }} 个文件</span></div>
         <div class="manager-file-toolbar"><label class="sidebar-search"><Search :size="14" /><input id="manager-file-search" v-model="fileSearch" placeholder="搜索文件名或目录" aria-label="搜索项目文件" /></label><button class="button compact" aria-label="刷新项目文件" :disabled="editor.initializing || busy || saving" @click="inspectProject(browse.id)"><RefreshCw :size="14" :class="{ spin: busy }" />刷新</button><button class="button compact" :disabled="!folderCount || allFoldersExpanded || !!fileSearch.trim()" @click="expandFolders"><ChevronsDown :size="14" />展开文件夹</button><button class="button compact" :disabled="!folderCount || !anyFolderExpanded || !!fileSearch.trim()" @click="collapseFolders"><ChevronsUp :size="14" />折叠文件夹</button></div>
@@ -106,6 +91,5 @@ async function importLegacyDrafts() {
         </div></Transition>
       </main>
     </div>
-    <ProjectTextEditor v-if="projectChosen" :editor="editor" :project="browse" :open="showTextEditor" @close="showTextEditor = false" @pending="textEditorPending = $event" @files-updated="updateProjectFiles" />
   </section>
 </template>

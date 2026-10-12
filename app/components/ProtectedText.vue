@@ -6,14 +6,16 @@ const props = defineProps<{ text: string; breaks?: boolean; interactive?: boolea
 const emit = defineEmits<{ insert: [token: string]; term: [terms: Term[], position: { x: number; y: number; focus: boolean }] }>()
 const termRecognitionEnabled = inject<Ref<boolean>>('workspace-term-recognition')!
 const termExemptionPatterns = inject<Ref<RegExp[]>>('workspace-term-exemption-patterns')!
-const unresolvedTermIds = computed(() => new Set((props.unresolvedTerms || []).map((_, index) => -index - 1)))
+const unresolvedTermIds = computed(() => new Set((props.unresolvedTerms || []).flatMap((entry, index) => entry.sourceType === '归档' ? [] : [-index - 1])))
 const recognizedTerms = computed(() => [
   ...(termRecognitionEnabled.value ? props.terms || [] : []),
   ...(props.unresolvedTerms || []).map((entry, index): Term => ({
     id: -index - 1,
     term: entry.source,
-    translation: '',
-    note: `译名未定 · 正在${entry.sourceType}；候选：${entry.candidates.join('、') || '暂无'}`,
+    translation: entry.sourceType === '归档' ? entry.candidates[0] || '' : '',
+    note: entry.sourceType === '归档'
+      ? `译名已归档：${entry.candidates[0] || '暂无'}（${entry.category}）`
+      : `译名未定 · 正在${entry.sourceType}；候选：${entry.candidates.join('、') || '暂无'}`,
   })),
 ])
 const describeTerms = (terms: Term[]) => termDescription(terms, termExemptionPatterns.value)
