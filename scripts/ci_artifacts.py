@@ -27,6 +27,13 @@ def architectures(path: Path, platform: str) -> set[str]:
             if pe[:4] != b'PE\0\0':
                 raise ValueError(f'Invalid PE header: {path}')
             return { {0x8664: 'x64', 0xAA64: 'arm64'}.get(struct.unpack_from('<H', pe, 4)[0], 'unknown') }
+        if platform == 'linux':
+            if header[:4] != b'\x7fELF' or len(header) < 20 or header[4] != 2:
+                raise ValueError(f'Not a 64-bit ELF executable: {path}')
+            if header[5] not in (1, 2):
+                raise ValueError(f'Invalid ELF byte order: {path}')
+            endian = '<' if header[5] == 1 else '>'
+            return { {62: 'x64', 183: 'arm64'}.get(struct.unpack_from(endian + 'H', header, 18)[0], 'unknown') }
         machines = {0x01000007: 'x64', 0x0100000C: 'arm64'}
         magic = header[:4]
         if magic in (b'\xca\xfe\xba\xbe', b'\xca\xfe\xba\xbf', b'\xbe\xba\xfe\xca', b'\xbf\xba\xfe\xca'):
@@ -56,9 +63,9 @@ def main() -> None:
         # macOS ad-hoc signing changes the bundled Mach-O signature.
         if platform != 'mac' and digest(path) != digest(source):
             raise RuntimeError(f'Packaged Rust service differs from build: {path}')
-    suffixes = {'win': ('.exe', '.zip'), 'mac': ('.dmg', '.zip')}[platform]
+    suffixes = {'win': ('.exe', '.zip'), 'mac': ('.dmg', '.zip'), 'linux': ('.AppImage', '.deb', '.rpm', '.tar.gz')}[platform]
     packages = sorted(path for path in OUTPUT.iterdir() if path.is_file() and path.name.startswith('ScTranslateKit-') and path.name.endswith(suffixes) and '__uninstaller' not in path.name)
-    expected_count = {'win': 3, 'mac': 2}[platform]
+    expected_count = {'win': 3, 'mac': 2, 'linux': 4}[platform]
     if len(packages) != expected_count:
         raise RuntimeError(f'Expected {expected_count} packages; found {len(packages)}')
     DESTINATION.mkdir(parents=True, exist_ok=True)

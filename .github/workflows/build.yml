@@ -1,4 +1,4 @@
-name: Build Windows and macOS desktop versions
+name: Build Windows, macOS, and Linux desktop versions
 
 on:
   push:
@@ -25,6 +25,8 @@ jobs:
         include:
           - { platform: win, arch: x64, runner: windows-2025, rust: x86_64-pc-windows-msvc }
           - { platform: mac, arch: universal, runner: macos-15, rust: universal }
+          - { platform: linux, arch: x64, runner: ubuntu-24.04, rust: x86_64-unknown-linux-gnu }
+          - { platform: linux, arch: arm64, runner: ubuntu-24.04-arm, rust: aarch64-unknown-linux-gnu }
     defaults:
       run:
         shell: bash
@@ -32,6 +34,7 @@ jobs:
       CI_PLATFORM: ${{ matrix.platform }}
       CI_ARCH: ${{ matrix.arch }}
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      BUILD_NUMBER: ${{ github.run_number }}
       CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -41,18 +44,13 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-      - name: Check release version
+      - name: Prepare build version
+        run: python scripts/prepare_build_version.py
+      - name: Install Linux packaging tools
+        if: github.event_name == 'workflow_dispatch' && matrix.platform == 'linux'
         run: |
-          python - <<'PY'
-          import json, os
-          version = json.load(open('package.json', encoding='utf-8'))['version']
-          ref = os.environ['GITHUB_REF']
-          if ref.startswith('refs/tags/') and ref != f'refs/tags/v{version}':
-              raise SystemExit('Tag must match package.json version')
-          if os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch':
-              from scripts.publish_release import release_tag
-              release_tag(version)
-          PY
+          sudo apt-get update
+          sudo apt-get install -y rpm libarchive-tools
       - name: Install dependencies
         run: npm ci
       - name: Check desktop state and proxy behavior
@@ -98,6 +96,12 @@ jobs:
           fi
       - name: Build frontend
         run: npm run generate
+      - name: Install Chromium for interaction regression
+        if: matrix.platform == 'linux' && matrix.arch == 'x64'
+        run: npx playwright install --with-deps chromium
+      - name: Test Linux browser workspace smoke with local fixture
+        if: matrix.platform == 'linux' && matrix.arch == 'x64'
+        run: python -c "import scripts.ui_smoke as smoke; raise SystemExit(smoke.main([smoke.UI_CHECK]))"
       - name: Record build source
         run: node scripts/write-build-info.mjs
       - name: Package application
@@ -106,6 +110,7 @@ jobs:
           case "$CI_PLATFORM" in
             win) npx electron-builder --win nsis portable zip --${{ matrix.arch }} --publish never --config.directories.output=release/ci ;;
             mac) npx electron-builder --mac dmg zip --${{ matrix.arch }} --publish never --config.directories.output=release/ci ;;
+            linux) npx electron-builder --linux AppImage deb rpm tar.gz --${{ matrix.arch }} --publish never --config.directories.output=release/ci ;;
           esac
       - name: Collect packages and checksums
         if: github.event_name == 'workflow_dispatch'

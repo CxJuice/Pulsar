@@ -12,6 +12,8 @@ ASSETS = ROOT / 'release-assets'
 COMBINATIONS = {
     ('win', 'x64'): 3,
     ('mac', 'universal'): 2,
+    ('linux', 'x64'): 4,
+    ('linux', 'arm64'): 4,
 }
 
 
@@ -60,7 +62,7 @@ def collect_assets(version: str, commit: str) -> list[Path]:
                 raise RuntimeError(f'Checksum file mismatch: {name}')
             names.update((name, checksum.name))
     if combinations != set(COMBINATIONS):
-        raise RuntimeError('Both Windows x64 and macOS universal builds are required')
+        raise RuntimeError('Windows x64, macOS universal, and Linux x64/ARM64 builds are required')
     if {path.name for path in ASSETS.iterdir()} != names:
         raise RuntimeError('Unexpected files in release assets')
     return [ASSETS / name for name in sorted(names)]
@@ -91,8 +93,9 @@ def cleanup_run_artifacts(repository: str, run_id: str) -> None:
 
 
 def main() -> None:
-    version = json.loads((ROOT / 'package.json').read_text(encoding='utf-8'))['version']
-    tag = release_tag(version)
+    base_version = json.loads((ROOT / 'package.json').read_text(encoding='utf-8'))['version']
+    tag = release_tag(base_version)
+    version = tag.removeprefix('v')
     commit = os.environ['GITHUB_SHA']
     repository = os.environ['GH_REPO']
     assets = collect_assets(version, commit)
@@ -102,16 +105,17 @@ def main() -> None:
     notes = ROOT / 'release-notes.md'
     run_url = f'https://github.com/{repository}/actions/runs/{os.environ["GITHUB_RUN_ID"]}'
     changelog = (ROOT / 'CHANGELOG.md').read_text(encoding='utf-8')
-    section = re.search(rf'(?ms)^## {re.escape(version)}\s*\n(.*?)(?=^## |\Z)', changelog)
+    section = re.search(rf'(?ms)^## {re.escape(base_version)}\s*\n(.*?)(?=^## |\Z)', changelog)
     if not section:
-        raise RuntimeError(f'CHANGELOG.md has no entry for {version}')
+        raise RuntimeError(f'CHANGELOG.md has no entry for {base_version}')
     notes.write_text(
         f'手动触发 Actions 构建发布，源码提交：`{commit}`。\n\n'
         f'{section.group(1).strip()}\n\n'
         f'[构建记录]({run_url})\n\n'
         '- Windows：x64（安装 EXE、便携 EXE、ZIP）\n'
         '- macOS：Universal，包含 Intel x64 和 Apple Silicon ARM64（DMG、ZIP）\n\n'
-        '共 5 个分发包，附带 SHA256 校验文件及构建清单。\n\n'
+        '- Linux：x64、ARM64（AppImage、DEB、RPM、tar.gz）\n\n'
+        '共 13 个分发包，版本号包含递增的 GitHub Actions 构建号，附带 SHA256 校验文件及构建清单。\n\n'
         'Windows 包未签名；macOS 使用临时签名，未经过 Apple 公证。'
         '编译与打包已完成，各平台安装运行尚未验证。\n', encoding='utf-8')
     existing = subprocess.run(['gh', 'release', 'view', tag, '--json', 'isDraft,isImmutable,targetCommitish'], text=True, capture_output=True)
@@ -146,7 +150,7 @@ def main() -> None:
     summary = os.environ.get('GITHUB_STEP_SUMMARY')
     if summary:
         with Path(summary).open('a', encoding='utf-8') as stream:
-            stream.write(f'## 手动 Release 已发布\n\n[{tag}]({url})\n\nWindows x64 与 macOS Universal，5 个分发包，SHA256 与构建清单齐全。\n')
+            stream.write(f'## 手动 Release 已发布\n\n[{tag}]({url})\n\nWindows x64、macOS Universal、Linux x64/ARM64，共 13 个分发包；SHA256 与构建清单齐全。\n')
     print(f'Published {len(assets)} assets: {url}')
 
 

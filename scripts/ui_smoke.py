@@ -29,11 +29,22 @@ NODE = shutil.which("node")
 UI_CHECK = r'''async (page) => {
   await page.getByRole('button', { name: /审计测试项目 #4242/ }).click();
   await page.getByRole('button', { name: '编辑全部文本' }).click();
-  const waitWorkspace = async fileId => page.waitForFunction(fileId => {
-    const workspace = JSON.parse(localStorage.getItem('sckit-workspace'));
-    return workspace?.projectId === 4242 && workspace.fileId === fileId
-      && document.querySelector('.string-list')?.getAttribute('aria-busy') === 'false';
-  }, fileId);
+  const waitWorkspace = async fileId => {
+    const ready = await page.waitForFunction(fileId => {
+      const workspace = JSON.parse(localStorage.getItem('sckit-workspace'));
+      return workspace?.projectId === 4242 && workspace.fileId === fileId
+        && document.querySelector('.string-list')?.getAttribute('aria-busy') === 'false';
+    }, fileId, { timeout: 10000 }).then(() => true).catch(() => false);
+    if (!ready) {
+      const state = await page.evaluate(() => ({
+        workspace: localStorage.getItem('sckit-workspace'),
+        busy: document.querySelector('.string-list')?.getAttribute('aria-busy'),
+        footer: document.querySelector('.list-footer')?.textContent,
+        requests: JSON.parse(document.documentElement.dataset.auditCalls || '[]').filter(call => call.action === 'strings').slice(-4).map(call => call.payload),
+      }));
+      throw new Error('Workspace did not settle: ' + JSON.stringify({ expectedFileId: fileId, ...state }));
+    }
+  };
   await waitWorkspace(0);
   const aggregateRows = page.locator('.string-list .string-row');
   if (await aggregateRows.count() !== 50) throw new Error('Edit all did not open the paginated aggregate workspace');
@@ -44,10 +55,30 @@ UI_CHECK = r'''async (page) => {
   await filePicker.click();
   await page.getByRole('option', { name: 'audit.strings', exact: true }).click();
   await waitWorkspace(42420);
+  await page.getByRole('combobox', { name: '搜索范围', exact: true }).click();
+  await page.getByRole('option', { name: '键值', exact: true }).click();
   await page.getByRole('combobox', { name: '词条状态', exact: true }).click();
   await page.getByRole('option', { name: '所有状态' }).click();
   await page.getByRole('textbox', { name: '搜索字符串' }).fill('KEY_003');
-  await page.getByRole('listbox', { name: '待翻译字符串' }).getByRole('option', { name: /KEY_003/ }).waitFor();
+  const searchApplied = await page.waitForFunction(() => {
+    const list = document.querySelector('.string-list');
+    const rows = list?.querySelectorAll('[role="option"]');
+    return list?.getAttribute('aria-busy') === 'false' && rows?.length === 1
+      && rows[0]?.querySelector('.row-content')?.getAttribute('aria-label') === '打开词条 KEY_003';
+  }, null, { timeout: 10000 }).then(() => true).catch(() => false);
+  if (!searchApplied) {
+    const state = await page.evaluate(() => ({
+      query: document.querySelector('#string-search')?.value,
+      scope: document.querySelector('[aria-label="搜索范围"]')?.textContent,
+      busy: document.querySelector('.string-list')?.getAttribute('aria-busy'),
+      rows: [...document.querySelectorAll('.string-list [role="option"]')].map(row => row.textContent?.trim()),
+      footer: document.querySelector('.list-footer')?.textContent,
+      error: document.querySelector('.error-banner')?.textContent,
+      requests: JSON.parse(document.documentElement.dataset.auditCalls || '[]').filter(call => call.action === 'strings').slice(-4).map(call => call.payload),
+    }));
+    throw new Error('Search results did not settle: ' + JSON.stringify(state));
+  }
+  await page.getByRole('button', { name: '打开词条 KEY_003', exact: true }).click();
   await page.waitForFunction(() => !!document.querySelector('.string-list [role="option"][aria-selected="true"] .row-content[aria-label="打开词条 KEY_003"]'));
   await page.getByRole('button', { name: '清除搜索' }).click();
   await page.getByText('2 / 2', { exact: true }).first().waitFor();
