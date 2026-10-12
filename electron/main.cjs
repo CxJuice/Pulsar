@@ -914,11 +914,11 @@ async function prepareTranslatorSession() {
   translatorSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
   return translatorSession;
 }
-async function serviceRequest(endpoint, method = 'POST', body) {
+async function serviceRequest(endpoint, method = 'POST', body, signal) {
   try {
     const response = await fetch(`${serviceUrl}${endpoint}`, {
       method, headers: { 'X-ScKit-Key': serviceKey, 'Content-Type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(60000),
+      body: body === undefined ? undefined : JSON.stringify(body), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(60000)]) : AbortSignal.timeout(60000),
     });
     const data = await response.json();
     const counts = endpoint === '/rpc/strings' && response.ok
@@ -1150,6 +1150,7 @@ async function login(project, presenceOnly = false) {
   });
 }
 function registerIpc() {
+  const cancellableRequests = new Map();
   ipcMain.handle('sc:build-info', event => {
     validateSender(event);
     try { return JSON.parse(fs.readFileSync(path.join(app.getAppPath(), '.output/public/build-info.json'), 'utf8')); }
@@ -1171,10 +1172,24 @@ function registerIpc() {
       (target.stringId !== null && (!Number.isSafeInteger(target.stringId) || target.stringId <= 0 || target.stringId > 2147483647))) return { ok: false, message: '占用参数无效' };
     return { ok: true, data: await presence.set(target) };
   });
-  ipcMain.handle('sc:request', async (event, action, payload) => {
+  ipcMain.handle('sc:request', async (event, action, payload, requestId) => {
     validateSender(event);
     if (!actions.has(action) || !payload || typeof payload !== 'object' || Array.isArray(payload)) return { ok: false, message: '无效的服务操作' };
-    return serviceRequest(`/rpc/${action}`, 'POST', payload);
+    if (requestId === undefined) return serviceRequest(`/rpc/${action}`, 'POST', payload);
+    if (action !== 'strings' || typeof requestId !== 'string' || !/^[a-zA-Z0-9-]{1,64}$/.test(requestId)) return { ok: false, message: '无效的取消请求标识' };
+    const key = `${event.sender.id}:${requestId}`;
+    if (cancellableRequests.has(key)) return { ok: false, message: '重复的请求标识' };
+    const controller = new AbortController();
+    cancellableRequests.set(key, controller);
+    try { return await serviceRequest(`/rpc/${action}`, 'POST', payload, controller.signal); }
+    finally { cancellableRequests.delete(key); }
+  });
+  ipcMain.handle('sc:request-cancel', (event, requestId) => {
+    validateSender(event);
+    if (typeof requestId !== 'string' || !/^[a-zA-Z0-9-]{1,64}$/.test(requestId)) return { ok: false, message: '无效的取消请求标识' };
+    const controller = cancellableRequests.get(`${event.sender.id}:${requestId}`);
+    if (controller) controller.abort();
+    return { ok: true };
   });
   ipcMain.handle('sc:connect', async (event, token, remember, project) => {
     validateSender(event);

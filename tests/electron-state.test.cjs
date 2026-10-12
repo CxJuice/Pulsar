@@ -47,7 +47,7 @@ function harness(t, overrides = {}) {
       return requireFromMain(name);
     },
     process: { argv: [], env: overrides.env || {}, platform: 'win32' },
-    __dirname: path.dirname(mainPath), Buffer, URL, AbortSignal,
+    __dirname: path.dirname(mainPath), Buffer, URL, AbortSignal, AbortController,
     setTimeout, clearTimeout, fetch: overrides.fetch || fetch,
   });
   vm.runInContext(source, context, { filename: mainPath });
@@ -240,4 +240,27 @@ test('translation request rejects when a response disconnects before its body co
     ]),
     /翻译服务响应中途断开/,
   );
+});
+
+test('canceling one list request aborts it without affecting another sender', async t => {
+  const signals = [];
+  const h = harness(t, {
+    fetch: (_url, options) => new Promise(resolve => {
+      signals.push(options.signal);
+      options.signal.addEventListener('abort', () => resolve({ ok: false, status: 499, json: async () => ({ message: 'canceled' }) }), { once: true });
+    }),
+  });
+  h.run('validateSender = () => {}; serviceUrl = "http://127.0.0.1:12345"; registerIpc()');
+  const request = h.ipcHandlers.get('sc:request');
+  const cancel = h.ipcHandlers.get('sc:request-cancel');
+  const first = request({ sender: { id: 1 } }, 'strings', { page: 1 }, 'list-1');
+  const second = request({ sender: { id: 2 } }, 'strings', { page: 1 }, 'list-1');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(signals.length, 2);
+  assert.equal(cancel({ sender: { id: 1 } }, 'list-1').ok, true);
+  assert.equal(signals[0].aborted, true);
+  assert.equal(signals[1].aborted, false);
+  assert.equal((await first).status, 499);
+  cancel({ sender: { id: 2 } }, 'list-1');
+  assert.equal((await second).status, 499);
 });

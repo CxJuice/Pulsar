@@ -2,7 +2,7 @@
 import { ArrowLeft, ChevronLeft, ChevronRight, FileText, LoaderCircle, Save, Search, X } from 'lucide-vue-next'
 import type { UnwrapNestedRefs } from 'vue'
 import type { useEditor } from '~/composables/useEditor'
-import type { FileInfo, ProjectInfo, StringItem, StringPage } from '~/types/editor'
+import type { FileInfo, ProjectInfo, StringItem, StringPage, Term } from '~/types/editor'
 import { toEditorText, toParaTranzText } from '~/utils/translationText'
 import { stageLabels } from '~/utils/text'
 import { qualityIssues } from '~/utils/quality'
@@ -18,6 +18,11 @@ type WorkRow = {
   error: string
   draftState: 'saved' | 'pending' | ''
   draftUpdatedAt: string
+  terms?: Term[]
+  termsBusy: boolean
+  termsError: string
+  termsGeneration: number
+  termsRequest?: Promise<void>
 }
 
 const props = defineProps<{ editor: EditorState; project: ProjectInfo; open: boolean }>()
@@ -50,6 +55,7 @@ function dialogKeydown(event: KeyboardEvent) {
 }
 const refreshingFiles = ref(false)
 const error = ref(''), searchTimer = ref<ReturnType<typeof setTimeout>>()
+const batchSummary = ref('')
 const workById = reactive(new Map<number, WorkRow>())
 const draftTimers = new Map<number, ReturnType<typeof setTimeout>>()
 const draftWrites = new Map<number, Promise<void>>()
@@ -71,12 +77,32 @@ function isLocked(row: WorkRow) { return row.base.stage === 9 || row.base.stage 
 function isDirty(row: WorkRow) {
   return toParaTranzText(row.translation) !== toParaTranzText(row.base.translation) || row.stage !== row.base.stage
 }
-function rowQualityIssues(row: WorkRow) { return isDirty(row) ? qualityIssues(row.base.original, row.translation, row.base.key) : [] }
+function rowQualityIssues(row: WorkRow) { return isDirty(row) ? qualityIssues(row.base.original, row.translation, row.base.key, row.terms || []) : [] }
+async function ensureRowTerms(row: WorkRow) {
+  if (row.terms) return
+  if (row.termsRequest) return row.termsRequest
+  const generation = ++row.termsGeneration
+  row.termsBusy = true; row.termsError = ''
+  const request = props.editor.termsFor(row.base).then(terms => {
+    if (row.termsGeneration === generation) row.terms = terms
+  }).catch(reason => {
+    if (row.termsGeneration === generation) row.termsError = '术语检查暂不可用：' + (reason as Error).message
+  }).finally(() => {
+    if (row.termsGeneration === generation) { row.termsBusy = false; row.termsRequest = undefined }
+  })
+  row.termsRequest = request
+  return request
+}
+function invalidateRowTerms(row: WorkRow) {
+  row.termsGeneration++
+  row.terms = undefined; row.termsBusy = false; row.termsRequest = undefined; row.termsError = ''
+}
 function fileName(item: StringItem) { return item.file?.name || props.editor.files.find(file => file.id === item.fileId)?.name || '文件 ' + (item.fileId || '') }
 function rowFor(item: StringItem): WorkRow {
   const existing = workById.get(item.id)
   if (existing) {
     if (!isDirty(existing)) {
+      if (existing.base.original !== item.original) invalidateRowTerms(existing)
       existing.base = item
       existing.translation = toEditorText(item.translation)
       existing.stage = item.stage
@@ -95,8 +121,13 @@ function rowFor(item: StringItem): WorkRow {
     error: '',
     draftState: draft ? 'saved' : '',
     draftUpdatedAt: draft?.updatedAt || '',
+    terms: undefined,
+    termsBusy: false,
+    termsError: '',
+    termsGeneration: 0,
   }
   workById.set(item.id, row)
+  if (draft && isDirty(row)) void ensureRowTerms(row)
   return row
 }
 
@@ -131,6 +162,7 @@ function updateRow(row: WorkRow) {
   row.translation = toEditorText(row.translation)
   if (row.base.stage === 0) row.stage = row.translation.trim() ? 1 : 0
   row.error = ''
+  if (isDirty(row)) void ensureRowTerms(row)
   if (!isDirty(row)) {
     clearTimeout(draftTimers.get(row.base.id))
     draftTimers.delete(row.base.id)
@@ -220,6 +252,7 @@ async function saveRow(row: WorkRow, refreshWorkspace = true) {
   const draftVersion = row.draftUpdatedAt
   row.saving = true; row.error = ''
   try {
+    await ensureRowTerms(row)
     if (isDirty(row)) await persistDraft(row)
     const saved = await props.editor.api<StringItem>('save', {
       projectId: row.projectId, stringId: base.id, translation, stage, expectedUserId: accountId,
@@ -270,8 +303,19 @@ async function saveAll() {
     batch.some(row => (row.base.fileId || row.base.file?.id) === props.editor.fileId)
   savingAll.value = true
   let savedCount = 0
+  const qaRows: string[] = [], failedRows: string[] = []
+  batchSummary.value = ''
   try {
-    for (const row of batch) if (await saveRow(row, false)) savedCount++
+    for (const row of batch) {
+      await ensureRowTerms(row)
+      const label = row.base.key || '#' + row.base.id
+      if (rowQualityIssues(row).length || row.termsError) qaRows.push(label)
+      if (await saveRow(row, false)) savedCount++
+      else failedRows.push(label)
+    }
+    batchSummary.value = `已保存 ${savedCount} / ${batch.length} 条` +
+      (qaRows.length ? `；QA 提示或术语检查未完成：${qaRows.join('、')}` : '') +
+      (failedRows.length ? `；保存失败：${failedRows.join('、')}` : '')
     if (savedCount) {
       await refreshFiles()
       await loadPage()
@@ -287,6 +331,7 @@ async function reloadRemote(row: WorkRow) {
   try {
     const latest = await props.editor.api<StringItem>('string', { projectId: row.projectId, stringId: row.base.id })
     const localTranslation = row.translation, localStage = row.stage
+    if (latest.original !== row.base.original) invalidateRowTerms(row)
     row.base = latest
     row.translation = localTranslation
     row.stage = localStage
@@ -310,6 +355,7 @@ watch(() => props.project.id, () => {
   for (const row of workById.values()) if (isDirty(row)) void persistDraft(row)
   workById.clear(); rows.value = []; rowCount.value = 0; page.value = 1; pageCount.value = 1
   query.value = ''; search.value = ''; error.value = ''
+  batchSummary.value = ''
   if (props.open) void loadPage()
 })
 watch(hasPendingWork, value => emit('pending', value), { immediate: true })
@@ -339,6 +385,7 @@ onBeforeUnmount(() => {
         </div>
         <p class="project-text-hint">可搜索整个项目并编辑任意文件中的译文；未提交的修改会保存为本地草稿。锁定词条不能编辑。</p>
         <div v-if="error" class="sidebar-message error project-text-error" role="alert">{{ error }}</div>
+        <div v-if="batchSummary" class="sidebar-message project-text-error" role="status">{{ batchSummary }}</div>
         <div class="project-text-summary"><span>{{ rowCount.toLocaleString() }} 条文本</span><span>第 {{ page }} / {{ pageCount }} 页</span><span v-if="changedRows.length" class="project-text-dirty">{{ changedRows.length }} 条有未提交修改</span><span v-if="editor.requestCount" class="project-text-request">正在与 ParaTranz 同步…</span></div>
         <div class="project-text-table-wrap">
           <table class="project-text-table">
@@ -349,7 +396,7 @@ onBeforeUnmount(() => {
               <tr v-for="row in rows" :key="row.base.id" :class="{ 'project-text-row-dirty': isDirty(row), 'project-text-row-locked': isLocked(row) }">
                 <td class="project-text-key"><strong>{{ row.base.key || '#' + row.base.id }}</strong><small>{{ fileName(row.base) }}</small></td>
                 <td class="project-text-source">{{ row.base.original }}</td>
-                <td class="project-text-translation"><textarea v-model="row.translation" :aria-label="'编辑 ' + (row.base.key || row.base.id) + ' 的译文'" :disabled="busy || row.saving || row.reloading || isLocked(row) || !canEdit" rows="3" @input="updateRow(row)" /><small v-if="isLocked(row)" class="project-text-lock">此词条已锁定</small><small v-else-if="row.draftState === 'saved' && isDirty(row)" class="project-text-draft">草稿已保存</small><small v-else-if="row.draftState === 'pending' && isDirty(row)" class="project-text-draft">正在保存草稿…</small><small v-if="rowQualityIssues(row).length" class="project-text-qa" role="status">QA 提示：{{ rowQualityIssues(row).map(issue => issue.message).join('；') }}</small><small v-if="row.error" class="project-text-row-error" role="alert">{{ row.error }}</small><button v-if="hasVersionConflict(row)" class="project-text-reload" :disabled="row.reloading || row.saving" @click="reloadRemote(row)"><LoaderCircle v-if="row.reloading" class="spin" :size="12" />载入最新版本并保留此译文</button></td>
+                <td class="project-text-translation"><textarea v-model="row.translation" :aria-label="'编辑 ' + (row.base.key || row.base.id) + ' 的译文'" :disabled="busy || row.saving || row.reloading || isLocked(row) || !canEdit" rows="3" @input="updateRow(row)" /><small v-if="isLocked(row)" class="project-text-lock">此词条已锁定</small><small v-else-if="row.draftState === 'saved' && isDirty(row)" class="project-text-draft">草稿已保存</small><small v-else-if="row.draftState === 'pending' && isDirty(row)" class="project-text-draft">正在保存草稿…</small><small v-if="isDirty(row) && row.termsBusy" class="project-text-draft">正在检查术语…</small><small v-if="isDirty(row) && row.termsError" class="project-text-qa" role="status">{{ row.termsError }}</small><small v-if="rowQualityIssues(row).length" class="project-text-qa" role="status">QA 提示：{{ rowQualityIssues(row).map(issue => issue.message).join('；') }}</small><small v-if="row.error" class="project-text-row-error" role="alert">{{ row.error }}</small><button v-if="hasVersionConflict(row)" class="project-text-reload" :disabled="row.reloading || row.saving" @click="reloadRemote(row)"><LoaderCircle v-if="row.reloading" class="spin" :size="12" />载入最新版本并保留此译文</button></td>
                 <td class="project-text-action"><button class="button compact" :disabled="!isDirty(row) || row.saving || row.reloading || busy || !canEdit || isLocked(row)" :aria-label="'保存 ' + (row.base.key || row.base.id)" @click="saveOne(row)"><LoaderCircle v-if="row.saving" class="spin" :size="14" /><Save v-else :size="14" />保存</button></td>
               </tr>
             </tbody>

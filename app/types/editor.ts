@@ -116,7 +116,8 @@ export interface DesktopBridge {
   presence(target: { projectId: number; stringId: number | null }): Promise<ServiceResult<PresenceState>>
   loginPresence(project: number): Promise<ServiceResult>
   onPresence(callback: (state: PresenceState) => void): () => void
-  request<T = unknown>(action: RequestAction, payload?: Record<string, unknown>): Promise<ServiceResult<T>>
+  request<T = unknown>(action: RequestAction, payload?: Record<string, unknown>, requestId?: string): Promise<ServiceResult<T>>
+  cancelRequest(requestId: string): Promise<ServiceResult>
   connect(token: string, remember: boolean, project: number): Promise<ServiceResult<SessionStatus>>
   login(project: number): Promise<ServiceResult<SessionStatus>>
   disconnect(): Promise<ServiceResult>
