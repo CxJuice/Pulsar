@@ -69,6 +69,11 @@ export interface TranslationSettingsUpdate {
   llmContext: TranslationLlmContextSettings
   clearAfterSaveNext?: boolean; useTermTranslations?: boolean
 }
+export interface ProxyTestResult {
+  proxy: { mode: TranslationProxyMode; host: string; port: number }
+  ok: boolean
+  results: Array<{ target: string; ok: boolean; status?: number; elapsedMs: number; message?: string }>
+}
 export interface TranslationSelectionUpdate { provider?: TranslationProvider; mode?: TranslationMode }
 export interface TranslationPromptContext {
   key?: string
@@ -121,6 +126,7 @@ export interface DesktopBridge {
   auxCustomizationOverlay(state: AuxCustomizationOverlayState): void
   onAuxCustomizationAction(callback: (action: AuxCustomizationAction) => void): () => void
   getTranslationSettings(): Promise<ServiceResult<TranslationSettings>>
+  testProxy(proxy: TranslationSettingsUpdate['proxy']): Promise<ServiceResult<ProxyTestResult>>
   saveTranslationSettings(settings: TranslationSettingsUpdate): Promise<ServiceResult<TranslationSettings>>
   saveTranslationSelection(selection: TranslationSelectionUpdate): Promise<ServiceResult<TranslationSettings>>
   translateToChinese(text: string, context: TranslationPromptContext | undefined, requestId: string): Promise<ServiceResult<{ text: string; provider: TranslationProvider }>>
