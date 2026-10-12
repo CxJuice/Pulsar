@@ -92,6 +92,16 @@ function contrastRatio(first: string, second: string): number {
   return (lighter + 0.05) / (darker + 0.05)
 }
 
+function readableText(background: string, foreground: string, minimum = 6): string {
+  let low = 0, high = 1
+  for (let index = 0; index < 12; index++) {
+    const amount = (low + high) / 2
+    if (contrastRatio(background, mixColors(background, foreground, amount)) >= minimum) high = amount
+    else low = amount
+  }
+  return mixColors(background, foreground, high)
+}
+
 function accentForeground(accent: string): string {
   const darkText = '#000000'
   return contrastRatio(accent, darkText) >= contrastRatio(accent, '#ffffff') ? darkText : '#ffffff'
@@ -110,7 +120,6 @@ export function appearanceCssVariables(settings: AppearanceSettings, theme: stri
   const accent = customAccent || defaultAccentColors[accentTheme]
   const light = isLightColor(background)
   const foreground = light ? '#000000' : '#ffffff'
-  const muted = light ? '#858691' : '#9b9ca9'
   const ui = settings.typography.ui
   const variables: Record<string, string> = {
     '--accent': accent,
@@ -124,7 +133,7 @@ export function appearanceCssVariables(settings: AppearanceSettings, theme: stri
     variables['--bg'] = background
     variables['--text'] = foreground
     variables['--secondary'] = mixColors(background, foreground, light ? 0.62 : 0.68)
-    variables['--muted'] = mixColors(background, muted, light ? 0.84 : 0.86)
+    variables['--muted'] = readableText(background, foreground)
     variables['--border'] = mixColors(background, foreground, light ? 0.13 : 0.15)
     variables['--soft'] = mixColors(background, foreground, light ? 0.035 : 0.075)
     variables['--source'] = mixColors(background, foreground, light ? 0.055 : 0.11)

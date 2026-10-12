@@ -21,6 +21,7 @@ export interface StringItem {
   project: number; fileId?: number; file?: { id: number; name: string; project: number }
   context: string; words: number; createdAt: string; updatedAt: string | null
   history?: HistoryEntry[]; comments?: CommentEntry[]; user?: TinyUser; version?: number
+  overwroteConflict?: boolean
 }
 export interface StringPage { results: StringItem[]; page: number; pageSize: number; rowCount: number; pageCount: number }
 export interface ProjectInfo { id: number; name: string; source: string; dest: string; desc?: string; tagRules?: Array<{type:number;source?:string;string?:string}> }
@@ -111,12 +112,13 @@ export interface CambridgeDictionaryData {
     }>
   }>
 }
-export type RequestAction = 'session' | 'projects' | 'project' | 'updateProject' | 'files' | 'file' | 'renameFile' | 'strings' | 'string' | 'suggestions' | 'memory' | 'terms' | 'projectTerms' | 'term' | 'createTerm' | 'updateTerm' | 'deleteTerm' | 'history' | 'save' | 'drafts' | 'draft'
+export type RequestAction = 'session' | 'projects' | 'project' | 'updateProject' | 'files' | 'file' | 'renameFile' | 'strings' | 'string' | 'suggestions' | 'memory' | 'terms' | 'projectTerms' | 'term' | 'createTerm' | 'updateTerm' | 'deleteTerm' | 'history' | 'save' | 'drafts' | 'draft' | 'legacyDrafts' | 'claimLegacyDrafts'
 export interface DesktopBridge {
   presence(target: { projectId: number; stringId: number | null }): Promise<ServiceResult<PresenceState>>
   loginPresence(project: number): Promise<ServiceResult>
   onPresence(callback: (state: PresenceState) => void): () => void
-  request<T = unknown>(action: RequestAction, payload?: Record<string, unknown>): Promise<ServiceResult<T>>
+  request<T = unknown>(action: RequestAction, payload?: Record<string, unknown>, requestId?: string): Promise<ServiceResult<T>>
+  cancelRequest(requestId: string): Promise<ServiceResult>
   connect(token: string, remember: boolean, project: number): Promise<ServiceResult<SessionStatus>>
   login(project: number): Promise<ServiceResult<SessionStatus>>
   disconnect(): Promise<ServiceResult>
@@ -135,5 +137,9 @@ export interface DesktopBridge {
   translatorView(state: { visible: boolean; bounds: { x: number; y: number; width: number; height: number } | null; provider?: TranslationProvider; text?: string; forceText?: boolean }): void
   exportData(content: string, defaultName: string): Promise<boolean>
   window(action: 'minimize' | 'maximize' | 'close'): void
+  onBeforeClose(callback: () => void): () => void
+  closeResponse(ok: boolean, message?: string): void
+  getBuildInfo(): Promise<{ commit: string; sourceFingerprint: string; builtAt: string } | null>
+  onSessionRestored(callback: (result: { ok: boolean; message: string; sessionLost?: boolean }) => void): () => void
 }
 declare global { interface Window { scKit?: DesktopBridge; queryLocalFonts?: () => Promise<LocalFontData[]> } }

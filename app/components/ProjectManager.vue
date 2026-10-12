@@ -17,7 +17,10 @@ onBeforeRouteLeave(() => { rememberScroll(); return true })
 onActivated(() => { active = true; restoreScroll() })
 onDeactivated(() => { active = false })
 const pageLoading = inject<import('vue').ComputedRef<boolean>>('workspace-loading', computed(() => false))
-const { projectChosen, projects, browse, files, busy, saving, error, notice, fileSearch, fileGroups } = toRefs(navigation)
+const { projectChosen, projects, browse, files, busy, error, notice, fileSearch, fileGroups } = toRefs(navigation)
+// This component owns detail saves. navigation.saving is the aggregate value
+// reported to the parent; reading it back here would latch the editor as busy.
+const saving = ref(false)
 const { folderOpen, toggleFolder, expandFolders, collapseFolders, chooseFile } = navigation
 function inspectProject(id: number) { return navigation.inspectProject(id, true) }
 const editProject = ref(false), editFile = ref<FileInfo | null>(null), name = ref(''), description = ref('')
@@ -53,7 +56,7 @@ async function saveDetails() {
   finally { saving.value = false }
 }
 function external(kind: 'project' | 'file', file?: FileInfo) { window.scKit?.openExternal(`https://paratranz.cn/projects/${browse.value.id}/${kind === 'file' ? `strings?file=${file!.id}` : ''}`) }
-watch([saving, textEditorPending], ([details, text]) => emit('pending', details || text))
+watch([saving, textEditorPending], ([details, text]) => emit('pending', details || text), { immediate: true })
 watch(() => route.path, path => { if (path !== '/') showTextEditor.value = false })
 watch(() => browse.value.id, (_id, old) => { if (active) { rememberScroll(old); restoreScroll() } cancelEdit(); notice.value = '' })
 function updateProjectFiles(updated: FileInfo[]) {
@@ -72,6 +75,13 @@ async function openTextEditor() {
   } catch (reason) { error.value = (reason as Error).message }
   finally { saving.value = false }
 }
+async function importLegacyDrafts() {
+  if (saving.value || busy.value) return
+  saving.value = true; error.value = ''; notice.value = ''
+  try { await props.editor.claimLegacyDrafts() }
+  catch (reason) { error.value = '旧草稿导入失败：' + (reason as Error).message }
+  finally { saving.value = false }
+}
 </script>
 <template>
   <section ref="root" class="project-manager" aria-label="项目与文件管理" @keydown.ctrl.s.prevent.stop="(editFile || editProject) && saveDetails()">
@@ -81,6 +91,7 @@ async function openTextEditor() {
         
         <div v-if="error" class="sidebar-message error" role="alert">{{ error }}</div><div v-if="notice" class="sidebar-message" role="status"><Check :size="14" />{{ notice }}</div>
         <div v-if="editor.error" class="sidebar-message error" role="alert">{{ editor.error }}</div>
+        <div v-if="editor.legacyDraftCount" class="sidebar-message" role="status">发现 {{ editor.legacyDraftCount }} 条没有账号归属的旧草稿。请确认它们属于 {{ editor.sessionInfo.user?.nickname || editor.sessionInfo.user?.username || '当前账号' }} 后导入。<button class="button compact" :disabled="saving || busy" @click="importLegacyDrafts">导入到当前账号</button></div>
         <Transition name="panel" mode="out-in"><div v-if="!projectChosen" key="welcome" class="manager-welcome" :class="{ 'manager-welcome-loading': pageLoading }" :aria-hidden="pageLoading || undefined"><FolderOpen :size="48" :stroke-width="1.2" /><h2>选择一个项目</h2></div>
         
         <div v-else :key="browse.id" class="manager-project-content">

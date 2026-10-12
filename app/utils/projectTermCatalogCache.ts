@@ -2,7 +2,7 @@ import type { Term } from '~/types/editor'
 
 interface StoredTermRow { key: string; scope: string; term: Term }
 interface StoredCatalogMetadata { key: string; syncedAt: string; rowCount: number; complete: true }
-export interface ProjectTermCatalogSnapshot { terms: Term[] }
+export interface ProjectTermCatalogSnapshot { terms: Term[]; syncedAt: string }
 export interface ProjectTermCatalogDelta { added: number; updated: number; removed: number; syncedAt: string }
 
 const databaseName = 'sckit-project-term-catalog'
@@ -81,7 +81,7 @@ export async function readProjectTermCatalog(scope: string): Promise<ProjectTerm
     transaction.oncomplete = () => {
       if (failed) return
       if (!metadata?.complete) { resolve(null); return }
-      resolve({ terms: sortTerms(rows.map(row => row.term)) })
+      resolve({ terms: sortTerms(rows.map(row => row.term)), syncedAt: metadata.syncedAt })
     }
     transaction.onerror = () => fail(transaction.error)
     transaction.onabort = () => fail(transaction.error)

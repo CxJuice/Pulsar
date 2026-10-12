@@ -5,6 +5,7 @@ dist/
 service/target/
 release/
 artifacts/
+.playwright-cli/
 *.log
 __pycache__/
 .env

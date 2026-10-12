@@ -1,15 +1,67 @@
 <script setup lang="ts">
 import { appearanceCssVariables, appearanceStorageKey, defaultAppearanceSettings, parseAppearanceSettings } from '~/utils/appearance'
+import { compileTermExemptionRules, defaultTermExemptionRules } from '~/utils/termHighlights'
 
 const editor = reactive(useEditor())
-const navigation = reactive(useWorkspaceNavigation(editor))
+const closeFlushers = new Set<() => Promise<void>>()
+async function flushEditorSurfaces() {
+  await editor.flushDraft(true)
+  await Promise.all([...closeFlushers].map(flush => flush()))
+}
+provide('workspace-close-flusher', (flush: () => Promise<void>) => {
+  closeFlushers.add(flush)
+  return () => closeFlushers.delete(flush)
+})
+provide('workspace-flush-surfaces', flushEditorSurfaces)
+async function prepareClose() {
+  try {
+    await flushEditorSurfaces()
+    await editor.waitForSubmissions()
+    window.scKit?.closeResponse(true)
+  } catch (reason) {
+    editor.error = (reason as Error).message
+    window.scKit?.closeResponse(false, editor.error)
+  }
+}
+let removeBeforeClose: (() => void) | undefined
+let removeSessionRestored: (() => void) | undefined
+async function sessionRestored(result: { ok: boolean; message: string; sessionLost?: boolean }) {
+  if (!result.ok) {
+    editor.error = result.message || '登录恢复失败，可在项目主页重试登录'
+    if (result.sessionLost) { editor.connected = false; editor.sessionInfo = { authenticated: false, mode: 'none' } }
+    return
+  }
+  if (editor.connected) return
+  try {
+    const session = await editor.api<import('~/types/editor').SessionStatus>('session')
+    if (session.authenticated) {
+      await editor.restoreSession(session)
+      navigation.finishGuide()
+    }
+  } catch (reason) { editor.error = (reason as Error).message }
+}
+const navigation = reactive(useWorkspaceNavigation(editor, flushEditorSurfaces))
 const theme = ref('light')
 const translationLayout = ref<'horizontal' | 'vertical'>('horizontal')
 const appearance = ref(defaultAppearanceSettings())
 const termRecognitionEnabled = ref(true)
+const termExemptionRules = ref([...defaultTermExemptionRules])
+const defaultTermExemptionPatterns = compileTermExemptionRules(defaultTermExemptionRules).patterns
+const termExemptionPatterns = shallowRef(defaultTermExemptionPatterns)
 if (import.meta.client) {
   try { termRecognitionEnabled.value = localStorage.getItem('sckit-term-recognition-enabled') !== '0' }
   catch { /* Keep term recognition enabled when local storage is unavailable. */ }
+  try {
+    const savedRules = JSON.parse(localStorage.getItem('sckit-term-exemption-rules') || 'null')
+    if (Array.isArray(savedRules) && savedRules.every((rule): rule is string => typeof rule === 'string')) {
+      const cleanedRules = savedRules.map(rule => rule.trim()).filter(Boolean)
+      const compiledRules = compileTermExemptionRules(cleanedRules)
+      if (!compiledRules.error) {
+        termExemptionRules.value = cleanedRules
+        termExemptionPatterns.value = compiledRules.patterns
+      }
+    }
+  } catch { /* Use the default exemption rules when storage is unavailable or invalid. */ }
 }
 const appearanceStyle = computed(() => appearanceCssVariables(appearance.value, theme.value))
 const route = useRoute()
@@ -32,7 +84,11 @@ provide('workspace-theme', theme)
 provide('workspace-translation-layout', translationLayout)
 provide('workspace-appearance', appearance)
 provide('workspace-term-recognition', termRecognitionEnabled)
+provide('workspace-term-exemption-rules', termExemptionRules)
+provide('workspace-term-exemption-patterns', termExemptionPatterns)
 onMounted(() => {
+  removeBeforeClose = window.scKit?.onBeforeClose(() => { void prepareClose() })
+  removeSessionRestored = window.scKit?.onSessionRestored(result => { void sessionRestored(result) })
   theme.value = localStorage.getItem('sckit-theme') || 'light'
   try {
     const savedLayout = localStorage.getItem('sckit-translation-layout')
@@ -40,6 +96,7 @@ onMounted(() => {
     appearance.value = parseAppearanceSettings(localStorage.getItem(appearanceStorageKey))
   } catch { /* Use the default layout when storage is unavailable. */ }
 })
+onBeforeUnmount(() => { removeBeforeClose?.(); removeSessionRestored?.() })
 </script>
 <template>
   <div class="app-shell" :data-theme="theme" :style="appearanceStyle">

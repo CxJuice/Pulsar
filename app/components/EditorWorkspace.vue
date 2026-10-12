@@ -2,11 +2,12 @@
 import { ArrowRight, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Copy, Undo2, Search, Filter, Check, CheckCheck, Circle, TriangleAlert, Settings2, Keyboard, BarChart3, BookOpen, ExternalLink, RefreshCw, Download, X, Minus, Square, Link, MoreHorizontal, TextCursorInput, WrapText, Cloud, Monitor, FolderOpen, Files, Languages } from 'lucide-vue-next'
 import { stageLabels, displayDate, tokens } from '~/utils/text'
 import type { UnwrapNestedRefs } from 'vue'
-import type { StringItem, StringPage, Term, TranslationSettings } from '~/types/editor'
+import type { LocalUnresolvedTerm, StringItem, StringPage, Term, TranslationSettings } from '~/types/editor'
 import { saveModes, type SaveMode } from '~/utils/saveModes'
 import { toEditorText } from '~/utils/translationText'
 import { searchHighlightParts } from '~/utils/searchHighlight'
-import { highlightTranslatedTerms, replaceSourceTerms, splitTranslationAlternatives } from '~/utils/termHighlights'
+import { highlightTranslatedTerms, replaceSourceTerms, termTranslationAlternatives } from '~/utils/termHighlights'
+import { readLocalUnresolvedTerms } from '~/utils/localUnresolvedTerms'
 import type { QualityLocation } from '~/utils/quality'
 const props = defineProps<{ editor: UnwrapNestedRefs<ReturnType<typeof useEditor>> }>()
 const e = props.editor
@@ -22,7 +23,10 @@ const pageSizeOptions = [50, 100, 200, 500].map(value => ({ value, label: `${val
 const saveStageOptions = [0, 1, 2, 3, 5].map(value => ({ value, label: stageLabels[value]! }))
 const theme = inject<Ref<string>>('workspace-theme')!, showBreaks = ref(true), saveMode = ref<SaveMode>('next'), clearAfterSaveNext = ref(true)
 const termRecognitionEnabled = inject<Ref<boolean>>('workspace-term-recognition')!
+const termExemptionPatterns = inject<Ref<RegExp[]>>('workspace-term-exemption-patterns')!
 const translationLayout = inject<Ref<'horizontal' | 'vertical'>>('workspace-translation-layout')!
+const communityUnresolvedTerms = useState<LocalUnresolvedTerm[]>('sckit-community-unresolved-terms', () => [])
+watch(() => e.project.id, projectId => { communityUnresolvedTerms.value = readLocalUnresolvedTerms(projectId) }, { immediate: true })
 watch(saveMode, value => { try { localStorage.setItem('sckit-save-mode', value) } catch { /* Keep the choice for this session. */ } })
 function changeSaveStage(stage: number) {
   if (e.locked || e.listBusy || e.initializing || e.reloadBusy) return
@@ -49,7 +53,7 @@ watch(termRecognitionEnabled, enabled => { if (!enabled) closeTermTranslationPic
 const translationText = computed(() => toEditorText(e.text))
 const originalSearchQuery = computed(() => ['text', 'original'].includes(e.searchMode) ? e.search : '')
 const translationSearchQuery = computed(() => ['text', 'translation'].includes(e.searchMode) ? e.search : '')
-const translationHighlights = computed(() => highlightTranslatedTerms(translationText.value, termRecognitionEnabled.value ? e.terms : []).map(piece => ({ ...piece, searchParts: searchHighlightParts(piece.text, translationSearchQuery.value) })))
+const translationHighlights = computed(() => highlightTranslatedTerms(translationText.value, termRecognitionEnabled.value ? e.terms : [], termExemptionPatterns.value).map(piece => ({ ...piece, searchParts: searchHighlightParts(piece.text, translationSearchQuery.value) })))
 const translationHighlightOffset = ref({ top: 0, left: 0 })
 function syncTranslationHighlightScroll() {
   translationHighlightOffset.value = { top: translationInput.value?.scrollTop || 0, left: translationInput.value?.scrollLeft || 0 }
@@ -81,14 +85,17 @@ function rememberPanelLayout() {
 }
 watch([leftWidth, rightWidth, narrowLeftWidth], () => { clearTimeout(panelLayoutTimer); panelLayoutTimer = setTimeout(rememberPanelLayout, 200) })
 const editingContent = ref<HTMLElement>()
-const auxiliaryPanel = ref<{ focusTerm: (id: number) => void; openHistorySearch: () => void; lookupDictionary: (word: string) => void; translateSelectedText: (text?: string) => Promise<void>; cancelSelectedTranslation: () => void; translateForPrefill: (text: string) => Promise<{ text: string }>; translateEntryForPrefill: (item: StringItem) => Promise<{ text: string }>; cancelPrefillTranslation: () => void; canPrefillTranslation: boolean; translationBusy: boolean }>()
+const auxiliaryPanel = ref<{ focusTerm: (id: number) => void; openHistorySearch: () => void; lookupDictionary: (word: string) => void; translateSelectedText: (text?: string, autoFill?: boolean) => Promise<void>; cancelSelectedTranslation: () => void; translateForPrefill: (text: string) => Promise<{ text: string }>; translateEntryForPrefill: (item: StringItem) => Promise<{ text: string }>; cancelPrefillTranslation: () => void; canPrefillTranslation: boolean; translationBusy: boolean }>()
 const showBatchPrefill = ref(false), batchPrefillBusy = ref(false), batchPrefillError = ref('')
 const batchPrefillSaving = ref(false), batchStopRequested = ref(false)
 const batchPrefillScope = ref<'selected' | 'untranslated'>('selected'), batchPrefillDestination = ref<'local' | 'paratranz'>('local')
 const batchPrefillProgress = ref(0), batchPrefillTotal = ref(0), batchPrefillSkipped = ref(0)
+const batchPrefillSucceeded = ref(0), batchPrefillFailed = ref(0), batchPrefillFailures = ref<string[]>([])
+const batchFailedItems = ref<StringItem[]>([]), batchRetryItems = ref<StringItem[] | null>(null)
+const batchReport = ref<Array<{ key: string; id: number; status: 'saved' | 'failed' | 'skipped'; message?: string }>>([])
 let batchPrefillRun = 0
 const selectionContextMenu = ref<{ x: number; y: number; text: string; selected: string; word: string } | null>(null)
-const preservedSelection = computed(() => selectionContextMenu.value ? replaceSourceTerms(selectionContextMenu.value.text, e.terms) : null)
+const preservedSelection = computed(() => selectionContextMenu.value ? replaceSourceTerms(selectionContextMenu.value.text, e.terms, termExemptionPatterns.value) : null)
 function closeTermTranslationPicker() { termTranslationOptions.value = [] }
 function positionTermTranslationPicker(position: TermTranslationPosition) {
   termTranslationPopupStyle.value = { left: `${position.x + 10}px`, top: `${position.y + 10}px` }
@@ -108,7 +115,7 @@ function positionTermTranslationPicker(position: TermTranslationPosition) {
 function insertTerm(terms: Term[], position: TermTranslationPosition) {
   const options = new Map<string, TermTranslationOption>()
   for (const term of terms) {
-    for (const translation of splitTranslationAlternatives(toEditorText(term.translation))) {
+    for (const translation of termTranslationAlternatives(term, termExemptionPatterns.value)) {
       const key = translation.toLocaleLowerCase(), previous = options.get(key)
       if (previous) {
         if (!previous.terms.includes(term.term)) previous.terms.push(term.term)
@@ -152,7 +159,7 @@ function translateCurrentSource() {
   const selection = window.getSelection()
   const selected = selection && !selection.isCollapsed ? selectedSourceText(selection) : undefined
   const source = selected?.trim() ? selected : e.selected?.original || ''
-  if (source.trim()) void auxiliaryPanel.value?.translateSelectedText(source)
+  if (source.trim()) void auxiliaryPanel.value?.translateSelectedText(source, true)
 }
 function openSelectedTextMenu(event: MouseEvent) {
   const field = event.target === translationInput.value ? translationInput.value : undefined
@@ -180,7 +187,7 @@ function runSelectionContextAction(preserveTerms = false) {
   selectionContextMenu.value = null
   if (action.word) auxiliaryPanel.value?.lookupDictionary(action.word)
   else {
-    const source = preserveTerms ? replaceSourceTerms(action.text, e.terms).text : action.text
+    const source = preserveTerms ? replaceSourceTerms(action.text, e.terms, termExemptionPatterns.value).text : action.text
     void auxiliaryPanel.value?.translateSelectedText(source)
   }
 }
@@ -199,7 +206,7 @@ useLayoutMotion(workspace, narrow, ['.editor-panel', '.aux-panel'])
 const selectedAll = computed(() => e.visibleItems.length > 0 && e.visibleItems.every(item => e.selectedIds.includes(item.id)))
 const availableTokens = computed(() => [...new Set(tokens(e.selected?.original || ''))])
 const progress = computed(() => e.file.total ? Math.round(e.file.translated / e.file.total * 100) : 0)
-const shortcuts = [ ['Ctrl + S', '后台提交并下一条'], ['Ctrl + Enter', '后台提交并下一条'], ['Tab', '编辑框中提交并下一条'], ['Alt + Z / Ctrl + Z', '撤销译文编辑或填充'], ['Alt + Shift + Z / Ctrl + Y', '重做译文编辑或填充'], ['Alt + ↑ / ↓', '上一条 / 下一条'], ['Ctrl + 1', '翻译建议'], ['Ctrl + 2', '词条历史'], ['Ctrl + 4', '项目术语'], ['Ctrl + 5', '词条评论'], ['Ctrl + F', '搜索字符串'], ['Ctrl + Shift + F', '搜索历史翻译'] ]
+const shortcuts = [ ['Ctrl + S', '按当前保存模式提交'], ['Ctrl + Enter', '按当前保存模式提交'], ['Tab', '编辑框中按当前模式提交'], ['Alt + Z / Ctrl + Z', '撤销译文编辑或填充'], ['Alt + Shift + Z / Ctrl + Y', '重做译文编辑或填充'], ['Alt + ↑ / ↓', '上一条 / 下一条'], ['Ctrl + 1', '翻译建议'], ['Ctrl + 2', '词条历史'], ['Ctrl + 4', '项目术语'], ['Ctrl + 5', '词条评论'], ['Ctrl + F', '搜索字符串'], ['Ctrl + Shift + F', '搜索历史翻译'] ]
 function captureTranslationScroll(field: HTMLTextAreaElement) {
   const positions: { node: HTMLElement; top: number; left: number }[] = []
   for (let node: HTMLElement | null = field; node; node = node.parentElement) {
@@ -246,6 +253,7 @@ function openBatchPrefill() {
   batchPrefillProgress.value = 0
   batchPrefillTotal.value = 0
   batchPrefillSkipped.value = 0
+  batchPrefillSucceeded.value = 0; batchPrefillFailed.value = 0; batchPrefillFailures.value = []; batchFailedItems.value = []; batchRetryItems.value = null; batchReport.value = []
   showBatchPrefill.value = true
 }
 function stopBatchPrefill(message = '') {
@@ -259,7 +267,7 @@ function stopBatchPrefill(message = '') {
   auxiliaryPanel.value?.cancelPrefillTranslation()
   batchPrefillBusy.value = false
   batchStopRequested.value = false
-  batchPrefillError.value = message || `已停止，已处理 ${batchPrefillProgress.value} / ${batchPrefillTotal.value} 条。`
+  batchPrefillError.value = message || `已停止：成功 ${batchPrefillSucceeded.value}、失败 ${batchPrefillFailed.value}、跳过 ${batchPrefillSkipped.value} 条。`
 }
 async function startBatchPrefill() {
   if (batchPrefillBusy.value) return
@@ -268,58 +276,80 @@ async function startBatchPrefill() {
   if (!auxiliaryPanel.value.translateEntryForPrefill) { batchPrefillError.value = '翻译模块尚未就绪，请稍后重试。'; return }
   if (auxiliaryPanel.value.translationBusy) { batchPrefillError.value = '侧栏翻译正在进行，请先停止当前翻译。'; return }
   const run = ++batchPrefillRun, projectId = e.project.id, fileId = e.fileId
+  const retryItems = batchRetryItems.value
+  batchRetryItems.value = null
   batchPrefillBusy.value = true
   batchStopRequested.value = false
   batchPrefillError.value = ''
   batchPrefillProgress.value = 0
   batchPrefillTotal.value = 0
+  batchPrefillSucceeded.value = 0; batchPrefillFailed.value = 0; batchPrefillFailures.value = []; batchFailedItems.value = []; batchReport.value = []
   try {
     await e.flushDraft(true)
     let sourceItems: StringItem[]
-    if (batchPrefillScope.value === 'selected') {
+    if (retryItems) sourceItems = retryItems.map(item => ({ ...item }))
+    else if (batchPrefillScope.value === 'selected') {
       sourceItems = e.visibleItems.filter(item => e.selectedIds.includes(item.id)).map(item => ({ ...item }))
     } else sourceItems = await loadAllUntranslated(projectId, fileId, run)
     if (run !== batchPrefillRun) return
     if (e.project.id !== projectId || e.fileId !== fileId) { stopBatchPrefill('当前文件已切换，批量预填充已停止。'); return }
     const targets = sourceItems.filter(item => ![9, -1].includes(item.stage) && !!item.original.trim() && !entryHasPrefill(item))
     batchPrefillSkipped.value = sourceItems.length - targets.length
+    for (const item of sourceItems.filter(item => !targets.includes(item))) batchReport.value.push({ key: item.key, id: item.id, status: 'skipped' })
     batchPrefillTotal.value = targets.length
     if (!targets.length) {
       batchPrefillError.value = sourceItems.length ? '所选范围内没有可翻译条目；已有译文、本机草稿或未保存编辑的条目已跳过。' : '所选范围内没有条目。'
       return
     }
-    const failures: string[] = []
     for (const [index, item] of targets.entries()) {
       if (run !== batchPrefillRun) return
       if (e.project.id !== projectId || e.fileId !== fileId) { stopBatchPrefill('当前文件已切换，批量预填充已停止。'); return }
       try {
+        const draftVersion = e.drafts[`${item.project}/${item.id}`]?.updatedAt ?? null
+        if (entryHasPrefill(item)) { batchPrefillSkipped.value++; batchReport.value.push({ key: item.key, id: item.id, status: 'skipped' }); batchPrefillProgress.value = index + 1; continue }
         const translated = await auxiliaryPanel.value.translateEntryForPrefill(item)
         if (run !== batchPrefillRun) return
         if (e.project.id !== projectId || e.fileId !== fileId) { stopBatchPrefill('当前文件已切换，批量预填充已停止。'); return }
+        if (entryHasPrefill(item)) { batchPrefillSkipped.value++; batchReport.value.push({ key: item.key, id: item.id, status: 'skipped' }); batchPrefillProgress.value = index + 1; continue }
         batchPrefillSaving.value = true
+        let overwroteConflict = false
         try {
-          if (batchPrefillDestination.value === 'paratranz') await e.savePrefillToParaTranz(item, translated.text)
-          else await e.savePrefillDraft(item, translated.text)
+          const saved = batchPrefillDestination.value === 'paratranz' ? await e.savePrefillToParaTranz(item, translated.text, draftVersion) : undefined
+          overwroteConflict = !!saved?.overwroteConflict
+          if (batchPrefillDestination.value !== 'paratranz') await e.savePrefillDraft(item, translated.text, draftVersion)
         } finally { batchPrefillSaving.value = false }
+        batchPrefillSucceeded.value++
+        batchReport.value.push({ key: item.key, id: item.id, status: 'saved', message: overwroteConflict ? '已覆盖远端新修改' : undefined })
       } catch (reason) {
         if (run !== batchPrefillRun) return
-        failures.push(`${item.key || item.id}: ${(reason as Error).message || '失败'}`)
+        const message = `${item.key || item.id}: ${(reason as Error).message || '失败'}`
+        batchPrefillFailures.value.push(message); batchFailedItems.value.push(item); batchPrefillFailed.value++
+        batchReport.value.push({ key: item.key, id: item.id, status: 'failed', message })
       }
       batchPrefillProgress.value = index + 1
       if (batchStopRequested.value) { stopBatchPrefill(); return }
       if (e.project.id !== projectId || e.fileId !== fileId) { stopBatchPrefill('当前文件已切换，批量预填充已停止。'); return }
     }
     if (batchPrefillDestination.value === 'paratranz') await e.refreshFiles().catch(() => {})
-    if (!failures.length) {
-      batchPrefillError.value = `已完成 ${batchPrefillProgress.value} 条。${batchPrefillSkipped.value ? `另跳过 ${batchPrefillSkipped.value} 条已有内容的词条。` : ''}`
-    } else {
-      batchPrefillError.value = `已处理 ${batchPrefillProgress.value} / ${batchPrefillTotal.value} 条，${failures.length} 条失败。${batchPrefillSkipped.value ? `另跳过 ${batchPrefillSkipped.value} 条已有内容的词条。` : ''}\n${failures.slice(0, 5).join('\n')}`
-    }
+    const overwritten = batchReport.value.filter(row => row.message === '已覆盖远端新修改').length
+    batchPrefillError.value = `已处理 ${batchPrefillProgress.value} / ${batchPrefillTotal.value} 条：成功 ${batchPrefillSucceeded.value}、失败 ${batchPrefillFailed.value}、跳过 ${batchPrefillSkipped.value} 条` +
+      (overwritten ? `；其中 ${overwritten} 条覆盖了远端新修改。` : '。')
   } catch (reason) {
     if (run === batchPrefillRun) batchPrefillError.value = (reason as Error).message || '批量预填充失败'
   } finally {
     if (run === batchPrefillRun) { batchPrefillBusy.value = false; batchPrefillSaving.value = false; batchStopRequested.value = false }
   }
+}
+function retryBatchFailures() {
+  if (!batchFailedItems.value.length || batchPrefillBusy.value) return
+  batchRetryItems.value = [...batchFailedItems.value]
+  void startBatchPrefill()
+}
+async function exportBatchReport() {
+  const content = JSON.stringify({ projectId: e.project.id, fileId: e.fileId, results: batchReport.value }, null, 2)
+  const name = `sckit-batch-${e.project.id}-${e.fileId}.json`
+  if (window.scKit) await window.scKit.exportData(content, name)
+  else { const url = URL.createObjectURL(new Blob([content], { type: 'application/json' })); const link = document.createElement('a'); link.href = url; link.download = name; link.click(); URL.revokeObjectURL(url) }
 }
 function closeBatchPrefill() {
   if (batchPrefillBusy.value) return
@@ -490,8 +520,8 @@ function keydown(event: KeyboardEvent) {
   if (!event.defaultPrevented && !event.isComposing && (altUndo || editorUndo)) {
     event.preventDefault(); undoTranslation(key === 'y' || event.shiftKey); return
   }
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); e.save(true, undefined, clearAfterSaveNext.value); return }
-  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); e.save(true, undefined, clearAfterSaveNext.value); return }
+  if (!event.isComposing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); void submitSelectedMode(); return }
+  if (!event.isComposing && (event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void submitSelectedMode(); return }
   if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'f') { event.preventDefault(); auxiliaryPanel.value?.openHistorySearch(); return }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') { event.preventDefault(); document.querySelector<HTMLInputElement>('#string-search')?.focus(); return }
   if (event.ctrlKey && ['1', '2', '4', '5'].includes(event.key)) { event.preventDefault(); e.panel = ({ '1': 'suggestions', '2': 'history', '4': 'terms', '5': 'comments' } as const)[event.key as '1' | '2' | '4' | '5']; return }
@@ -500,7 +530,7 @@ function keydown(event: KeyboardEvent) {
 function editorKeydown(event: KeyboardEvent) {
   if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key) ||
     ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a')) typingGroupOpen = false
-  if (!event.isComposing && event.key === 'Tab' && !event.shiftKey && e.dirty) { event.preventDefault(); e.save(true, undefined, clearAfterSaveNext.value) }
+  if (!event.isComposing && event.key === 'Tab' && !event.shiftKey && e.dirty) { event.preventDefault(); void submitSelectedMode() }
 }
 function filterEditorCopy(event: ClipboardEvent) {
   if (!event.clipboardData) return
@@ -562,6 +592,23 @@ function resize(event: PointerEvent, side: 'left' | 'right') {
   stopResizing = end
   document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none'; window.addEventListener('pointermove', move); window.addEventListener('pointerup', end); window.addEventListener('pointercancel', end); window.addEventListener('blur', end)
   event.preventDefault()
+}
+function separatorLimits(side: 'left' | 'right') {
+  const width = workspace.value?.getBoundingClientRect().width || workspaceWidth.value || 1600
+  const current = layoutWidths.value
+  if (side === 'left' && narrow.value) return { min: 28, max: 100 - 280 / width * 100, value: current.narrowLeft }
+  if (side === 'left') return { min: 28, max: 100 - current.right - 250 / width * 100, value: current.left }
+  return { min: current.left + 250 / width * 100, max: 100 - 220 / width * 100, value: 100 - current.right }
+}
+function separatorKeydown(event: KeyboardEvent, side: 'left' | 'right') {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+  event.preventDefault()
+  const { min, max, value } = separatorLimits(side)
+  const next = Math.max(min, Math.min(max, event.key === 'Home' ? min : event.key === 'End' ? max : value + (event.key === 'ArrowRight' ? 2 : -2)))
+  if (side === 'left' && narrow.value) narrowLeftWidth.value = next
+  else if (side === 'left') leftWidth.value = next
+  else rightWidth.value = 100 - next
+  rememberPanelLayout()
 }
 const savedScroll = new Map<string, number>()
 let layoutObserver: ResizeObserver | undefined
@@ -636,21 +683,22 @@ onBeforeUnmount(() => { if (batchPrefillBusy.value) stopBatchPrefill(); stopResi
       <section class="list-panel" aria-label="字符串列表">
         <nav class="status-tabs" aria-label="词条筛选"><button :class="{ active: e.stageFilter === null }" @click="e.filter(null)"><strong>{{ e.file.total }}</strong><span>全部</span></button><button :class="{ active: e.stageFilter === 0 }" @click="e.filter(0)"><strong>{{ e.untranslated }}</strong><span>未翻译</span></button><button :class="{ active: e.stageFilter === 2 }" @click="e.filter(2)"><strong>{{ e.file.disputed }}</strong><span>有疑问</span></button></nav>
         <div class="filters"><div class="search-bar"><span class="filter-label"><Filter :size="13" />过滤器</span><Search :size="15" /><input id="string-search" v-model="e.search" :placeholder="e.searchMode === 'original' ? '搜索原文' : e.searchMode === 'translation' ? '搜索译文' : e.searchMode === 'key' ? '搜索键值' : e.searchMode === 'context' ? '搜索上下文' : '按文本或键值搜索'" aria-label="搜索字符串" /><button v-if="e.search" class="icon-button small" aria-label="清除搜索" @click="e.search = ''"><X :size="14" /></button></div><div class="filter-controls"><AppSelect v-model="e.searchMode" :options="searchOptions" label="搜索范围" /><AppSelect :model-value="e.stageFilter ?? 'all'" :options="stageOptions" label="词条状态" @update:model-value="value => e.filter(value === 'all' ? null : Number(value))" /><span class="filter-spacer"></span><span class="sort-label">排序方式</span><AppSelect v-model="e.sort" :options="sortOptions" label="排序方式" /><input type="checkbox" :checked="selectedAll" aria-label="选择当前页全部词条" @change="toggleAll" /></div></div>
+        <div v-if="e.listProgress" class="batch-prefill-toolbar" role="status"><span>{{ e.listProgress }}</span><button class="button compact" @click="e.cancelListLoad()">停止加载</button></div>
         <div v-if="e.connected" class="batch-prefill-toolbar"><span>{{ e.selectedIds.length ? `已选 ${e.selectedIds.length} 条` : `本文件未翻译 ${e.untranslated} 条` }}</span><button class="button compact primary batch-prefill-button" :disabled="!batchPrefillBusy && (e.listBusy || e.initializing || e.reloadBusy)" :title="batchPrefillBusy ? '停止批量翻译' : '选择已选词条或本文件所有未翻译词条，并选择保存位置'" @click="batchPrefillBusy ? stopBatchPrefill() : openBatchPrefill()"><X v-if="batchPrefillBusy" :size="14" /><Languages v-else :size="14" />{{ batchPrefillBusy ? `停止 ${batchPrefillProgress}/${batchPrefillTotal}` : '全文翻译并预填充' }}</button></div>
         <div class="string-list" :class="`translation-layout-${translationLayout}`" role="listbox" aria-label="待翻译字符串" :aria-busy="e.listBusy">
-          <LoadingRegion :busy="e.listBusy || e.initializing" :initial="!e.items.length" :label="e.sort === 'updated' ? '正在加载匹配词条并按修改时间排序…' : '正在加载词条…'">
+          <LoadingRegion :busy="e.listBusy || e.initializing" :initial="!e.items.length" :label="e.listProgress || '正在加载词条…'">
           <div v-if="!e.visibleItems.length" class="empty-state"><Search :size="32" /><h3>没有符合条件的词条</h3><button class="button" @click="e.search = ''; e.filter(null)">清除筛选</button></div>
-          <template v-else><div v-for="(item, index) in e.visibleItems" :key="item.id" class="string-row" :class="{ selected: e.selected?.id === item.id }" role="option" :aria-selected="e.selected?.id === item.id" @click="e.select(item)"><div class="row-status"><CheckCheck v-if="item.stage === 5 || item.stage === 3" :size="15" /><Check v-else-if="item.stage === 1" :size="15" /><TriangleAlert v-else-if="item.stage === 2" :size="14" /><Circle v-else :size="11" :fill="item.stage === 0 ? 'currentColor' : 'none'" /><span>{{ (e.page - 1) * e.pageSize + index + 1 }}</span></div><button type="button" class="row-content" :title="item.key" :aria-label="`打开词条 ${item.key}`" :disabled="e.listBusy || e.initializing || e.reloadBusy"><span class="row-source"><ProtectedText :text="item.original" :terms="e.selected?.id === item.id ? e.terms : []" :search-query="originalSearchQuery" /></span><span class="row-translation"><SearchHighlightedText :text="item.translation" :query="translationSearchQuery" /></span><OccupancyBadge :users="e.presence.byString.get(item.id) || []" :user-id="e.presence.state.userId" compact icon-only /></button><input type="checkbox" :checked="e.selectedIds.includes(item.id)" :aria-label="`选择词条 ${item.key}`" @click.stop @change="toggleSelected(item.id)" /></div></template>
+          <template v-else><div v-for="(item, index) in e.visibleItems" :key="item.id" class="string-row" :class="{ selected: e.selected?.id === item.id }" role="option" :aria-selected="e.selected?.id === item.id" @click="e.select(item)"><div class="row-status"><CheckCheck v-if="item.stage === 5 || item.stage === 3" :size="15" /><Check v-else-if="item.stage === 1" :size="15" /><TriangleAlert v-else-if="item.stage === 2" :size="14" /><Circle v-else :size="11" :fill="item.stage === 0 ? 'currentColor' : 'none'" /><span>{{ (e.page - 1) * e.pageSize + index + 1 }}</span></div><button type="button" class="row-content" :title="item.key" :aria-label="`打开词条 ${item.key}`" :disabled="e.listBusy || e.initializing || e.reloadBusy"><span class="row-source"><ProtectedText :text="item.original" :terms="e.selected?.id === item.id ? e.terms : []" :unresolved-terms="e.selected?.id === item.id ? communityUnresolvedTerms : []" :search-query="originalSearchQuery" /></span><span class="row-translation"><SearchHighlightedText :text="item.translation" :query="translationSearchQuery" /></span><OccupancyBadge :users="e.presence.byString.get(item.id) || []" :user-id="e.presence.state.userId" compact icon-only /></button><input type="checkbox" :checked="e.selectedIds.includes(item.id)" :aria-label="`选择词条 ${item.key}`" @click.stop @change="toggleSelected(item.id)" /></div></template>
           </LoadingRegion>
         </div>
         <footer class="list-footer"><span>{{ e.connected ? e.rowCount : e.visibleItems.length }} 条<span v-if="e.selectedIds.length"> · 已选 {{ e.selectedIds.length }}</span></span><div class="pagination"><button class="icon-button small" aria-label="第一页" :disabled="e.page === 1 || e.listBusy" @click="e.paginate(1)"><ChevronsLeft :size="15" /></button><button class="icon-button small" aria-label="上一页" :disabled="e.page === 1 || e.listBusy" @click="e.paginate(e.page - 1)"><ChevronLeft :size="15" /></button><span>{{ e.page }} / {{ e.pageCount }}</span><button class="icon-button small" aria-label="下一页" :disabled="e.page === e.pageCount || e.listBusy" @click="e.paginate(e.page + 1)"><ChevronRight :size="15" /></button><button class="icon-button small" aria-label="最后一页" :disabled="e.page === e.pageCount || e.listBusy" @click="e.paginate(e.pageCount)"><ChevronsRight :size="15" /></button></div><AppSelect :model-value="e.pageSize" :options="pageSizeOptions" label="每页词条数量" @update:model-value="e.changePageSize" /></footer>
       </section>
-      <div class="resize-handle" role="separator" aria-label="调整字符串列表宽度" aria-orientation="vertical" @pointerdown="resize($event, 'left')"></div>
+      <div class="resize-handle" role="separator" tabindex="0" aria-label="调整字符串列表宽度" aria-orientation="vertical" :aria-valuemin="Math.round(separatorLimits('left').min)" :aria-valuemax="Math.round(separatorLimits('left').max)" :aria-valuenow="Math.round(separatorLimits('left').value)" @pointerdown="resize($event, 'left')" @keydown="separatorKeydown($event, 'left')"></div>
       <div class="editing-columns">
       <div ref="editingContent" class="editing-content">
       <section ref="editorPanel" class="editor-panel" aria-label="译文编辑器" :aria-busy="e.reloadBusy">
-        <template v-if="e.selected"><div class="editor-scroll"><div class="source-area"><div class="source-heading"><div class="source-heading-title"><span>待翻译的字符串</span><span class="current-occupancy" :title="e.presence.occupied ? '其他用户正在编辑此词条，你仍可编辑和提交。' : undefined"><OccupancyBadge :users="e.presence.current" :user-id="e.presence.state.userId" /></span></div><span class="source-metadata"><span v-if="e.termsBusy" class="source-term-status"><LoadingIndicator :size="12" label="正在获取术语" />正在获取术语…</span><button v-else-if="e.termsError" class="source-term-status term-error" :title="e.termsError" @click="e.loadTerms(true)">术语获取失败 · 重试</button><button v-else-if="e.terms.length" class="source-term-status" @click="e.panel = 'terms'">{{ e.terms.length }} 条术语</button><span class="stage-badge" :class="`stage-${e.selected.stage}`">{{ stageLabels[e.selected.stage] }}</span></span></div><div ref="sourceContent" class="source-content" @contextmenu="openSelectedTextMenu"><ProtectedText :text="e.selected.original" :breaks="showBreaks" :terms="e.terms" :search-query="originalSearchQuery" interactive :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @insert="insert" @term="insertTerm" /></div></div>
-          <div class="toolbelt"><button class="icon-button" title="复制原文到译文框" aria-label="复制原文到译文框" :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @click="replace(e.selected.original)"><Copy :size="16" /></button><button class="icon-button" :title="auxiliaryPanel?.translationBusy ? '正在翻译…' : '翻译当前原文'" aria-label="翻译当前原文" :disabled="!e.selected.original.trim() || e.listBusy || e.initializing || e.reloadBusy || auxiliaryPanel?.translationBusy" @mousedown.prevent @click="translateCurrentSource"><Languages :size="16" /></button><button class="icon-button" title="恢复当前远端译文" aria-label="恢复远端译文" :disabled="!e.dirty && !e.translationDisplayCleared" @click="e.discardDraft()"><Undo2 :size="16" /></button><button class="icon-button" :class="{ pressed: showBreaks }" title="显示原文的转义换行；开启时，发送给 API/AI 前会将 \n 转成真实换行" aria-label="切换原文换行显示与 API/AI 换行替换" @click="showBreaks = !showBreaks"><WrapText :size="17" /></button><button class="icon-button" title="打开术语" aria-label="打开术语面板" @click="e.panel = 'terms'"><BookOpen :size="16" /></button><span class="toolbelt-spacer"></span><span class="character-count">{{ translationText.length }} 字符</span></div>
+        <template v-if="e.selected"><div class="editor-scroll"><div class="source-area"><div class="source-heading"><div class="source-heading-title"><span>待翻译的字符串</span><span class="current-occupancy" :title="e.presence.occupied ? '其他用户正在编辑此词条，你仍可编辑和提交。' : undefined"><OccupancyBadge :users="e.presence.current" :user-id="e.presence.state.userId" /></span></div><span class="source-metadata"><span v-if="e.termsBusy" class="source-term-status"><LoadingIndicator :size="12" label="正在获取术语" />正在获取术语…</span><button v-else-if="e.termsError" class="source-term-status term-error" :title="e.termsError" @click="e.loadTerms(true)">术语获取失败 · 重试</button><button v-else-if="e.terms.length" class="source-term-status" @click="e.panel = 'terms'">{{ e.terms.length }} 条术语</button><span class="stage-badge" :class="`stage-${e.selected.stage}`">{{ stageLabels[e.selected.stage] }}</span></span></div><div ref="sourceContent" class="source-content" @contextmenu="openSelectedTextMenu"><ProtectedText :text="e.selected.original" :breaks="showBreaks" :terms="e.terms" :unresolved-terms="communityUnresolvedTerms" :search-query="originalSearchQuery" interactive :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @insert="insert" @term="insertTerm" /></div></div>
+          <div class="toolbelt"><button class="icon-button" title="复制原文到译文框" aria-label="复制原文到译文框" :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @click="replace(e.selected.original)"><Copy :size="16" /></button><button class="icon-button" :title="auxiliaryPanel?.translationBusy ? '正在翻译…' : '翻译原文并填入译文框'" aria-label="翻译原文并填入译文框" :disabled="!e.selected.original.trim() || e.listBusy || e.initializing || e.reloadBusy || auxiliaryPanel?.translationBusy" @mousedown.prevent @click="translateCurrentSource"><Languages :size="16" /></button><button class="icon-button" title="恢复当前远端译文" aria-label="恢复当前远端译文" :disabled="!e.dirty && !e.translationDisplayCleared" @click="e.discardDraft()"><Undo2 :size="16" /></button><button class="icon-button" :class="{ pressed: showBreaks }" title="显示原文的转义换行；开启时，发送给 API/AI 前会将 \n 转成真实换行" aria-label="切换原文换行显示与 API/AI 换行替换" @click="showBreaks = !showBreaks"><WrapText :size="17" /></button><button class="icon-button" title="打开术语" aria-label="打开术语面板" @click="e.panel = 'terms'"><BookOpen :size="16" /></button><span class="toolbelt-spacer"></span><span class="character-count">{{ translationText.length }} 字符</span></div>
           <div class="translation-area"><div class="translation-editor"><div class="translation-highlights" aria-hidden="true"><div :style="{ transform: `translate(${-translationHighlightOffset.left}px, ${-translationHighlightOffset.top}px)` }"><template v-for="(piece, index) in translationHighlights" :key="index"><template v-for="(part, partIndex) in piece.searchParts" :key="partIndex"><mark v-if="piece.terms?.length" class="translated-term-highlight" :class="{ 'search-match': part.hit }">{{ part.text }}</mark><mark v-else-if="part.hit" class="search-match">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></template></div></div><textarea ref="translationInput" :value="translationText" aria-label="译文" @select="syncDictionarySelection" @keyup="syncDictionarySelection" @mouseup="syncDictionarySelection" @contextmenu="openSelectedTextMenu" placeholder="在此输入翻译" spellcheck="false" :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @beforeinput="beforeTranslationInput" @input="translationChanged" @compositionstart="beginTranslationComposition" @compositionend="endTranslationComposition" @pointerdown="typingGroupOpen = false" @blur="typingGroupOpen = false" @scroll="syncTranslationHighlightScroll" @keydown="editorKeydown"></textarea></div><div v-if="e.locked" class="locked-notice">此词条{{ stageLabels[e.selected.stage] }}，编辑已禁用。</div><div v-if="availableTokens.length" class="token-tray"><span>标记</span><button v-for="token in availableTokens" :key="token" :title="`插入 ${token}`" :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @click="insert(token)">{{ token }}</button></div><div class="save-row"><div class="save-controls"><AppSelect :model-value="e.editStage" :options="saveStageOptions" label="保存为词条状态" :disabled="e.locked || e.listBusy || e.initializing || e.reloadBusy" @update:model-value="changeSaveStage" /><SaveButton v-model:mode="saveMode" :editor="e" @save="submitSelectedMode" @save-disputed="submitDisputedMode" /></div></div></div>
           <div class="editor-hint"><span class="draft-status"><LoadingIndicator v-if="e.draftStatus.startsWith('正在')" :size="12" label="正在保存草稿" /><span v-else-if="e.dirty" class="draft-dot"></span>{{ e.draftStatus || (e.notice ? e.notice : 'Tab 提交并下一条') }}</span></div>
           <StringDetails :editor="e" class="desktop-details" />
@@ -658,7 +706,7 @@ onBeforeUnmount(() => { if (batchPrefillBusy.value) stopBatchPrefill(); stopResi
           <EditorNavigation :editor="e" class="desktop-editor-footer" @open="openString" />
         </template><div v-else class="empty-state editor-empty"><TextCursorInput :size="38" :stroke-width="1.2" /><h3>选一条字符串，开始翻译</h3></div>
       </section>
-      <div class="resize-handle aux-resize-handle" role="separator" aria-label="调整辅助面板宽度" aria-orientation="vertical" @pointerdown="resize($event, 'right')"></div>
+      <div class="resize-handle aux-resize-handle" role="separator" tabindex="0" aria-label="调整辅助面板宽度" aria-orientation="vertical" :aria-valuemin="Math.round(separatorLimits('right').min)" :aria-valuemax="Math.round(separatorLimits('right').max)" :aria-valuenow="Math.round(separatorLimits('right').value)" @pointerdown="resize($event, 'right')" @keydown="separatorKeydown($event, 'right')"></div>
       <AuxPanel ref="auxiliaryPanel" :editor="e" :compact="narrow" :breaks="showBreaks" @insert="insert" @replace="replace" @locate="locateQuality" @selection-context-menu="openSelectedTextMenu"><template #context><StringDetails :editor="e" /></template></AuxPanel>
       </div>
       <EditorNavigation v-if="e.selected" :editor="e" class="compact-editor-footer" @open="openString" />
@@ -666,7 +714,7 @@ onBeforeUnmount(() => { if (batchPrefillBusy.value) stopBatchPrefill(); stopResi
     </main>
     </div>
     <Teleport to=".app-shell"><Transition name="fade"><div v-if="termTranslationOptions.length" ref="termTranslationPopup" class="term-translation-popup" role="menu" aria-label="选择要填入的译名" :style="termTranslationPopupStyle" @pointerdown.stop @click.stop><button v-for="option in termTranslationOptions" :key="option.translation" class="term-fill-pill" role="menuitem" @click="chooseTermTranslation(option)">{{ option.translation }}</button></div></Transition></Teleport>
-    <Transition name="dialog"><div v-if="showBatchPrefill" class="modal-backdrop" @click.self="closeBatchPrefill"><section class="info-dialog batch-prefill-dialog" role="dialog" aria-modal="true" aria-labelledby="batch-prefill-title" :aria-busy="batchPrefillBusy"><button class="icon-button modal-close" aria-label="关闭批量预填充窗口" :disabled="batchPrefillBusy" @click="closeBatchPrefill"><X :size="18" /></button><Languages :size="28" class="dialog-icon" /><h2 id="batch-prefill-title">全文翻译并预填充</h2><p class="dialog-description">逐条翻译当前文件中的原文。已有译文、本机草稿和未保存编辑会跳过，避免覆盖。</p><fieldset class="batch-prefill-options" :disabled="batchPrefillBusy"><legend>选择翻译范围</legend><label><input v-model="batchPrefillScope" type="radio" name="batch-prefill-scope" value="selected" /><span><strong>已选中的文本</strong><small>{{ e.selectedIds.length }} 条，仅限当前列表页的勾选项。</small></span></label><label><input v-model="batchPrefillScope" type="radio" name="batch-prefill-scope" value="untranslated" /><span><strong>本文件所有未翻译文本</strong><small>读取整个当前文件的未翻译条目（约 {{ e.untranslated }} 条），不受当前页和搜索结果限制。</small></span></label></fieldset><fieldset class="batch-prefill-options" :disabled="batchPrefillBusy"><legend>选择保存位置</legend><label><input v-model="batchPrefillDestination" type="radio" name="batch-prefill-destination" value="local" /><span><strong>只保存在本机</strong><small>保存为本机草稿，ParaTranz 词条状态保持不变。</small></span></label><label><input v-model="batchPrefillDestination" type="radio" name="batch-prefill-destination" value="paratranz" /><span><strong>保存到 ParaTranz</strong><small>提交译文并将词条状态设为“未翻译”。</small></span></label></fieldset><div v-if="batchPrefillBusy" class="batch-prefill-progress" role="status"><div><LoadingIndicator :size="15" label="正在翻译" />正在翻译并保存 {{ batchPrefillProgress }} / {{ batchPrefillTotal }} 条</div><div class="progress-track"><span :style="{ width: `${batchPrefillTotal ? batchPrefillProgress / batchPrefillTotal * 100 : 0}%` }"></span></div></div><p v-if="batchPrefillError" class="batch-prefill-result" :class="{ success: batchPrefillError.startsWith('已完成') }" role="status">{{ batchPrefillError }}</p><div class="batch-prefill-actions"><button class="button" :disabled="batchPrefillBusy" @click="closeBatchPrefill">关闭</button><button v-if="batchPrefillBusy" class="button primary" @click="stopBatchPrefill()"><X :size="14" />停止</button><button v-else class="button primary" :disabled="!auxiliaryPanel?.canPrefillTranslation || (batchPrefillScope === 'selected' && !e.selectedIds.length) || !e.connected || !e.sessionInfo.authenticated" @click="startBatchPrefill"><Languages :size="14" />开始翻译并预填充</button></div></section></div></Transition>
+    <Transition name="dialog"><div v-if="showBatchPrefill" class="modal-backdrop" @click.self="closeBatchPrefill"><section class="info-dialog batch-prefill-dialog" role="dialog" aria-modal="true" aria-labelledby="batch-prefill-title" :aria-busy="batchPrefillBusy"><button class="icon-button modal-close" aria-label="关闭批量预填充窗口" :disabled="batchPrefillBusy" @click="closeBatchPrefill"><X :size="18" /></button><Languages :size="28" class="dialog-icon" /><h2 id="batch-prefill-title">全文翻译并预填充</h2><p class="dialog-description">逐条翻译当前文件中的原文。读取时已有译文、本机草稿和未保存编辑的条目会跳过；提交到 ParaTranz 时若远端随后发生修改，仍会覆盖。</p><fieldset class="batch-prefill-options" :disabled="batchPrefillBusy"><legend>选择翻译范围</legend><label><input v-model="batchPrefillScope" type="radio" name="batch-prefill-scope" value="selected" /><span><strong>已选中的文本</strong><small>{{ e.selectedIds.length }} 条，仅限当前列表页的勾选项。</small></span></label><label><input v-model="batchPrefillScope" type="radio" name="batch-prefill-scope" value="untranslated" /><span><strong>本文件所有未翻译文本</strong><small>读取整个当前文件的未翻译条目（约 {{ e.untranslated }} 条），不受当前页和搜索结果限制。</small></span></label></fieldset><fieldset class="batch-prefill-options" :disabled="batchPrefillBusy"><legend>选择保存位置</legend><label><input v-model="batchPrefillDestination" type="radio" name="batch-prefill-destination" value="local" /><span><strong>只保存在本机</strong><small>保存为本机草稿，ParaTranz 词条状态保持不变。</small></span></label><label><input v-model="batchPrefillDestination" type="radio" name="batch-prefill-destination" value="paratranz" /><span><strong>保存到 ParaTranz</strong><small>提交译文并将词条状态设为“未翻译”。</small></span></label></fieldset><div v-if="batchPrefillBusy" class="batch-prefill-progress" role="status"><div><LoadingIndicator :size="15" label="正在翻译" />正在翻译并保存 {{ batchPrefillProgress }} / {{ batchPrefillTotal }} 条</div><div class="progress-track"><span :style="{ width: `${batchPrefillTotal ? batchPrefillProgress / batchPrefillTotal * 100 : 0}%` }"></span></div></div><p v-if="batchPrefillError" class="batch-prefill-result" role="status">{{ batchPrefillError }}</p><details v-if="batchPrefillFailures.length"><summary>查看全部 {{ batchPrefillFailures.length }} 条失败记录</summary><p v-for="(failure, index) in batchPrefillFailures" :key="index">{{ failure }}</p></details><div v-if="batchReport.length" class="batch-prefill-actions"><button class="button compact" :disabled="batchPrefillBusy" @click="exportBatchReport">导出处理报告</button><button v-if="batchFailedItems.length" class="button compact" :disabled="batchPrefillBusy" @click="retryBatchFailures">重试失败项</button></div><div class="batch-prefill-actions"><button class="button" :disabled="batchPrefillBusy" @click="closeBatchPrefill">关闭</button><button v-if="batchPrefillBusy" class="button primary" @click="stopBatchPrefill()"><X :size="14" />停止</button><button v-else class="button primary" :disabled="!auxiliaryPanel?.canPrefillTranslation || (batchPrefillScope === 'selected' && !e.selectedIds.length) || !e.connected || !e.sessionInfo.authenticated" @click="startBatchPrefill"><Languages :size="14" />开始翻译并预填充</button></div></section></div></Transition>
     <Transition name="dialog"><div v-if="showShortcuts || showOverview" class="modal-backdrop" @click.self="showShortcuts = false; showOverview = false"><section class="info-dialog" role="dialog" aria-modal="true" :aria-label="showShortcuts ? '快捷键' : '文件概览'"><button class="icon-button modal-close" aria-label="关闭窗口" @click="showShortcuts = false; showOverview = false"><X :size="18" /></button><template v-if="showShortcuts"><Keyboard :size="28" class="dialog-icon" /><h2>快捷键</h2><div v-for="[key, label] in shortcuts" :key="key" class="shortcut-row"><span>{{ label }}</span><kbd>{{ key }}</kbd></div></template><template v-else><BarChart3 :size="28" class="dialog-icon" /><h2>文件概览</h2><p class="dialog-description">{{ e.file.name }}<span v-if="!e.connected"> · 7 条样例</span></p><div class="progress-heading"><strong>{{ progress }}<small>%</small></strong><span>{{ e.file.translated }} / {{ e.file.total }} 已翻译</span></div><div class="progress-track"><span :style="{ width: `${progress}%` }"></span></div><div class="overview-stats"><div><span>未翻译</span><strong>{{ e.untranslated }}</strong></div><div><span>有疑问</span><strong>{{ e.file.disputed }}</strong></div><div><span>已检查</span><strong>{{ e.file.checked }}</strong></div><div><span>已审核</span><strong>{{ e.file.reviewed }}</strong></div></div></template></section></div></Transition>
     <Teleport to=".app-shell"><Transition name="menu"><div v-if="selectionContextMenu" class="selection-context-menu" role="menu" :style="selectionMenuStyle(selectionContextMenu)" @click.stop><button role="menuitem" @click="runSelectionContextAction()">{{ selectionContextMenu.word ? '查询剑桥中文释义' : selectionContextMenu.selected ? '翻译所选内容到简体中文' : '翻译当前句子到简体中文' }}</button><button v-if="!selectionContextMenu.word && (e.termsBusy || (preservedSelection?.replacements.length || 0) > 0)" role="menuitem" :disabled="e.termsBusy || !preservedSelection?.replacements.length" @click="runSelectionContextAction(true)">{{ e.termsBusy ? '保留译名翻译（术语加载中…）' : `保留译名翻译（${preservedSelection?.replacements.length} 处）` }}</button><p>{{ selectionContextMenu.text }}</p></div></Transition></Teleport>
   </div>
