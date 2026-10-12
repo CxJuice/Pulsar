@@ -35,7 +35,7 @@
   "build": {
     "appId": "com.42kit.sctranslatekit",
     "productName": "ScTranslateKit",
-    "artifactName": "ScTranslateKit-${version}-${os}-${arch}.${ext}",
+    "artifactName": "ScTranslateKit-${version}-build-${buildNumber}-${os}-${arch}.${ext}",
     "directories": {
       "output": "release/desktop"
     },
@@ -67,9 +67,9 @@
       "maintainer": "CxJuice <110189934+CxJuice@users.noreply.github.com>",
       "extraResources": [{ "from": "service/target/release/sctranslate-service", "to": "service/sctranslate-service" }]
     },
-    "portable": { "artifactName": "ScTranslateKit-${version}-Portable-${arch}.${ext}" },
+    "portable": { "artifactName": "ScTranslateKit-${version}-build-${buildNumber}-Portable-${arch}.${ext}" },
     "nsis": {
-      "artifactName": "ScTranslateKit-${version}-Setup-${arch}.${ext}",
+      "artifactName": "ScTranslateKit-${version}-build-${buildNumber}-Setup-${arch}.${ext}",
       "oneClick": false,
       "perMachine": false,
       "selectPerMachineByDefault": false,

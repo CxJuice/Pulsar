@@ -96,13 +96,13 @@ class ReleasePipelineTests(unittest.TestCase):
         bundled.chmod(0o755)
         (self.root / 'package.json').write_text('{"version":"0.1.1+build.42"}', encoding='utf-8')
         packages = {
-            f'ScTranslateKit-0.1.1+build.42-linux-x64.{extension}': extension.encode()
+            f'ScTranslateKit-0.1.1-build-42-linux-x64.{extension}': extension.encode()
             for extension in ['AppImage', 'deb', 'rpm', 'tar.gz']
         }
         for name, content in packages.items():
             (output / name).write_bytes(content)
 
-        with patch.dict(os.environ, {'CI_PLATFORM': 'linux', 'CI_ARCH': 'x64', 'GITHUB_SHA': 'linux-test-commit'}, clear=True), \
+        with patch.dict(os.environ, {'CI_PLATFORM': 'linux', 'CI_ARCH': 'x64', 'GITHUB_SHA': 'linux-test-commit', 'BUILD_NUMBER': '42'}, clear=True), \
                 patch.object(ci_artifacts, 'ROOT', self.root), patch.object(ci_artifacts, 'OUTPUT', output), \
                 patch.object(ci_artifacts, 'DESTINATION', destination):
             ci_artifacts.main()

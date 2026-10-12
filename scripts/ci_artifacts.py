@@ -68,6 +68,11 @@ def main() -> None:
     expected_count = {'win': 3, 'mac': 2, 'linux': 4}[platform]
     if len(packages) != expected_count:
         raise RuntimeError(f'Expected {expected_count} packages; found {len(packages)}')
+    build_number = os.environ.get('BUILD_NUMBER')
+    if build_number:
+        marker = f'-build-{build_number}-'
+        if any(marker not in package.name for package in packages):
+            raise RuntimeError(f'Package filenames must include the automatic build number {build_number}')
     DESTINATION.mkdir(parents=True, exist_ok=True)
     manifest = {'version': json.loads((ROOT / 'package.json').read_text(encoding='utf-8'))['version'], 'platform': platform, 'arch': arch, 'commit': os.environ['GITHUB_SHA'], 'packages': []}
     for package in packages:
