@@ -21,12 +21,30 @@ if (smoke) {
 }
 const serviceKey = randomBytes(32).toString('hex');
 let mainWindow, loginWindow, dictionaryView, translatorView, auxCustomizationWindow, sidecar, serviceUrl, closing = false;
+let closeApproved = smoke, closeCheckPending = false, closeCheckTimer;
+async function resolveCloseCheck(ok, message = '') {
+  if (!closeCheckPending || !mainWindow || mainWindow.isDestroyed()) return;
+  closeCheckPending = false;
+  clearTimeout(closeCheckTimer);
+  if (!ok) {
+    const result = await dialog.showMessageBox(mainWindow, {
+      type: 'warning', title: '关闭前仍有未保存工作',
+      message: message || '草稿或后台提交尚未完成。',
+      detail: '继续编辑可重试保存；强制退出可能丢失尚未落盘的修改。',
+      buttons: ['继续编辑', '强制退出'], defaultId: 0, cancelId: 0,
+    });
+    if (result.response !== 1 || mainWindow.isDestroyed()) return;
+  }
+  closeApproved = true;
+  mainWindow.close();
+}
 let restartingService = false, activeServiceCredentials = null;
+let connectionRestoration = Promise.resolve();
 let windowStateTimer, windowWasMaximized = false, dictionaryLookupRequest = 0;
 let translatorProxySignature = '', translatorViewRequest = 0, translatorLastFilledText = '';
 const activeTranslationRequests = new Map();
 let auxCustomizationWindowLoaded = false, auxCustomizationState = { visible: false, mode: 'customize', bounds: null, items: [], theme: {}, draggedPanel: null, groupId: null };
-const actions = new Set(['session', 'projects', 'project', 'updateProject', 'files', 'file', 'renameFile', 'strings', 'string', 'suggestions', 'memory', 'terms', 'projectTerms', 'term', 'createTerm', 'updateTerm', 'deleteTerm', 'history', 'save', 'drafts', 'draft']);
+const actions = new Set(['session', 'projects', 'project', 'updateProject', 'files', 'file', 'renameFile', 'strings', 'string', 'suggestions', 'memory', 'terms', 'projectTerms', 'term', 'createTerm', 'updateTerm', 'deleteTerm', 'history', 'save', 'drafts', 'draft', 'legacyDrafts', 'claimLegacyDrafts']);
 const credentialFile = () => path.join(app.getPath('userData'), 'credentials.bin');
 const connectionPreferenceFile = () => path.join(app.getPath('userData'), 'connection.json');
 const sessionCookieFile = () => path.join(app.getPath('userData'), 'paratranz-session.bin');
@@ -298,9 +316,11 @@ function postTranslationJson(target, headers, payload, agent, signal) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) { reject(new Error('翻译已取消')); return; }
     let settled = false;
+    let deadline;
     const settle = (callback, value) => {
       if (settled) return;
       settled = true;
+      clearTimeout(deadline);
       signal?.removeEventListener('abort', abortRequest);
       callback(value);
     };
@@ -313,6 +333,11 @@ function postTranslationJson(target, headers, payload, agent, signal) {
     }, response => {
       let responseBody = '';
       response.setEncoding('utf8');
+      response.on('aborted', () => settle(reject, new Error('翻译服务响应中途断开')));
+      response.on('error', error => settle(reject, error));
+      response.on('close', () => {
+        if (!response.complete) settle(reject, new Error('翻译服务响应中途断开'));
+      });
       response.on('data', chunk => {
         responseBody += chunk;
         if (responseBody.length > 2_000_000) request.destroy(new Error('翻译服务响应过大'));
@@ -329,6 +354,7 @@ function postTranslationJson(target, headers, payload, agent, signal) {
     });
     request.on('timeout', () => request.destroy(new Error('翻译请求超时')));
     request.on('error', error => settle(reject, error));
+    deadline = setTimeout(() => request.destroy(new Error('翻译请求超时')), 45000);
     signal?.addEventListener('abort', abortRequest, { once: true });
     if (signal?.aborted) abortRequest();
     request.end(body);
@@ -975,8 +1001,8 @@ async function stopService() {
     try { target.kill(); } catch { finish(); }
   });
 }
-async function restartService() {
-  const credentials = activeServiceCredentials ? { ...activeServiceCredentials } : null;
+async function restartService(previousCredentials = activeServiceCredentials) {
+  const credentials = previousCredentials ? { ...previousCredentials } : null;
   restartingService = true;
   try {
     await stopService();
@@ -986,6 +1012,7 @@ async function restartService() {
       if (!restored.ok) {
         activeServiceCredentials = null;
         log(`Credentials could not be restored after service restart: ${restored.message}`);
+        throw new Error(`代理已切换，但 ParaTranz 登录恢复失败：${restored.message}`);
       }
     }
   } finally { restartingService = false; }
@@ -1123,6 +1150,15 @@ async function login(project, presenceOnly = false) {
   });
 }
 function registerIpc() {
+  ipcMain.handle('sc:build-info', event => {
+    validateSender(event);
+    try { return JSON.parse(fs.readFileSync(path.join(app.getAppPath(), '.output/public/build-info.json'), 'utf8')); }
+    catch { return null; }
+  });
+  ipcMain.on('sc:close-response', (event, result) => {
+    validateSender(event);
+    void resolveCloseCheck(result?.ok === true, typeof result?.message === 'string' ? result.message.slice(0, 500) : '');
+  });
   ipcMain.handle('sc:presence-login', async (event, project) => {
     validateSender(event);
     if (!Number.isSafeInteger(project) || project <= 0 || project > 2147483647) return { ok: false, message: '项目 ID 无效' };
@@ -1142,6 +1178,7 @@ function registerIpc() {
   });
   ipcMain.handle('sc:connect', async (event, token, remember, project) => {
     validateSender(event);
+    await connectionRestoration;
     if (typeof token !== 'string' || !token.trim() || token.length > 16384 || /[\r\n]/.test(token) || !Number.isSafeInteger(project) || project < 0 || project > 2147483647) return { ok: false, message: 'Token 或项目 ID 无效' };
     const result = await serviceRequest('/credentials', 'POST', { token: token.trim(), projectId: project });
     if (result.ok) {
@@ -1154,6 +1191,7 @@ function registerIpc() {
   });
   ipcMain.handle('sc:login', async (event, project) => {
     validateSender(event);
+    await connectionRestoration;
     if (!Number.isSafeInteger(project) || project < 0 || project > 2147483647) return { ok: false, message: '项目 ID 无效' };
     const result = await login(project);
     if (result.ok) rememberConnectionMethod('session');
@@ -1161,6 +1199,7 @@ function registerIpc() {
   });
   ipcMain.handle('sc:disconnect', async event => {
     validateSender(event);
+    await connectionRestoration;
     presence.stop();
     activeServiceCredentials = null;
     if (fs.existsSync(credentialFile())) fs.unlinkSync(credentialFile());
@@ -1255,13 +1294,30 @@ function registerIpc() {
   ipcMain.handle('sc:translation-settings:save', async (event, settings) => {
     validateSender(event);
     try {
-      const previousProxy = JSON.stringify(readTranslationSettings().proxy);
+      await connectionRestoration;
+      const previousSettings = readTranslationSettings();
+      const previousProxy = JSON.stringify(previousSettings.proxy);
+      if (activeTranslationRequests.size && JSON.stringify(settings?.proxy) !== previousProxy) throw new Error('翻译请求正在进行，请先等待完成或停止后再切换代理');
+      const previousCredentials = activeServiceCredentials ? { ...activeServiceCredentials } : null;
       const data = saveTranslationSettings(settings);
       const savedSettings = readTranslationSettings();
       if (previousProxy !== JSON.stringify(savedSettings.proxy)) {
-        await configureGlobalProxy(savedSettings);
-        translatorProxySignature = '';
-        await restartService();
+        try {
+          await configureGlobalProxy(savedSettings);
+          translatorProxySignature = '';
+          await restartService(previousCredentials);
+        } catch (reason) {
+          try {
+            persistTranslationSettings(previousSettings);
+            await configureGlobalProxy(previousSettings);
+            translatorProxySignature = '';
+            await restartService(previousCredentials);
+          } catch (rollbackError) {
+            mainWindow?.webContents.send('sc:session-restored', { ok: false, sessionLost: true, message: `代理切换及回滚均失败：${rollbackError.message}` });
+            throw new Error(`代理切换失败：${reason.message}；回滚失败：${rollbackError.message}`);
+          }
+          throw new Error(`代理切换失败，已恢复原设置：${reason.message}`);
+        }
       }
       return { ok: true, data };
     }
@@ -1331,17 +1387,16 @@ async function smokeCapture() {
   const folder = process.env.SCKIT_SMOKE_PATH || path.join(app.getAppPath(), 'artifacts');
   fs.mkdirSync(folder, { recursive: true });
   for (let attempt = 0; attempt < 100; attempt++) {
-    if (await mainWindow.webContents.executeJavaScript('Boolean(document.querySelector(".string-row"))')) break;
+    if (await mainWindow.webContents.executeJavaScript('document.body?.innerText.includes("开始你的翻译工作") || Boolean(document.querySelector(".string-row"))')) break;
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   const status = await serviceRequest('/health', 'GET');
-  const ui = await mainWindow.webContents.executeJavaScript('({title:document.title,rows:document.querySelectorAll(".string-row").length,bridge:!!window.scKit,source:document.querySelector(".source-content")?.innerText})');
+  const ui = await mainWindow.webContents.executeJavaScript('({title:document.title,rows:document.querySelectorAll(".string-row").length,welcome:document.body?.innerText.includes("开始你的翻译工作"),bridge:!!window.scKit,source:document.querySelector(".source-content")?.innerText})');
   const ipc = await mainWindow.webContents.executeJavaScript(`(async () => {
     const session = await window.scKit.request('session', {});
-    const draft = await window.scKit.request('draft', {projectId:1,stringId:1,translation:'diagnostic draft',stage:1,updatedAt:new Date().toISOString()});
-    const drafts = await window.scKit.request('drafts', {});
-    const removed = await window.scKit.request('draft', {projectId:1,stringId:1,translation:'',stage:0,remove:true});
-    return {session,draftStored:draft.ok && drafts.data?.['1/1']?.translation === 'diagnostic draft',draftRemoved:removed.ok};
+    const draft = await window.scKit.request('draft', {accountId:1,projectId:1,stringId:1,translation:'diagnostic draft',stage:1,updatedAt:new Date().toISOString()});
+    const drafts = await window.scKit.request('drafts', {accountId:1});
+    return {session,draftProtected:!draft.ok && !drafts.ok};
   })()`);
   const network = process.argv.includes('--network-check')
     ? await serviceRequest('/credentials', 'POST', {token:'sckit-invalid-diagnostic-token',projectId:8340}) : null;
@@ -1352,7 +1407,7 @@ async function smokeCapture() {
   fs.writeFileSync(path.join(folder, 'electron-preview.png'), image.toPNG());
   log(`Smoke capture: ${ui.rows} rows, bridge=${ui.bridge}`);
   closing = true; sidecar?.kill();
-  app.exit(ui.rows === 7 && ui.bridge && status.ok && ipc.session.ok && ipc.draftStored && ipc.draftRemoved && (!network || (!network.ok && network.status === 401)) ? 0 : 1);
+  app.exit(ui.welcome && ui.rows === 0 && ui.bridge && status.ok && ipc.session.ok && ipc.draftProtected && (!network || (!network.ok && network.status === 401)) ? 0 : 1);
 }
 
 function revealEditor() {
@@ -1378,7 +1433,6 @@ else {
     await registerProtocol();
     await configureGlobalProxy();
     await startService();
-    if (!smoke) await restoreConnection();
     const restored = restoredWindowState();
     windowWasMaximized = restored.maximized;
     mainWindow = new BrowserWindow({ ...restored.bounds, minWidth: restored.minWidth, minHeight: restored.minHeight, frame: false, backgroundColor: '#ffffff', show: false, icon: appIcon,
@@ -1391,7 +1445,18 @@ else {
     mainWindow.on('move', () => { scheduleWindowState(); updateAuxCustomizationWindowBounds(); });
     mainWindow.on('maximize', () => { windowWasMaximized = true; scheduleWindowState(); });
     mainWindow.on('unmaximize', () => { windowWasMaximized = false; scheduleWindowState(); });
-    mainWindow.on('close', rememberWindowState);
+    mainWindow.on('close', event => {
+      if (!closeApproved) {
+        event.preventDefault();
+        if (!closeCheckPending) {
+          closeCheckPending = true;
+          mainWindow.webContents.send('sc:prepare-close');
+          closeCheckTimer = setTimeout(() => { void resolveCloseCheck(false, '关闭前的保存检查没有响应。'); }, 60000);
+        }
+        return;
+      }
+      rememberWindowState();
+    });
     mainWindow.on('closed', () => {
       if (auxCustomizationWindow && !auxCustomizationWindow.isDestroyed()) auxCustomizationWindow.destroy();
       auxCustomizationWindow = undefined;
@@ -1407,7 +1472,16 @@ else {
     registerIpc();
     await mainWindow.loadURL(devUrl || 'sckit://app/');
     if (smoke) await smokeCapture();
-    else { if (restored.maximized) mainWindow.maximize(); revealEditor(); }
+    else {
+      if (restored.maximized) mainWindow.maximize();
+      revealEditor();
+      connectionRestoration = restoreConnection()
+        .catch(error => ({ ok: false, message: error.message || '登录恢复失败' }))
+        .then(result => {
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('sc:session-restored', { ok: result.ok, message: result.message || '' });
+          return result;
+        });
+    }
     log('Editor window loaded');
   }).catch(error => {
     log(`${smoke ? 'Diagnostic' : 'Startup'} failed: ${error.message}`);
@@ -1415,6 +1489,11 @@ else {
     else { dialog.showErrorBox('ScTranslateKit 启动失败', error.message); app.quit(); }
   });
 }
-app.on('before-quit', () => { rememberWindowState(); presence.stop(); closing = true; if (sidecar) sidecar.kill(); if (dictionaryView && !dictionaryView.webContents.isDestroyed()) dictionaryView.webContents.destroy(); });
+app.on('before-quit', event => {
+  if (!closeApproved && mainWindow && !mainWindow.isDestroyed()) { event.preventDefault(); mainWindow.close(); return; }
+  rememberWindowState(); presence.stop(); closing = true;
+  if (sidecar) sidecar.kill();
+  if (dictionaryView && !dictionaryView.webContents.isDestroyed()) dictionaryView.webContents.destroy();
+});
 app.on('will-quit', () => { if (sidecar) sidecar.kill(); });
 app.on('window-all-closed', () => app.quit());

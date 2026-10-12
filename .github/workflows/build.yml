@@ -59,12 +59,14 @@ jobs:
         if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential ruby ruby-dev rpm libarchive-tools
+          sudo apt-get install -y build-essential ruby ruby-dev rpm libarchive-tools xvfb
           sudo gem install fpm --no-document
       - name: Install dependencies
         run: npm ci
       - name: Check desktop state and proxy behavior
         run: npm run test:electron
+      - name: Check frontend types
+        run: npm run typecheck
       - name: Set up Rust
         run: |
           rustup toolchain install stable --profile minimal
@@ -81,6 +83,8 @@ jobs:
             ~/.cargo/git
             service/target
           key: rust-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('service/Cargo.lock') }}
+      - name: Test Rust service
+        run: cargo test --locked --manifest-path service/Cargo.toml
       - name: Compile Rust service
         run: |
           mkdir -p service/target/release
@@ -97,6 +101,11 @@ jobs:
           fi
       - name: Build frontend
         run: npm run generate
+      - name: Record build source
+        run: node scripts/write-build-info.mjs
+      - name: Smoke test desktop UI and IPC
+        if: matrix.platform == 'linux' && matrix.arch == 'x64'
+        run: xvfb-run -a --server-args='-screen 0 1600x1000x24' npm start -- --smoke
       - name: Package application
         run: |
           case "$CI_PLATFORM" in

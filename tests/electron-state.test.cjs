@@ -96,6 +96,22 @@ test('global proxy settings cover all desktop sessions and encode IPv6 correctly
   assert.throws(() => h.run(`proxyForTest({ mode: 'socks5', host: '127.0.0.1', port: 65536 })`));
 });
 
+test('proxy change rolls settings back when service restoration fails', async t => {
+  const h = harness(t);
+  h.run(`validateSender = () => {}; globalThis.restartCount = 0;
+    configureGlobalProxy = async settings => { globalThis.lastProxy = settings.proxy.mode; };
+    restartService = async () => { if (++restartCount === 1) throw new Error('simulated restart failure'); };
+    registerIpc()`);
+  const result = await h.ipcHandlers.get('sc:translation-settings:save')({}, {
+    ...h.run('defaultTranslationSettings()'), proxy: { mode: 'direct' },
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.message, /已恢复原设置/);
+  assert.equal(h.run('readTranslationSettings().proxy.mode'), 'system');
+  assert.equal(h.run('lastProxy'), 'system');
+  assert.equal(h.run('restartCount'), 2);
+});
+
 test('connectivity probes finish at response headers and enforce an overall deadline', async t => {
   const h = harness(t);
   const server = http.createServer((request, response) => {
@@ -205,4 +221,23 @@ test('direct mode removes inherited proxy environment when restarting the servic
   assert.equal(h.run('activeServiceCredentials'), null);
   h.run('closing = true');
   await h.run('stopService()');
+});
+
+test('translation request rejects when a response disconnects before its body completes', async t => {
+  const h = harness(t);
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': '1000' });
+    response.write('{"partial":');
+    setTimeout(() => response.destroy(), 10);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const target = new URL(`http://127.0.0.1:${server.address().port}/`);
+  await assert.rejects(
+    Promise.race([
+      h.context.postTranslationJson(target, {}, {}),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('request remained pending')), 1000)),
+    ]),
+    /翻译服务响应中途断开/,
+  );
 });

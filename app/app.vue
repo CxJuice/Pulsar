@@ -2,7 +2,44 @@
 import { appearanceCssVariables, appearanceStorageKey, defaultAppearanceSettings, parseAppearanceSettings } from '~/utils/appearance'
 
 const editor = reactive(useEditor())
-const navigation = reactive(useWorkspaceNavigation(editor))
+const closeFlushers = new Set<() => Promise<void>>()
+async function flushEditorSurfaces() {
+  await editor.flushDraft(true)
+  await Promise.all([...closeFlushers].map(flush => flush()))
+}
+provide('workspace-close-flusher', (flush: () => Promise<void>) => {
+  closeFlushers.add(flush)
+  return () => closeFlushers.delete(flush)
+})
+provide('workspace-flush-surfaces', flushEditorSurfaces)
+async function prepareClose() {
+  try {
+    await flushEditorSurfaces()
+    await editor.waitForSubmissions()
+    window.scKit?.closeResponse(true)
+  } catch (reason) {
+    editor.error = (reason as Error).message
+    window.scKit?.closeResponse(false, editor.error)
+  }
+}
+let removeBeforeClose: (() => void) | undefined
+let removeSessionRestored: (() => void) | undefined
+async function sessionRestored(result: { ok: boolean; message: string; sessionLost?: boolean }) {
+  if (!result.ok) {
+    editor.error = result.message || '登录恢复失败，可在项目主页重试登录'
+    if (result.sessionLost) { editor.connected = false; editor.sessionInfo = { authenticated: false, mode: 'none' } }
+    return
+  }
+  if (editor.connected) return
+  try {
+    const session = await editor.api<import('~/types/editor').SessionStatus>('session')
+    if (session.authenticated) {
+      await editor.restoreSession(session)
+      navigation.finishGuide()
+    }
+  } catch (reason) { editor.error = (reason as Error).message }
+}
+const navigation = reactive(useWorkspaceNavigation(editor, flushEditorSurfaces))
 const theme = ref('light')
 const translationLayout = ref<'horizontal' | 'vertical'>('horizontal')
 const appearance = ref(defaultAppearanceSettings())
@@ -33,6 +70,8 @@ provide('workspace-translation-layout', translationLayout)
 provide('workspace-appearance', appearance)
 provide('workspace-term-recognition', termRecognitionEnabled)
 onMounted(() => {
+  removeBeforeClose = window.scKit?.onBeforeClose(() => { void prepareClose() })
+  removeSessionRestored = window.scKit?.onSessionRestored(result => { void sessionRestored(result) })
   theme.value = localStorage.getItem('sckit-theme') || 'light'
   try {
     const savedLayout = localStorage.getItem('sckit-translation-layout')
@@ -40,6 +79,7 @@ onMounted(() => {
     appearance.value = parseAppearanceSettings(localStorage.getItem(appearanceStorageKey))
   } catch { /* Use the default layout when storage is unavailable. */ }
 })
+onBeforeUnmount(() => { removeBeforeClose?.(); removeSessionRestored?.() })
 </script>
 <template>
   <div class="app-shell" :data-theme="theme" :style="appearanceStyle">

@@ -82,6 +82,7 @@ async fn setup() -> (Arc<AppState>, Arc<MockState>, tokio::task::JoinHandle<()>)
             token: "test-token".into(),
             ..Default::default()
         })),
+        active_account_id: RwLock::new(Some(1)),
         drafts: Mutex::new(BTreeMap::new()),
         draft_path: std::env::temp_dir().join(format!(
             "sckit-test-{}-{}.json",
@@ -218,10 +219,28 @@ async fn drafts_persist_and_invalid_identifiers_are_rejected() {
     let (state, _, handle) = setup().await;
     let (status, _) = request(state.clone(), "strings", json!({"projectId":"../../etc"})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let (status,_)=request(state.clone(),"draft",json!({"projectId":8340,"stringId":1088220072,"translation":"draft","stage":2,"updatedAt":"2026-10-11"})).await;
+    let (status,_)=request(state.clone(),"draft",json!({"accountId":1,"projectId":8340,"stringId":1088220072,"translation":"draft","stage":2,"updatedAt":"2026-10-11"})).await;
     assert_eq!(status, StatusCode::OK);
     let disk: Value = serde_json::from_slice(&std::fs::read(&state.draft_path).unwrap()).unwrap();
-    assert_eq!(disk["8340/1088220072"]["translation"], "draft");
+    assert_eq!(disk["1/8340/1088220072"]["translation"], "draft");
+    let (status, own) = request(state.clone(), "drafts", json!({"accountId":1})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(own["8340/1088220072"]["translation"], "draft");
+    let (status, _) = request(state.clone(), "drafts", json!({"accountId":2})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = request(state.clone(), "draft", json!({"accountId":2,"projectId":8340,"stringId":1088220072,"translation":"other","stage":2})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    state.drafts.lock().await.insert("8340/22".into(), json!({"translation":"unassigned","stage":1,"updatedAt":"2026-10-10"}));
+    let (status, legacy) = request(state.clone(), "legacyDrafts", json!({"accountId":1,"projectId":8340})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(legacy["count"], 1);
+    let (status, imported) = request(state.clone(), "claimLegacyDrafts", json!({"accountId":1,"projectId":8340})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(imported["imported"], 1);
+    let (status, own) = request(state.clone(), "drafts", json!({"accountId":1})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(own["8340/22"]["translation"], "unassigned");
+    assert!(state.drafts.lock().await.contains_key("8340/22"));
     let _ = std::fs::remove_file(&state.draft_path);
     let _ = std::fs::remove_file(state.draft_path.with_extension("bak"));
     handle.abort();

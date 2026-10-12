@@ -19,6 +19,8 @@ type TermListItem =
   | { kind: 'candidate'; key: string; entry: LocalUnresolvedTerm }
 const scope = ref<TermScope>('matched'), search = ref(''), page = ref(1)
 const catalog = ref<Term[]>([]), catalogLoaded = ref(false), catalogBusy = ref(false), catalogError = ref(''), loadCount = ref(0)
+const catalogSyncedAt = ref('')
+const catalogFresh = () => !!catalogSyncedAt.value && Date.now() - Date.parse(catalogSyncedAt.value) < 10 * 60_000
 const communityEntries = ref<CommunityTranslationCandidate[]>([]), communityBusy = ref(false), communityError = ref(''), communityWarnings = ref<string[]>([]), communityFetchedAt = ref('')
 const localTerms = ref<LocalUnresolvedTerm[]>([]), localError = ref('')
 const formOpen = ref(false), snapshot = ref<Term | null>(null), operation = ref(''), error = ref(''), notice = ref(''), confirmDelete = ref(false), focusedId = ref<number | null>(null)
@@ -108,7 +110,7 @@ const canDelete = computed(() => props.editor.connected && props.editor.sessionI
   (navigation.projects.find(project => project.id === props.editor.project.id)?.permission || 0) >= 3))
 
 async function loadCatalog(force = false) {
-  if (catalogBusy.value || (catalogLoaded.value && !force)) return
+  if (catalogBusy.value || (catalogLoaded.value && !force && catalogFresh())) return
   const sequence = ++catalogSequence, projectId = props.editor.project.id
   const scopeKey = projectTermCatalogScope(projectId, props.editor.sessionInfo.user?.id, props.editor.sessionInfo.mode)
   catalogBusy.value = true; catalogError.value = ''; loadCount.value = 0
@@ -118,14 +120,14 @@ async function loadCatalog(force = false) {
         const cached = await readProjectTermCatalog(scopeKey)
         if (sequence !== catalogSequence) return
         if (cached) {
-          catalog.value = cached.terms; catalogLoaded.value = true
+          catalog.value = cached.terms; catalogLoaded.value = true; catalogSyncedAt.value = cached.syncedAt
         }
       } catch (reason) {
         if (sequence !== catalogSequence) return
         catalogError.value = `读取本机术语缓存失败：${(reason as Error).message}`
       }
     }
-    if (!force && catalogLoaded.value) return
+    if (!force && catalogLoaded.value && catalogFresh()) return
     if (!props.editor.connected || !props.editor.sessionInfo.authenticated) {
       if (!catalogLoaded.value) catalogError.value = '尚无本机术语缓存，请连接 ParaTranz 后重试'
       return
@@ -151,7 +153,8 @@ async function loadCatalog(force = false) {
     if (unique.size !== rows.length || unique.size !== expectedRowCount) throw new Error('术语分页结果不完整，保留现有缓存并请重试')
     const terms = [...unique.values()]
     catalog.value = terms; catalogLoaded.value = true
-    await syncProjectTermCatalog(scopeKey, terms)
+    const synced = await syncProjectTermCatalog(scopeKey, terms)
+    catalogSyncedAt.value = synced.syncedAt
     if (sequence !== catalogSequence) return
     catalogError.value = ''
   } catch (reason) { if (sequence === catalogSequence) catalogError.value = (reason as Error).message }
@@ -275,7 +278,7 @@ watch(search, () => { page.value = 1 })
 watch(pageCount, count => { page.value = Math.min(page.value, count) })
 watch(() => props.editor.selected?.id, () => { if (scope.value === 'matched') { search.value = ''; page.value = 1; focusedId.value = null } })
 watch(() => [props.editor.project.id, props.editor.connected, props.editor.sessionInfo.user?.id, props.editor.sessionInfo.mode], () => {
-  ++catalogSequence; ++operationSequence; catalogBusy.value = false; catalogLoaded.value = false; catalog.value = []; catalogError.value = ''
+  ++catalogSequence; ++operationSequence; catalogBusy.value = false; catalogLoaded.value = false; catalogSyncedAt.value = ''; catalog.value = []; catalogError.value = ''
   operation.value = ''; formOpen.value = false; snapshot.value = null; confirmDelete.value = false; error.value = ''; notice.value = ''; search.value = ''; page.value = 1; focusedId.value = null
   if (scope.value === 'all' && props.editor.panel === 'terms') loadCatalog()
 })
@@ -289,6 +292,7 @@ watch(() => props.editor.panel, value => {
   if (value === 'terms' && scope.value === 'all') loadCatalog()
   if (value === 'terms' && communityProject.value) void loadCommunityCandidates()
 })
+onActivated(() => { if (scope.value === 'all') void loadCatalog() })
 onBeforeUnmount(() => { ++catalogSequence; ++communitySequence; ++operationSequence })
 </script>
 
@@ -310,6 +314,7 @@ onBeforeUnmount(() => { ++catalogSequence; ++communitySequence; ++operationSeque
       <div class="term-form-actions"><button v-if="snapshot" type="button" class="icon-button small term-delete" aria-label="删除此术语" :title="canDelete ? '删除术语' : '仅创建者或管理员可删除'" :disabled="blocked || !canDelete" @click="confirmDelete = !confirmDelete"><Trash2 :size="15" /></button><button v-if="snapshot && error" type="button" class="button compact" :disabled="blocked" @click="beginEdit(snapshot, true)">重新载入</button><span></span><button type="button" class="button compact" :disabled="!!operation" @click="closeForm">取消</button><button class="button primary compact" :disabled="!canSave"><LoadingIndicator v-if="operation === 'save'" :size="13" label="正在保存术语" />{{ operation === 'save' ? '保存中…' : '保存术语' }}</button></div>
       <div v-if="confirmDelete && snapshot" class="term-delete-confirm" role="group" aria-label="确认删除术语"><strong>删除「{{ snapshot.term }}」？</strong><div><button type="button" class="button compact" :disabled="!!operation" @click="confirmDelete = false">取消</button><button type="button" class="button compact danger" :disabled="blocked || !canDelete" @click="remove"><LoadingIndicator v-if="operation === 'delete'" :size="13" label="正在删除术语" />确认删除</button></div></div>
     </form></Transition>
+    <p v-if="scope === 'all' && catalogSyncedAt" class="term-notice" role="status">项目术语上次同步：{{ new Date(catalogSyncedAt).toLocaleString() }}{{ catalogBusy ? ' · 正在更新…' : '' }}</p>
     <p v-if="scope === 'all' && catalogError && catalog.length" class="community-feed-warning" role="status">术语同步失败，继续显示本机缓存：{{ catalogError }}</p>
     <p v-if="scope === 'all' && communityWarnings.length" class="community-feed-warning" role="status">部分讨论帖读取失败：{{ communityWarnings.join('；') }}</p>
     <p v-if="scope === 'all' && catalogError && mergedCandidates.length" class="community-feed-warning" role="status">项目术语加载失败，仍显示已合并的候选内容：{{ catalogError }}</p>

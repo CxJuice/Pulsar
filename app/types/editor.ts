@@ -111,7 +111,7 @@ export interface CambridgeDictionaryData {
     }>
   }>
 }
-export type RequestAction = 'session' | 'projects' | 'project' | 'updateProject' | 'files' | 'file' | 'renameFile' | 'strings' | 'string' | 'suggestions' | 'memory' | 'terms' | 'projectTerms' | 'term' | 'createTerm' | 'updateTerm' | 'deleteTerm' | 'history' | 'save' | 'drafts' | 'draft'
+export type RequestAction = 'session' | 'projects' | 'project' | 'updateProject' | 'files' | 'file' | 'renameFile' | 'strings' | 'string' | 'suggestions' | 'memory' | 'terms' | 'projectTerms' | 'term' | 'createTerm' | 'updateTerm' | 'deleteTerm' | 'history' | 'save' | 'drafts' | 'draft' | 'legacyDrafts' | 'claimLegacyDrafts'
 export interface DesktopBridge {
   presence(target: { projectId: number; stringId: number | null }): Promise<ServiceResult<PresenceState>>
   loginPresence(project: number): Promise<ServiceResult>
@@ -135,5 +135,9 @@ export interface DesktopBridge {
   translatorView(state: { visible: boolean; bounds: { x: number; y: number; width: number; height: number } | null; provider?: TranslationProvider; text?: string; forceText?: boolean }): void
   exportData(content: string, defaultName: string): Promise<boolean>
   window(action: 'minimize' | 'maximize' | 'close'): void
+  onBeforeClose(callback: () => void): () => void
+  closeResponse(ok: boolean, message?: string): void
+  getBuildInfo(): Promise<{ commit: string; sourceFingerprint: string; builtAt: string } | null>
+  onSessionRestored(callback: (result: { ok: boolean; message: string; sessionLost?: boolean }) => void): () => void
 }
 declare global { interface Window { scKit?: DesktopBridge; queryLocalFonts?: () => Promise<LocalFontData[]> } }

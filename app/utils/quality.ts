@@ -3,6 +3,7 @@
 import { tokens } from './text'
 import type { Term } from '~/types/editor'
 import { toEditorText } from './translationText'
+import { splitTranslationAlternatives } from './termHighlights'
 
 export interface QualityIssue {
   type: string; message: string; rule: 'SCCL' | 'SCCL 格式提示' | '编辑器'
@@ -141,7 +142,7 @@ interface TermOccurrence { start: number; end: number }
 
 function termSpellingOccurrences(text: string, term: Term, side: 'source' | 'translation', offset = 0): TermOccurrence[] {
   const spellings = side === 'translation'
-    ? [toEditorText(term.translation)]
+    ? splitTranslationAlternatives(toEditorText(term.translation))
     : [...(term.match || []), ...(term.variants || []), term.term]
   const occurrences = new Map<string, TermOccurrence>()
   for (const spelling of spellings) {
@@ -196,7 +197,7 @@ function termUsageIssues(original: string, translation: string, terms: Term[]): 
 
 export function qualityIssues(original: string, translation: string, key = '', terms: Term[] = []): QualityIssue[] {
   if (!toEditorText(translation).trim()) return []
-  const target = translation.trim(), result = [...termUsageIssues(original, translation, terms), ...entryNumericIssues(original, translation), ...entryPlaceholderIssues(original, translation)]
+  const target = translation, result = [...termUsageIssues(original, translation, terms), ...entryNumericIssues(original, translation), ...entryPlaceholderIssues(original, translation)]
   const formal = key !== ignoredKey, advisory = !key.endsWith(',P')
   if (formal) {
     const a = (toEditorText(original).match(/\n/g) || []).length, b = (toEditorText(target).match(/\n/g) || []).length

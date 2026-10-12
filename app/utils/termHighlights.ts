@@ -47,7 +47,8 @@ export function replaceSourceTerms(text: string, terms: Term[]) {
   const replacePlainText = (value: string) => highlightTerms(value, terms).map(part => {
     const term = part.terms?.[0]
     if (!term?.translation.trim()) return part.text
-    const translation = toEditorText(term.translation)
+    // Multiple approved names are alternatives, not a literal phrase to inject.
+    const translation = splitTranslationAlternatives(toEditorText(term.translation))[0] || ''
     replacements.push({ source: part.text, translation, term })
     return translation
   }).join('')

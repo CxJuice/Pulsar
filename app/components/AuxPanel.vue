@@ -45,7 +45,11 @@ const activeDockPanels = ref<string[]>([props.editor.panel])
 function panelBusyFor(panel: string) { return panel === 'terms' ? props.editor.termsBusy : panel === 'suggestions' ? props.editor.suggestionsBusy : panel === 'history' ? props.editor.historyBusy : false }
 function panelHasDataFor(panel: string) { return panel === 'terms' ? props.editor.terms.length > 0 : panel === 'history' ? props.editor.history.length > 0 : props.editor.suggestions.length > 0 }
 function panelErrorFor(panel: string) { return panel === 'terms' ? props.editor.termsError : panel === 'suggestions' ? props.editor.suggestionsError : panel === 'history' ? props.editor.historyError : '' }
-function retryPanel(panel: string) { if (panel === 'terms') props.editor.loadTerms(true); else props.editor.loadAux() }
+function retryPanel(panel: string) {
+  if (panel === 'terms') void props.editor.loadTerms(true)
+  else if (panel === 'suggestions') void props.editor.loadSuggestions(true)
+  else if (panel === 'history') void props.editor.loadHistory(true)
+}
 function searchKeydown(event: KeyboardEvent) {
   if (props.editor.panel !== 'suggestions' || !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'f') return
   event.preventDefault(); event.stopPropagation()
@@ -278,10 +282,9 @@ function openTranslation() {
 }
 async function sourceWithConfiguredTerms(source: string, translationEntry: StringItem | null, isCurrent: () => boolean) {
   if (translationProvider.value !== 'llm' && useTermTranslations.value && translationEntry && props.editor.connected) {
-    await props.editor.loadTerms()
+    const terms = await props.editor.termsFor(translationEntry)
     if (!isCurrent()) return null
-    if (props.editor.termsError) throw new Error(`项目术语加载失败，无法使用登记译名：${props.editor.termsError}`)
-    source = replaceSourceTerms(source, props.editor.terms).text
+    source = replaceSourceTerms(source, terms).text
   }
   return source
 }
@@ -289,34 +292,33 @@ async function requestConfiguredTranslation(source: string, translationEntry: St
   const preparedSource = await sourceWithConfiguredTerms(source, translationEntry, isCurrent)
   if (preparedSource === null) return null
   source = preparedSource
-  if (translationProvider.value === 'llm' && translationEntry) {
-    await Promise.allSettled([
-      translationLlmContext.value.recommendations && props.editor.selected?.id === translationEntry.id ? props.editor.loadSuggestions() : Promise.resolve(),
-      translationLlmContext.value.terms ? props.editor.loadTerms() : Promise.resolve(),
-    ])
-  }
+  const [suggestions, terms] = translationProvider.value === 'llm' && translationEntry
+    ? await Promise.all([
+      translationLlmContext.value.recommendations ? props.editor.suggestionsFor(translationEntry) : Promise.resolve([]),
+      translationLlmContext.value.terms ? props.editor.termsFor(translationEntry) : Promise.resolve([]),
+    ]) : [[], []]
   if (!isCurrent()) return null
   if (requireSelected && translationEntry && (props.editor.selected?.id !== translationEntry.id || props.editor.selected?.project !== translationEntry.project)) throw new Error('当前词条已切换，请重新发起翻译')
   const context: TranslationPromptContext = {}
   if (translationProvider.value === 'llm' && translationEntry && translationLlmContext.value.key && translationEntry.key) context.key = translationEntry.key
-  if (translationProvider.value === 'llm' && translationEntry && translationLlmContext.value.recommendations && props.editor.selected?.id === translationEntry.id) {
-    context.recommendations = [...props.editor.suggestions]
+  if (translationProvider.value === 'llm' && translationEntry && translationLlmContext.value.recommendations) {
+    context.recommendations = [...suggestions]
       .sort((first, second) => (second.localMatching ?? 0) - (first.localMatching ?? 0))
       .slice(0, translationLlmContext.value.recommendationCount)
       .map(suggestion => ({ original: suggestion.original, translation: suggestion.translation, similarity: suggestion.localMatching ?? 0 }))
   }
   if (translationProvider.value === 'llm' && translationEntry && translationLlmContext.value.terms) {
-    const unresolved = matchLocalUnresolvedTerms(source, readLocalUnresolvedTerms(props.editor.project.id))
+    const unresolved = matchLocalUnresolvedTerms(source, readLocalUnresolvedTerms(translationEntry.project))
     const unresolvedBySource = new Map(unresolved.map(entry => [entry.source.trim().toLocaleLowerCase(), entry]))
     const unresolvedNote = (entry: LocalUnresolvedTerm) => {
       const candidates = entry.candidates.filter(Boolean).slice(0, 8)
       return `社区未定译名（${entry.sourceType}，尚未确认）；候选：${candidates.join('、') || '暂无'}。请根据当前语境参考，无法确认时保留原文。`
     }
-    const confirmedTerms = props.editor.terms.map(term => {
+    const confirmedTerms = terms.map(term => {
       const candidate = unresolvedBySource.get(term.term.trim().toLocaleLowerCase())
       return { term: term.term, translation: term.translation, note: [term.note, candidate ? unresolvedNote(candidate) : ''].filter(Boolean).join('；') }
     })
-    const confirmedSources = new Set(props.editor.terms.map(term => term.term.trim().toLocaleLowerCase()))
+    const confirmedSources = new Set(terms.map(term => term.term.trim().toLocaleLowerCase()))
     const unresolvedTerms = unresolved
       .filter(entry => !confirmedSources.has(entry.source.trim().toLocaleLowerCase()))
       .map(entry => ({ term: entry.source.trim(), translation: entry.source.trim(), note: unresolvedNote(entry) }))
@@ -483,6 +485,20 @@ onMounted(() => {
   })
   document.addEventListener('pointerdown', closeAuxCustomizationOnOutside)
 })
+onDeactivated(() => {
+  endDockDrag()
+  customizationOpen.value = false
+  dictionaryRequest++
+  translationRequest++
+  cancelTranslationRequest(activeTranslationRequestId)
+  activeTranslationRequestId = null
+  cancelPrefillTranslation()
+  translationBusy.value = false
+  window.scKit?.translatorView({ visible: false, bounds: null })
+  window.scKit?.auxCustomizationOverlay({ visible: false, bounds: null, items: [], theme: {} })
+  dictionaryObserver?.disconnect()
+})
+onActivated(() => { observeBlockingModals(); nextTick(scheduleDictionaryBounds) })
 onBeforeUnmount(() => {
   window.removeEventListener('sckit:translation-settings-updated', onTranslationSettingsUpdated)
   window.removeEventListener('dragend', endDockDrag, true)

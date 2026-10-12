@@ -23,4 +23,8 @@ contextBridge.exposeInMainWorld('scKit', {
   openExternal: (url) => ipcRenderer.invoke('sc:external', url),
   exportData: (content, defaultName) => ipcRenderer.invoke('sc:export', content, defaultName),
   window: (action) => ipcRenderer.send('sc:window', action),
+  onBeforeClose: callback => { const listener = () => callback(); ipcRenderer.on('sc:prepare-close', listener); return () => ipcRenderer.removeListener('sc:prepare-close', listener); },
+  closeResponse: (ok, message = '') => ipcRenderer.send('sc:close-response', { ok, message }),
+  getBuildInfo: () => ipcRenderer.invoke('sc:build-info'),
+  onSessionRestored: callback => { const listener = (_event, result) => callback(result); ipcRenderer.on('sc:session-restored', listener); return () => ipcRenderer.removeListener('sc:session-restored', listener); },
 });

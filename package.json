@@ -15,9 +15,9 @@
     "typecheck": "nuxt typecheck",
     "test:electron": "node --test tests/electron-state.test.cjs",
     "build:service": "cargo build --release --locked --manifest-path service/Cargo.toml",
-    "build": "npm run generate && npm run build:service",
+    "build": "npm run generate && npm run build:service && node scripts/write-build-info.mjs",
     "start": "electron .",
-    "package": "npm run build && electron-builder --win dir",
+    "package": "npm run build && electron-builder --win dir && node scripts/stamp-packaged-build.mjs",
     "package:installer": "npm run build && electron-builder --win nsis --x64 --config.directories.output=release/installer",
     "postinstall": "nuxt prepare"
   },
