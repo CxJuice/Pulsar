@@ -205,6 +205,12 @@ export function useEditor() {
   async function listPage(payload: Record<string, unknown>): Promise<StringPage> {
     return listRequests.run(id => api<StringPage>('strings', payload, id))
   }
+  function remoteStringPageCount(page: StringPage, requestedPageSize: number) {
+    const actualPageSize = Number.isInteger(page.pageSize) && page.pageSize > 0
+      ? Math.min(page.pageSize, 800)
+      : requestedPageSize
+    return Math.max(1, Math.ceil(Math.max(0, page.rowCount) / actualPageSize))
+  }
   function choose(item: StringItem | null, clearTranslation = false) {
     ++selectionSequence
     detachedNeighbors.value = null
@@ -423,16 +429,17 @@ export function useEditor() {
           const query = { projectId: project.value.id, fileId: fileId.value, pageSize: remotePageSize, stage: stageFilter.value, text: search.value, searchMode: searchMode.value }
           const first = await listPage({ ...query, page: 1 })
           if (sequence !== listSequence) return
-          if (first.rowCount > globalSortLimit || first.pageCount * remotePageSize > globalSortLimit + remotePageSize) {
-            throw new Error(`全局排序最多处理 ${globalSortLimit.toLocaleString()} 条词条；请先按状态或搜索缩小范围。`)
+          const remotePageCount = remoteStringPageCount(first, remotePageSize)
+          if (!aggregateMode.value && first.rowCount > globalSortLimit) {
+            throw new Error(`单文件全局排序最多处理 ${globalSortLimit.toLocaleString()} 条词条；请先按状态或搜索缩小范围。`)
           }
-          listProgress.value = `已读取 1 / ${first.pageCount} 页，正在按${sort.value === 'key' ? '键值' : sort.value === 'length' ? '原文长度' : '修改时间'}排序`
+          listProgress.value = `已读取 1 / ${remotePageCount} 页，正在按${sort.value === 'key' ? '键值' : sort.value === 'length' ? '原文长度' : '修改时间'}排序`
           const fetched = new Map(first.results.map(item => [item.id, item]))
-          for (let currentPage = 2; currentPage <= first.pageCount; currentPage++) {
+          for (let currentPage = 2; currentPage <= remotePageCount; currentPage++) {
             const data = await listPage({ ...query, page: currentPage })
             if (sequence !== listSequence) return
             for (const item of data.results) fetched.set(item.id, item)
-            listProgress.value = `已读取 ${currentPage} / ${first.pageCount} 页，正在整理排序`
+            listProgress.value = `已读取 ${currentPage} / ${remotePageCount} 页，正在整理排序`
           }
           all = orderedItems([...fetched.values()])
           updatedStringsCache.value = { key, items: all }
@@ -453,12 +460,13 @@ export function useEditor() {
           const query = { projectId: project.value.id, fileId: fileId.value, pageSize: 800, stage: stageFilter.value, text: search.value, searchMode: searchMode.value }
           const first = await listPage({ ...query, page: 1 })
           if (sequence !== listSequence) return
-          if (first.rowCount > globalSortLimit) throw new Error(`定位原选中词条需要扫描超过 ${globalSortLimit.toLocaleString()} 条记录；请先缩小筛选范围。`)
+          if (!aggregateMode.value && first.rowCount > globalSortLimit) throw new Error(`定位原选中词条需要扫描超过 ${globalSortLimit.toLocaleString()} 条记录；请先缩小筛选范围。`)
+          const remotePageCount = remoteStringPageCount(first, query.pageSize)
           let index = first.results.findIndex(item => item.id === retainedSelection.id && item.project === retainedSelection.project)
-          for (let remotePage = 2; index < 0 && remotePage <= first.pageCount; remotePage++) {
+          for (let remotePage = 2; index < 0 && remotePage <= remotePageCount; remotePage++) {
             const data = await listPage({ ...query, page: remotePage })
             if (sequence !== listSequence) return
-            listProgress.value = `正在定位所选词条：${remotePage} / ${first.pageCount} 页`
+            listProgress.value = `正在定位所选词条：${remotePage} / ${remotePageCount} 页`
             const match = data.results.findIndex(item => item.id === retainedSelection.id && item.project === retainedSelection.project)
             if (match >= 0) index = (remotePage - 1) * 800 + match
           }
