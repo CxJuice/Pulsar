@@ -249,6 +249,10 @@
 .translation-network-settings[open]>summary{border-bottom:1px solid var(--border)}
 .translation-network-settings>p{margin:10px 14px 4px;color:var(--muted);font-size:9px;line-height:1.6}
 .translation-network-settings>.translation-settings-grid{padding:8px 14px 14px}
+.translation-proxy-actions{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:0 14px 14px}
+.translation-proxy-result,.translation-proxy-test-error{font-size:9px;line-height:1.6;color:var(--muted);overflow-wrap:anywhere}
+.translation-proxy-result.error,.translation-proxy-test-error{color:#bd5346}
+.translation-proxy-actions>.button{flex:0 0 auto}
 .translation-settings-footer{display:flex;align-items:center;justify-content:space-between;gap:14px;padding-top:2px}
 .translation-settings-footer>p{color:var(--muted);font-size:9px;line-height:1.6}
 .translation-settings-footer>.button{flex:0 0 auto}

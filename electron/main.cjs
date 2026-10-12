@@ -21,6 +21,7 @@ if (smoke) {
 }
 const serviceKey = randomBytes(32).toString('hex');
 let mainWindow, loginWindow, dictionaryView, translatorView, auxCustomizationWindow, sidecar, serviceUrl, closing = false;
+let restartingService = false, activeServiceCredentials = null;
 let windowStateTimer, windowWasMaximized = false, dictionaryLookupRequest = 0;
 let translatorProxySignature = '', translatorViewRequest = 0, translatorLastFilledText = '';
 const activeTranslationRequests = new Map();
@@ -28,6 +29,7 @@ let auxCustomizationWindowLoaded = false, auxCustomizationState = { visible: fal
 const actions = new Set(['session', 'projects', 'project', 'updateProject', 'files', 'file', 'renameFile', 'strings', 'string', 'suggestions', 'memory', 'terms', 'projectTerms', 'term', 'createTerm', 'updateTerm', 'deleteTerm', 'history', 'save', 'drafts', 'draft']);
 const credentialFile = () => path.join(app.getPath('userData'), 'credentials.bin');
 const connectionPreferenceFile = () => path.join(app.getPath('userData'), 'connection.json');
+const sessionCookieFile = () => path.join(app.getPath('userData'), 'paratranz-session.bin');
 const translationSettingsFile = () => path.join(app.getPath('userData'), 'translation-settings.bin');
 const windowStateFile = () => path.join(app.getPath('userData'), 'window-state.json');
 function defaultTranslationSettings() {
@@ -75,12 +77,16 @@ function readTranslationSettings() {
   try {
     const stored = JSON.parse(safeStorage.decryptString(fs.readFileSync(translationSettingsFile())));
     const defaults = defaultTranslationSettings();
+    const storedProxy = stored.proxy && typeof stored.proxy === 'object' && !Array.isArray(stored.proxy) ? stored.proxy : {};
+    const proxyMode = ['system', 'direct', 'http', 'socks5'].includes(storedProxy.mode) ? storedProxy.mode : defaults.proxy.mode;
+    const proxyHost = validateProxyHost(storedProxy.host) || defaults.proxy.host;
+    const proxyPort = Number(storedProxy.port);
     return {
       ...defaults,
       provider: ['google', 'deepl', 'llm'].includes(stored.provider) ? stored.provider : 'google',
       mode: stored.provider === 'llm' || stored.mode === 'api' ? 'api' : 'web',
       deeplPlan: stored.deeplPlan === 'pro' ? 'pro' : 'free',
-      proxy: { ...defaults.proxy, ...(stored.proxy || {}) },
+      proxy: { mode: proxyMode, host: proxyHost, port: Number.isInteger(proxyPort) && proxyPort >= 1 && proxyPort <= 65535 ? proxyPort : defaults.proxy.port },
       googleApiKey: typeof stored.googleApiKey === 'string' ? stored.googleApiKey : '',
       deeplApiKey: typeof stored.deeplApiKey === 'string' ? stored.deeplApiKey : '',
       llmRequestUrl: typeof stored.llmRequestUrl === 'string'
@@ -137,11 +143,16 @@ function saveTranslationSettings(input) {
   const host = validateProxyHost(proxy.host);
   const port = Number(proxy.port);
   if (['http', 'socks5'].includes(proxy.mode) && (!host || !Number.isInteger(port) || port < 1 || port > 65535)) throw new Error('请输入有效的代理主机和端口');
-  const llmRequestUrl = input.llmRequestUrl === undefined ? previous.llmRequestUrl : validateLlmRequestUrl(input.llmRequestUrl, provider !== 'llm');
-  const llmModelInput = input.llmModel === undefined ? previous.llmModel : input.llmModel;
+  const llmRequestInput = typeof input.llmRequestUrl === 'string' ? input.llmRequestUrl.trim() : '';
+  const llmRequestUrl = input.llmRequestUrl === undefined || (provider !== 'llm' && !llmRequestInput)
+    ? previous.llmRequestUrl
+    : validateLlmRequestUrl(input.llmRequestUrl, provider !== 'llm');
+  const llmModelInput = input.llmModel === undefined || (provider !== 'llm' && typeof input.llmModel === 'string' && !input.llmModel.trim())
+    ? previous.llmModel
+    : input.llmModel;
   if (typeof llmModelInput !== 'string' || llmModelInput.length > 256 || /[\r\n\0]/.test(llmModelInput)) throw new Error('LLM 模型名称无效');
   const llmModel = llmModelInput.trim();
-  const llmPrefixPrompt = input.llmPrefixPrompt === undefined ? previous.llmPrefixPrompt : input.llmPrefixPrompt;
+  const llmPrefixPrompt = input.llmPrefixPrompt === undefined || (provider !== 'llm' && input.llmPrefixPrompt === '') ? previous.llmPrefixPrompt : input.llmPrefixPrompt;
   if (typeof llmPrefixPrompt !== 'string' || llmPrefixPrompt.length > 12000 || /\0/.test(llmPrefixPrompt)) throw new Error('LLM 前置提示词无效（最多 12,000 个字符）');
   if (provider === 'llm' && (!llmRequestUrl || !llmModel)) throw new Error('请填写 LLM 完整请求 URL 和模型名称');
   const contextInput = input.llmContext === undefined ? previous.llmContext : input.llmContext;
@@ -190,18 +201,97 @@ function saveTranslationSelection(input) {
 function translationProxyAgent(proxyUrl) {
   return /^socks/i.test(proxyUrl) ? new SocksProxyAgent(proxyUrl) : new HttpsProxyAgent(proxyUrl);
 }
-async function resolveTranslationAgent(targetUrl, proxy) {
+function proxyHostForUrl(host) {
+  return host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+}
+function electronProxyConfig(settings = readTranslationSettings()) {
+  if (settings.proxy.mode === 'direct') return { mode: 'direct' };
+  if (settings.proxy.mode === 'system') return { mode: 'system' };
+  const host = proxyHostForUrl(settings.proxy.host);
+  const scheme = settings.proxy.mode === 'socks5' ? 'socks5' : 'http';
+  return { mode: 'fixed_servers', proxyRules: `${scheme}://${host}:${settings.proxy.port}` };
+}
+function serviceProxyUrl(settings = readTranslationSettings()) {
+  if (settings.proxy.mode === 'http') return `http://${proxyHostForUrl(settings.proxy.host)}:${settings.proxy.port}`;
+  if (settings.proxy.mode === 'socks5') return `socks5h://${proxyHostForUrl(settings.proxy.host)}:${settings.proxy.port}`;
+  return '';
+}
+async function configureSessionProxy(targetSession, settings = readTranslationSettings()) {
+  await targetSession.setProxy(electronProxyConfig(settings));
+  await targetSession.closeAllConnections();
+}
+async function configureGlobalProxy(settings = readTranslationSettings()) {
+  const sessions = [
+    session.defaultSession,
+    session.fromPartition('persist:paratranz'),
+    session.fromPartition('persist:translation-web'),
+    session.fromPartition('persist:cambridge'),
+  ];
+  await Promise.all(sessions.map(targetSession => configureSessionProxy(targetSession, settings)));
+}
+async function resolveTranslationAgent(targetUrl, proxy, targetSession = session.defaultSession) {
   if (proxy.mode === 'direct') return undefined;
-  const proxyHost = proxy.host.includes(':') && !proxy.host.startsWith('[') ? `[${proxy.host}]` : proxy.host;
+  const proxyHost = proxyHostForUrl(proxy.host);
   if (proxy.mode === 'http') return translationProxyAgent(`http://${proxyHost}:${proxy.port}`);
   if (proxy.mode === 'socks5') return translationProxyAgent(`socks5h://${proxyHost}:${proxy.port}`);
-  const directives = (await session.defaultSession.resolveProxy(targetUrl)).split(';').map(value => value.trim()).filter(Boolean);
+  const directives = (await targetSession.resolveProxy(targetUrl)).split(';').map(value => value.trim()).filter(Boolean);
   const directive = directives.find(value => /^(PROXY|HTTPS|SOCKS4|SOCKS5?|SOCKS)\s/i.test(value));
   if (!directive) return undefined;
   const match = directive.match(/^(PROXY|HTTPS|SOCKS4|SOCKS5?|SOCKS)\s+([^\s]+)$/i);
   if (!match) throw new Error('系统代理配置无法用于翻译请求');
   const scheme = /^SOCKS/i.test(match[1]) ? (match[1].toLowerCase() === 'socks4' ? 'socks4a' : 'socks5h') : match[1].toLowerCase() === 'https' ? 'https' : 'http';
   return translationProxyAgent(`${scheme}://${match[2]}`);
+}
+function proxyForTest(input) {
+  const proxy = input && typeof input === 'object' && input.proxy && typeof input.proxy === 'object' ? input.proxy : input;
+  if (!proxy || typeof proxy !== 'object' || Array.isArray(proxy) || !['system', 'direct', 'http', 'socks5'].includes(proxy.mode)) throw new Error('代理模式无效');
+  const host = validateProxyHost(proxy.host);
+  const port = Number(proxy.port);
+  if (['http', 'socks5'].includes(proxy.mode) && (!host || !Number.isInteger(port) || port < 1 || port > 65535)) throw new Error('请输入有效的代理主机和端口');
+  return { mode: proxy.mode, host: host || '127.0.0.1', port: Number.isInteger(port) && port >= 1 && port <= 65535 ? port : 7890 };
+}
+function probeProxyUrl(targetUrl, agent, timeoutMs = 12000) {
+  return new Promise(resolve => {
+    const target = new URL(targetUrl);
+    const client = target.protocol === 'https:' ? https : http;
+    const startedAt = Date.now();
+    let settled = false, request;
+    const finish = result => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      request?.destroy();
+      resolve({ target: target.origin, elapsedMs: Date.now() - startedAt, ...result });
+    };
+    // Socket timeouts alone do not cover a stalled proxy CONNECT or SOCKS handshake.
+    const timer = setTimeout(() => finish({ ok: false, message: '连接超时' }), timeoutMs);
+    request = client.request(target, { method: 'GET', agent, timeout: timeoutMs, headers: { 'User-Agent': 'ScTranslateKit proxy test' } }, response => {
+      const status = response.statusCode || 500;
+      const ok = status >= 200 && status < 500 && status !== 407;
+      response.resume();
+      finish({ ok, status, ...(!ok ? { message: `HTTP ${status}` } : {}) });
+    });
+    request.once('timeout', () => finish({ ok: false, message: '连接超时' }));
+    request.once('error', error => finish({ ok: false, message: error.message || '连接失败' }));
+    request.end();
+  });
+}
+async function testProxyConnectivity(input) {
+  const proxy = proxyForTest(input);
+  // Unsaved test settings must not change the live login or translation sessions.
+  const testSession = session.fromPartition(`proxy-test-${randomBytes(8).toString('hex')}`);
+  await testSession.setProxy(electronProxyConfig({ proxy }));
+  const targets = ['https://paratranz.cn/', 'https://github.com/'];
+  const results = await Promise.all(targets.map(async target => {
+    let agent;
+    try {
+      agent = await resolveTranslationAgent(target, proxy, testSession);
+      return await probeProxyUrl(target, agent);
+    } catch (error) {
+      return { target: new URL(target).origin, elapsedMs: 0, ok: false, message: error.message || '代理解析失败' };
+    } finally { agent?.destroy(); }
+  }));
+  return { proxy, ok: results.every(result => result.ok), results };
 }
 function postTranslationJson(target, headers, payload, agent, signal) {
   const body = JSON.stringify(payload);
@@ -787,14 +877,7 @@ function createTranslatorView() {
 async function prepareTranslatorSession() {
   const translatorSession = session.fromPartition('persist:translation-web');
   const settings = readTranslationSettings();
-  let proxyConfig;
-  if (settings.proxy.mode === 'system') proxyConfig = { mode: 'system' };
-  else if (settings.proxy.mode === 'direct') proxyConfig = { mode: 'direct' };
-  else {
-    const host = settings.proxy.host.includes(':') && !settings.proxy.host.startsWith('[') ? `[${settings.proxy.host}]` : settings.proxy.host;
-    const proxyScheme = settings.proxy.mode === 'socks5' ? 'socks5' : 'http';
-    proxyConfig = { mode: 'fixed_servers', proxyRules: `${proxyScheme}://${host}:${settings.proxy.port}` };
-  }
+  const proxyConfig = electronProxyConfig(settings);
   const signature = JSON.stringify(proxyConfig);
   if (signature !== translatorProxySignature) {
     await translatorSession.setProxy(proxyConfig);
@@ -817,6 +900,10 @@ async function serviceRequest(endpoint, method = 'POST', body) {
     const authentication = endpoint === '/credentials' && response.ok
       ? ` authenticated=${Boolean(data.authenticated)} mode=${data.mode}` : '';
     log(`Service ${method} ${endpoint} status=${response.status}${counts}${authentication}`);
+    if (endpoint === '/credentials' && response.ok) {
+      if (method === 'POST' && body && typeof body === 'object') activeServiceCredentials = { ...body };
+      if (method === 'DELETE') activeServiceCredentials = null;
+    }
     return response.ok ? { ok: true, data } : { ok: false, status: response.status, message: data.message || '服务请求失败' };
   } catch (error) {
     return { ok: false, status: 502, message: '本地翻译服务连接失败，请重新启动应用' };
@@ -829,17 +916,29 @@ async function startService() {
     : path.join(app.getAppPath(), 'service', 'target', devUrl ? 'debug' : 'release', serviceName);
   if (!fs.existsSync(executable)) throw new Error('找不到 Rust 服务，请先运行 npm run build（开发模式运行 npm run dev）。');
   const env = { ...process.env, SCKIT_SECRET: serviceKey, SCKIT_DATA_DIR: app.getPath('userData') };
-  const proxy = await session.defaultSession.resolveProxy('https://paratranz.cn');
-  const first = proxy.split(';')[0].trim();
-  if (/^PROXY /.test(first)) env.SCKIT_PROXY = `http://${first.slice(6)}`;
-  else if (/^SOCKS5? /.test(first)) env.SCKIT_PROXY = `socks5h://${first.replace(/^SOCKS5? /, '')}`;
-  sidecar = spawn(executable, [], { env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  delete env.SCKIT_PROXY;
+  const settings = readTranslationSettings();
+  if (settings.proxy.mode === 'direct') {
+    for (const name of Object.keys(env)) {
+      if (/^(http|https|all)_proxy$/i.test(name)) delete env[name];
+    }
+  }
+  const configuredProxy = serviceProxyUrl(settings);
+  if (configuredProxy) env.SCKIT_PROXY = configuredProxy;
+  else if (settings.proxy.mode === 'system') {
+    const resolved = await session.defaultSession.resolveProxy('https://paratranz.cn');
+    const first = resolved.split(';')[0].trim();
+    if (/^(PROXY|HTTPS) /i.test(first)) env.SCKIT_PROXY = `${/^HTTPS /i.test(first) ? 'https' : 'http'}://${first.replace(/^(PROXY|HTTPS) /i, '')}`;
+    else if (/^SOCKS5? /i.test(first)) env.SCKIT_PROXY = `socks5h://${first.replace(/^SOCKS5? /i, '')}`;
+  }
+  const target = spawn(executable, [], { env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  sidecar = target;
   await new Promise((resolve, reject) => {
     let buffer = '';
     const timer = setTimeout(() => reject(new Error('Rust 服务启动超时')), 20000);
-    sidecar.once('error', error => { clearTimeout(timer); reject(error); });
-    sidecar.once('exit', code => { clearTimeout(timer); reject(new Error(`Rust 服务退出（${code}）`)); });
-    sidecar.stdout.on('data', chunk => {
+    target.once('error', error => { clearTimeout(timer); reject(error); });
+    target.once('exit', code => { clearTimeout(timer); reject(new Error(`Rust 服务退出（${code}）`)); });
+    target.stdout.on('data', chunk => {
       buffer += chunk.toString();
       const line = buffer.split('\n')[0];
       try {
@@ -850,23 +949,105 @@ async function startService() {
         }
       } catch { /* wait for a complete readiness line */ }
     });
-    sidecar.stderr.on('data', () => log('Rust service emitted an error; no credentials recorded.'));
+    target.stderr.on('data', () => log('Rust service emitted an error; no credentials recorded.'));
   });
-  sidecar.on('exit', code => {
-    if (!closing) { log(`Rust service unexpectedly exited: ${code}`); dialog.showErrorBox('翻译服务已停止', '请重新启动 ScTranslateKit。已保存的本地草稿会保留。'); }
+  target.on('exit', code => {
+    if (!closing && !restartingService && sidecar === target) { log(`Rust service unexpectedly exited: ${code}`); dialog.showErrorBox('翻译服务已停止', '请重新启动 ScTranslateKit。已保存的本地草稿会保留。'); }
   });
   log('Rust service ready');
 }
-async function cookieConnection(project = 0) {
+async function stopService() {
+  const target = sidecar;
+  if (!target) return;
+  sidecar = undefined;
+  serviceUrl = undefined;
+  if (target.exitCode !== null && target.exitCode !== undefined) return;
+  await new Promise(resolve => {
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, 5000);
+    target.once('exit', finish);
+    try { target.kill(); } catch { finish(); }
+  });
+}
+async function restartService() {
+  const credentials = activeServiceCredentials ? { ...activeServiceCredentials } : null;
+  restartingService = true;
+  try {
+    await stopService();
+    await startService();
+    if (credentials) {
+      const restored = await serviceRequest('/credentials', 'POST', credentials);
+      if (!restored.ok) {
+        activeServiceCredentials = null;
+        log(`Credentials could not be restored after service restart: ${restored.message}`);
+      }
+    }
+  } finally { restartingService = false; }
+}
+const paraTranzAuthCookieNames = new Set(['sid', 'user', 'permissionsHash', 'locale', 'XSRF-TOKEN']);
+async function paraTranzAuthCookies() {
   const cookies = await session.fromPartition('persist:paratranz').cookies.get({ url: 'https://paratranz.cn' });
-  const allowed = cookies.filter(cookie => ['sid', 'user', 'permissionsHash', 'locale'].includes(cookie.name));
-  if (!allowed.some(cookie => cookie.name === 'sid')) return { ok: false, message: '尚未完成 ParaTranz 登录' };
-  return serviceRequest('/credentials', 'POST', { cookie: allowed.map(c => `${c.name}=${c.value}`).join('; '), projectId: project });
+  return cookies.filter(cookie => paraTranzAuthCookieNames.has(cookie.name));
+}
+function cookieHeader(cookies) {
+  return cookies.map(cookie => `${cookie.name}=${cookie.value}`).join('; ');
+}
+async function flushCookieStore(targetSession) {
+  try {
+    if (typeof targetSession.cookies.flushStore === 'function') await targetSession.cookies.flushStore();
+  } catch (error) { log(`ParaTranz cookie store could not be flushed: ${error.message}`); }
+}
+async function persistLoginSession(targetSession) {
+  await flushCookieStore(targetSession);
+  if (!safeStorage.isEncryptionAvailable()) return;
+  try {
+    const cookies = (await paraTranzAuthCookies()).filter(cookie => cookie.session);
+    // Chromium does not retain session cookies between application launches.
+    const target = sessionCookieFile();
+    fs.writeFileSync(`${target}.tmp`, safeStorage.encryptString(JSON.stringify(cookies)));
+    fs.renameSync(`${target}.tmp`, target);
+  } catch { log('ParaTranz session cookies could not be saved'); }
+}
+async function restoreLoginSession() {
+  if (!safeStorage.isEncryptionAvailable() || !fs.existsSync(sessionCookieFile())) return;
+  try {
+    const cookies = JSON.parse(safeStorage.decryptString(fs.readFileSync(sessionCookieFile())));
+    if (!Array.isArray(cookies)) return;
+    const cookieStore = session.fromPartition('persist:paratranz').cookies;
+    const existing = await paraTranzAuthCookies();
+    for (const cookie of cookies) {
+      if (!paraTranzAuthCookieNames.has(cookie.name) || cookie.domain?.replace(/^\./, '') !== 'paratranz.cn' || typeof cookie.value !== 'string') continue;
+      if (existing.some(current => current.name === cookie.name && current.path === cookie.path)) continue;
+      const details = {
+        url: 'https://paratranz.cn', name: cookie.name, value: cookie.value,
+        path: cookie.path, secure: cookie.secure, httpOnly: cookie.httpOnly, sameSite: cookie.sameSite,
+      };
+      if (!cookie.hostOnly) details.domain = cookie.domain;
+      await cookieStore.set(details);
+    }
+  } catch { log('Saved ParaTranz session cookies could not be restored'); }
+}
+async function cookieConnection(project = 0, attempts = 4) {
+  let result = { ok: false, message: '尚未完成 ParaTranz 登录' };
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const allowed = await paraTranzAuthCookies();
+    if (allowed.some(cookie => cookie.name === 'sid')) {
+      result = await serviceRequest('/credentials', 'POST', { cookie: cookieHeader(allowed), projectId: project });
+      if (result.ok || result.status === 401 || result.status === 403) return result;
+    }
+    if (attempt < attempts - 1) await new Promise(resolve => setTimeout(resolve, 180 * (attempt + 1)));
+  }
+  return result;
 }
 async function presenceCredentials() {
-  const cookies = await session.fromPartition('persist:paratranz').cookies.get({ url: 'https://paratranz.cn' });
-  const allowed = cookies.filter(cookie => ['sid', 'user', 'permissionsHash', 'locale'].includes(cookie.name));
-  return serviceRequest('/internal/presence', 'POST', { cookie: allowed.some(cookie => cookie.name === 'sid') ? allowed.map(cookie => `${cookie.name}=${cookie.value}`).join('; ') : '' });
+  const allowed = await paraTranzAuthCookies();
+  return serviceRequest('/internal/presence', 'POST', { cookie: allowed.some(cookie => cookie.name === 'sid') ? cookieHeader(allowed) : '' });
 }
 async function presenceLoginConnection() {
   const result = await presenceCredentials();
@@ -876,14 +1057,16 @@ async function presenceLoginConnection() {
 async function restoreConnection() {
   let preferred;
   try { preferred = JSON.parse(fs.readFileSync(connectionPreferenceFile(), 'utf8')).mode; } catch { /* Keep legacy saved connections. */ }
-  if (preferred === 'session') return cookieConnection();
+  if (preferred === 'session') { await restoreLoginSession(); return cookieConnection(0, 8); }
   if (safeStorage.isEncryptionAvailable() && fs.existsSync(credentialFile())) {
     try {
       const saved = JSON.parse(safeStorage.decryptString(fs.readFileSync(credentialFile())));
       return await serviceRequest('/credentials', 'POST', { token: saved.token, projectId: 0 });
     } catch { log('Saved token could not be restored'); }
   }
-  return preferred === 'token' ? { ok: false, message: '请重新输入未记住的 API Token' } : cookieConnection();
+  if (preferred === 'token') return { ok: false, message: '请重新输入未记住的 API Token' };
+  await restoreLoginSession();
+  return cookieConnection();
 }
 function allowLoginNavigation(url) {
   try { const parsed = new URL(url); return parsed.protocol === 'https:' && ['paratranz.cn', 'github.com'].includes(parsed.hostname); }
@@ -893,29 +1076,50 @@ async function login(project, presenceOnly = false) {
   if (loginWindow && !loginWindow.isDestroyed()) { loginWindow.focus(); return { ok: false, message: '请先完成已打开的登录窗口' }; }
   const checkConnection = () => presenceOnly ? presenceLoginConnection() : cookieConnection(project);
   const existing = await checkConnection();
-  if (existing.ok) return existing;
   const loginSession = session.fromPartition('persist:paratranz');
+  if (existing.ok) { await persistLoginSession(loginSession); return existing; }
+  try { await configureSessionProxy(loginSession); }
+  catch (error) { return { ok: false, message: `无法配置代理：${error.message}` }; }
   loginSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
-  loginWindow = new BrowserWindow({ width: 1100, height: 820, parent: mainWindow, title: '登录 ParaTranz · 完成后关闭此窗口', autoHideMenuBar: true, icon: appIcon,
+  const view = new BrowserWindow({ width: 1100, height: 820, parent: mainWindow, title: '登录 ParaTranz · 完成后关闭此窗口', autoHideMenuBar: true, icon: appIcon,
     webPreferences: { partition: 'persist:paratranz', nodeIntegration: false, contextIsolation: true, sandbox: true } });
-  loginWindow.webContents.on('will-navigate', (event, url) => { if (!allowLoginNavigation(url)) event.preventDefault(); });
-  loginWindow.webContents.setWindowOpenHandler(({ url }) => allowLoginNavigation(url)
+  loginWindow = view;
+  view.webContents.on('will-navigate', (event, url) => { if (!allowLoginNavigation(url)) event.preventDefault(); });
+  view.webContents.setWindowOpenHandler(({ url }) => allowLoginNavigation(url)
     ? { action: 'allow', overrideBrowserWindowOptions: { autoHideMenuBar: true, icon: appIcon, webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, partition: 'persist:paratranz' } } }
     : { action: 'deny' });
-  let checking = false, success;
+  let checking = false, success, checkTimer;
   const check = async () => {
-    if (checking || !loginWindow || loginWindow.isDestroyed()) return;
+    if (checking || view.isDestroyed()) return;
     checking = true;
     const result = await checkConnection();
     checking = false;
-    if (result.ok && loginWindow && !loginWindow.isDestroyed()) { success = result; loginWindow.close(); }
+    if (result.ok && !view.isDestroyed()) {
+      success = result;
+      await persistLoginSession(loginSession);
+      if (!view.isDestroyed()) view.close();
+    }
   };
-  loginWindow.webContents.on('did-finish-load', check);
-  const cookieChanged = (_event, cookie, _cause, removed) => { if (!removed && cookie.name === 'user') check(); };
+  const scheduleCheck = () => {
+    clearTimeout(checkTimer);
+    checkTimer = setTimeout(() => { void check(); }, 180);
+  };
+  view.webContents.on('did-finish-load', check);
+  const cookieChanged = (_event, cookie, _cause, removed) => {
+    if (!removed && cookie.domain?.replace(/^\./, '') === 'paratranz.cn' && paraTranzAuthCookieNames.has(cookie.name)) scheduleCheck();
+  };
   loginSession.cookies.on('changed', cookieChanged);
   return new Promise(resolve => {
-    loginWindow.once('closed', async () => { loginWindow = undefined; loginSession.cookies.removeListener('changed', cookieChanged); resolve(success || await checkConnection()); });
-    loginWindow.loadURL(project ? `https://paratranz.cn/projects/${project}/strings` : 'https://paratranz.cn/login').catch(() => { if (loginWindow) loginWindow.close(); });
+    view.once('closed', async () => {
+      clearTimeout(checkTimer);
+      if (loginWindow === view) loginWindow = undefined;
+      loginSession.cookies.removeListener('changed', cookieChanged);
+      await flushCookieStore(loginSession);
+      const result = success || await checkConnection();
+      if (result.ok) await persistLoginSession(loginSession);
+      resolve(result);
+    });
+    view.loadURL(project ? `https://paratranz.cn/projects/${project}/strings` : 'https://paratranz.cn/login').catch(() => { if (!view.isDestroyed()) view.close(); });
   });
 }
 function registerIpc() {
@@ -958,8 +1162,10 @@ function registerIpc() {
   ipcMain.handle('sc:disconnect', async event => {
     validateSender(event);
     presence.stop();
+    activeServiceCredentials = null;
     if (fs.existsSync(credentialFile())) fs.unlinkSync(credentialFile());
     if (fs.existsSync(connectionPreferenceFile())) fs.unlinkSync(connectionPreferenceFile());
+    if (fs.existsSync(sessionCookieFile())) fs.unlinkSync(sessionCookieFile());
     await session.fromPartition('persist:paratranz').clearStorageData({ storages: ['cookies', 'localstorage'] });
     return serviceRequest('/credentials', 'DELETE');
   });
@@ -1041,9 +1247,24 @@ function registerIpc() {
     validateSender(event);
     return { ok: true, data: publicTranslationSettings() };
   });
-  ipcMain.handle('sc:translation-settings:save', (event, settings) => {
+  ipcMain.handle('sc:proxy-test', async (event, proxy) => {
     validateSender(event);
-    try { return { ok: true, data: saveTranslationSettings(settings) }; }
+    try { return { ok: true, data: await testProxyConnectivity(proxy) }; }
+    catch (error) { return { ok: false, message: error.message || '代理测试失败' }; }
+  });
+  ipcMain.handle('sc:translation-settings:save', async (event, settings) => {
+    validateSender(event);
+    try {
+      const previousProxy = JSON.stringify(readTranslationSettings().proxy);
+      const data = saveTranslationSettings(settings);
+      const savedSettings = readTranslationSettings();
+      if (previousProxy !== JSON.stringify(savedSettings.proxy)) {
+        await configureGlobalProxy(savedSettings);
+        translatorProxySignature = '';
+        await restartService();
+      }
+      return { ok: true, data };
+    }
     catch (error) { return { ok: false, message: error.message }; }
   });
   ipcMain.handle('sc:translation-selection:save', (event, selection) => {
@@ -1155,6 +1376,7 @@ else {
     log(`Starting ${smoke ? 'diagnostic' : 'editor'}: pid=${process.pid} version=${app.getVersion()} packaged=${app.isPackaged}`);
     if (devUrl && new URL(devUrl).hostname !== '127.0.0.1') throw new Error('开发服务器必须位于 127.0.0.1');
     await registerProtocol();
+    await configureGlobalProxy();
     await startService();
     if (!smoke) await restoreConnection();
     const restored = restoredWindowState();

@@ -2,7 +2,7 @@
 import { ArrowLeft, Sun, Moon, Check, Link, ExternalLink, Settings, Monitor, Compass, Languages } from 'lucide-vue-next'
 import type { UnwrapNestedRefs } from 'vue'
 import type { WorkspaceNavigation } from '~/composables/useWorkspaceNavigation'
-import type { LocalFontData, TranslationMode, TranslationProvider, TranslationProxyMode, TranslationSettings, TranslationSettingsUpdate } from '~/types/editor'
+import type { LocalFontData, ProxyTestResult, TranslationMode, TranslationProvider, TranslationProxyMode, TranslationSettings, TranslationSettingsUpdate } from '~/types/editor'
 import { appearanceStorageKey, cssFontFamily, defaultAccentColors, defaultAppearanceSettings, defaultBackgroundColors, defaultFontFamily, safeFontFamily } from '~/utils/appearance'
 import type { AppearanceSettings, AppearanceTextRegion, AppearanceTheme } from '~/utils/appearance'
 import packageInfo from '../../package.json'
@@ -35,6 +35,14 @@ const translationProviderOptions: { value: TranslationProvider; label: string; d
 const translationConfig = reactive({ provider: 'google' as TranslationProvider, mode: 'web' as TranslationMode, deeplPlan: 'free' as 'free' | 'pro', proxyMode: 'system' as TranslationProxyMode, proxyHost: '127.0.0.1', proxyPort: 7890, googleConfigured: false, deeplConfigured: false, llmRequestUrl: '', llmModel: '', llmPrefixPrompt: '', llmConfigured: false, clearAfterSaveNext: true, useTermTranslations: true, llmContext: { key: true, recommendations: true, recommendationCount: 1, terms: true, notes: true } })
 const googleApiKey = ref(''), deeplApiKey = ref(''), llmApiKey = ref(''), clearGoogleApiKey = ref(false), clearDeepLApiKey = ref(false), clearLlmApiKey = ref(false)
 const translationBusy = ref(false), translationError = ref(''), translationNotice = ref('')
+const proxyTestBusy = ref(false), proxyTestError = ref(''), proxyTestResult = ref<ProxyTestResult | null>(null)
+let proxyTestRequest = 0
+watch(() => [translationConfig.proxyMode, translationConfig.proxyHost, translationConfig.proxyPort], () => {
+  proxyTestRequest++
+  proxyTestBusy.value = false
+  proxyTestError.value = ''
+  proxyTestResult.value = null
+})
 const translationProxySummary = computed(() => translationConfig.proxyMode === 'system' ? '使用系统代理' : translationConfig.proxyMode === 'direct' ? '直连' : `${translationConfig.proxyMode.toUpperCase()} · ${translationConfig.proxyHost}:${translationConfig.proxyPort}`)
 watch(() => translationConfig.provider, provider => {
   if (provider === 'llm') translationConfig.mode = 'api'
@@ -159,6 +167,26 @@ function applyTranslationSettings(settings: TranslationSettings) {
   translationConfig.useTermTranslations = settings.useTermTranslations
   Object.assign(translationConfig.llmContext, settings.llmContext)
 }
+async function testProxy() {
+  if (!window.scKit) { proxyTestError.value = '代理测试仅在桌面应用中可用。'; return }
+  const request = ++proxyTestRequest
+  proxyTestBusy.value = true; proxyTestError.value = ''; proxyTestResult.value = null
+  try {
+    const result = await window.scKit.testProxy({ mode: translationConfig.proxyMode, host: translationConfig.proxyHost.trim(), port: Number(translationConfig.proxyPort) })
+    if (request !== proxyTestRequest) return
+    if (!result.ok || !result.data) throw new Error(result.message || '代理测试失败')
+    proxyTestResult.value = result.data
+  } catch (reason) { if (request === proxyTestRequest) proxyTestError.value = (reason as Error).message || '代理测试失败' }
+  finally { if (request === proxyTestRequest) proxyTestBusy.value = false }
+}
+function formatProxyTestResult(result: ProxyTestResult) {
+  return result.results.map(item => {
+    let host = item.target
+    try { host = new URL(item.target).hostname } catch { /* Keep the origin when parsing is unavailable. */ }
+    const status = item.status ? `HTTP ${item.status}` : item.ok ? '连接成功' : item.message || '失败'
+    return `${host}: ${status} · ${item.elapsedMs} ms`
+  }).join('；')
+}
 async function loadTranslationSettings() {
   if (!window.scKit) return
   translationBusy.value = true
@@ -242,7 +270,7 @@ onMounted(() => {
       </section>
       <section class="settings-card" aria-labelledby="translation-settings-title">
         <div class="settings-card-heading"><Languages :size="20" /><h2 id="translation-settings-title">翻译服务</h2></div>
-        <p class="translation-settings-intro">设置右侧翻译模块的默认服务。翻译方向为英语 → 简体中文；API 密钥会加密保存在本机，密钥输入框留空会保留已保存的值。</p>
+        <p class="translation-settings-intro">设置右侧翻译模块的默认服务。翻译方向为英语 → 简体中文；API 密钥会加密保存在本机，密钥输入框留空会保留已保存的值。网络与代理设置会同时用于 ParaTranz 登录、API 请求、内嵌翻译网页和后台服务。</p>
         <form class="translation-settings-form" @submit.prevent="saveTranslationSettings">
           <section class="translation-settings-section" aria-labelledby="translation-service-heading">
             <header class="translation-section-heading"><span class="translation-section-index">01</span><div><h3 id="translation-service-heading">服务商与调用方式</h3><p>选择右侧模块默认使用的翻译服务。</p></div></header>
@@ -324,14 +352,16 @@ onMounted(() => {
             <p class="translation-context-disclosure">词条键值、建议、术语和译名备注默认开启，可分别关闭；建议数量默认为 1 条。</p>
           </section>
 
-          <details class="translation-network-settings">
+          <details class="translation-network-settings" open>
             <summary><span><strong>网络与代理</strong><small>{{ translationProxySummary }}</small></span><span class="translation-details-caret" aria-hidden="true">⌄</span></summary>
-            <p>代理会用于内嵌翻译网页和 API 请求；系统代理模式会跟随本机配置。</p>
+            <p>这是应用级代理，会用于 ParaTranz 登录、项目数据请求、内嵌翻译网页、翻译 API 和后台服务；系统代理模式会跟随本机配置。</p>
             <div class="translation-settings-grid">
               <label>代理方式<select v-model="translationConfig.proxyMode" :disabled="translationBusy || !editor.desktop"><option value="system">系统代理</option><option value="direct">不使用代理</option><option value="http">HTTP 代理</option><option value="socks5">SOCKS5 代理</option></select></label>
               <label v-if="['http', 'socks5'].includes(translationConfig.proxyMode)">代理主机<input v-model="translationConfig.proxyHost" :disabled="translationBusy || !editor.desktop" placeholder="127.0.0.1" autocomplete="off" /></label>
               <label v-if="['http', 'socks5'].includes(translationConfig.proxyMode)">代理端口<input v-model.number="translationConfig.proxyPort" :disabled="translationBusy || !editor.desktop" type="number" min="1" max="65535" placeholder="7890" /></label>
             </div>
+            <div class="translation-proxy-actions"><button class="button" type="button" :disabled="translationBusy || proxyTestBusy || !editor.desktop" @click="testProxy"><LoadingIndicator v-if="proxyTestBusy" :size="14" label="正在测试代理" />{{ proxyTestBusy ? '测试中…' : '测试代理连通性' }}</button><span v-if="proxyTestResult" class="translation-proxy-result" :class="{ error: !proxyTestResult.ok }" role="status">{{ proxyTestResult.ok ? '代理可用' : '代理不可用' }} · {{ formatProxyTestResult(proxyTestResult) }}</span></div>
+            <p v-if="proxyTestError" class="translation-proxy-test-error" role="alert">{{ proxyTestError }}</p>
           </details>
 
           <div class="translation-settings-footer"><p>更改后保存，新的默认服务将应用到右侧翻译模块。</p><button class="button primary" :disabled="translationBusy || !editor.desktop" type="submit"><LoadingIndicator v-if="translationBusy" :size="14" label="正在保存翻译设置" />{{ translationBusy ? '保存中…' : '保存设置' }}</button></div>

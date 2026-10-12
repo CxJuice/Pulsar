@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('scKit', {
   onAuxCustomizationAction: callback => { const listener = (_event, action) => callback(action); ipcRenderer.on('sc:aux-customization-action', listener); return () => ipcRenderer.removeListener('sc:aux-customization-action', listener); },
   translatorView: state => ipcRenderer.send('sc:translator-view', state),
   getTranslationSettings: () => ipcRenderer.invoke('sc:translation-settings:get'),
+  testProxy: proxy => ipcRenderer.invoke('sc:proxy-test', proxy),
   saveTranslationSettings: settings => ipcRenderer.invoke('sc:translation-settings:save', settings),
   saveTranslationSelection: selection => ipcRenderer.invoke('sc:translation-selection:save', selection),
   translateToChinese: (text, context, requestId) => ipcRenderer.invoke('sc:translate-to-chinese', text, context, requestId),

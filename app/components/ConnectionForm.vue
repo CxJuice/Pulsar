@@ -30,6 +30,7 @@ defineExpose({ focus: () => primaryButton.value?.focus() })
     
     <button ref="primaryButton" type="button" class="button primary login-button" :disabled="blocked" @click="connect('login')"><LoadingIndicator v-if="busy && methodInFlight === 'login'" :size="17" label="正在登录 ParaTranz" /><ExternalLink v-else :size="17" />{{ busy && methodInFlight === 'login' ? '等待网页登录…' : '登录 ParaTranz' }}<ArrowRight :size="17" /></button>
     <p v-if="busy && methodInFlight === 'login'" class="connection-progress-hint subtle" role="status">请在登录窗口完成登录。</p>
+    <p class="connection-method-description">网页登录状态会保存在本机，重新打开应用时会自动恢复；主动断开连接或会话过期后需要重新登录。</p>
     <MotionFolder class="token-fallback" :open="showToken" :disabled="busy" title="API Token 备选登录" @toggle="showToken = !showToken">
       <template #heading><KeyRound :size="15" /><span>使用 API Token</span><small>备选登录</small><ChevronDown :size="15" :class="{ expanded: showToken }" /></template>
       <div class="token-fallback-content">
