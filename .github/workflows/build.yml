@@ -11,8 +11,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: desktop-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  group: desktop-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'release' || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   build:
@@ -38,6 +38,7 @@ jobs:
       CI_ARCH: ${{ matrix.arch }}
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       USE_SYSTEM_FPM: 'true'
+      CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -54,19 +55,29 @@ jobs:
           ref = os.environ['GITHUB_REF']
           if ref.startswith('refs/tags/') and ref != f'refs/tags/v{version}':
               raise SystemExit('Tag must match package.json version')
+          if os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch':
+              from scripts.publish_release import release_tag
+              release_tag(version)
           PY
       - name: Install Linux packaging tools
-        if: matrix.platform == 'linux'
+        if: github.event_name == 'workflow_dispatch' && matrix.platform == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential ruby ruby-dev rpm libarchive-tools xvfb
           sudo gem install fpm --no-document
+      - name: Install Linux smoke test tools
+        if: github.event_name != 'workflow_dispatch' && matrix.platform == 'linux' && matrix.arch == 'x64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
       - name: Install dependencies
         run: npm ci
       - name: Check desktop state and proxy behavior
         run: npm run test:electron
       - name: Check list request cancellation
         run: npm run test:logic
+      - name: Check release authorization and artifact collection
+        run: python -m unittest discover -s tests -p 'test_release_pipeline.py' -v
       - name: Check frontend types
         run: npm run typecheck
       - name: Set up Rust
@@ -78,13 +89,14 @@ jobs:
           else
             rustup target add '${{ matrix.rust }}'
           fi
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            service/target
-          key: rust-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('service/Cargo.lock') }}
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-downloads-${{ runner.os }}-${{ hashFiles('service/Cargo.lock') }}
       - name: Test Rust service
         run: cargo test --locked --manifest-path service/Cargo.toml
       - name: Compile Rust service
@@ -119,6 +131,7 @@ jobs:
           sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
           xvfb-run -a --server-args='-screen 0 1600x1000x24' npm start -- --smoke
       - name: Package application
+        if: github.event_name == 'workflow_dispatch'
         run: |
           case "$CI_PLATFORM" in
             win) npx electron-builder --win nsis portable zip --${{ matrix.arch }} --publish never --config.directories.output=release/ci ;;
@@ -126,25 +139,35 @@ jobs:
             linux) npx electron-builder --linux AppImage deb rpm tar.gz --${{ matrix.arch }} --publish never --config.directories.output=release/ci ;;
           esac
       - name: Collect packages and checksums
+        if: github.event_name == 'workflow_dispatch'
         run: python scripts/ci_artifacts.py
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: github.event_name == 'workflow_dispatch'
         with:
           name: ScTranslateKit-${{ matrix.platform }}-${{ matrix.arch }}
           path: release/artifacts/*
           if-no-files-found: error
           compression-level: 0
-          retention-days: 30
+          retention-days: 7
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: >-
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+          matrix.arch == 'x64' && steps.cargo-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   publish:
     name: Publish release
     needs: build
-    if: >-
-      github.event_name != 'pull_request' &&
-      (startsWith(github.ref, 'refs/tags/v') ||
-       github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      actions: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -159,3 +182,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: python scripts/publish_release.py
+      - name: Remove published workflow artifacts
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          python - <<'PY'
+          import os
+          from scripts.publish_release import cleanup_run_artifacts
+          cleanup_run_artifacts(os.environ['GH_REPO'], os.environ['GITHUB_RUN_ID'])
+          PY

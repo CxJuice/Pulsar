@@ -1,4 +1,4 @@
-"""Publish complete CI packages as a GitHub Release after all builds succeed."""
+"""Publish verified desktop packages only from a manually dispatched workflow."""
 from pathlib import Path
 import hashlib
 import json
@@ -67,21 +67,35 @@ def collect_assets(version: str, commit: str) -> list[Path]:
     return [ASSETS / name for name in sorted(names)]
 
 
-def main() -> None:
-    version = json.loads((ROOT / 'package.json').read_text(encoding='utf-8'))['version']
-    commit = os.environ['GITHUB_SHA']
+def release_tag(version: str) -> str:
+    if os.environ.get('GITHUB_EVENT_NAME') != 'workflow_dispatch':
+        raise RuntimeError('Releases require a manually dispatched workflow')
     ref = os.environ['GITHUB_REF']
-    number = os.environ['GITHUB_RUN_NUMBER']
-    repository = os.environ['GH_REPO']
     if ref.startswith('refs/tags/v'):
         tag = ref.removeprefix('refs/tags/')
         if tag != f'v{version}':
             raise RuntimeError('Release tag must match package.json version')
-    else:
-        default_branch = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text(encoding='utf-8'))['repository']['default_branch']
-        if ref != f'refs/heads/{default_branch}' or os.environ['GITHUB_EVENT_NAME'] not in ('push', 'workflow_dispatch'):
-            raise RuntimeError('Automatic releases require a default-branch build')
-        tag = f'v{version}+build.{number}'
+        return tag
+    default_branch = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text(encoding='utf-8'))['repository']['default_branch']
+    if ref != f'refs/heads/{default_branch}':
+        raise RuntimeError('Select the default branch or a matching version tag to publish')
+    return f'v{version}+build.{os.environ["GITHUB_RUN_NUMBER"]}'
+
+
+def cleanup_run_artifacts(repository: str, run_id: str) -> None:
+    expected = {f'ScTranslateKit-{platform}-{arch}' for platform, arch in COMBINATIONS}
+    pages = json.loads(gh('api', '--paginate', '--slurp', f'repos/{repository}/actions/runs/{run_id}/artifacts?per_page=100'))
+    artifacts = [artifact for page in pages for artifact in page['artifacts'] if artifact['name'] in expected]
+    for artifact in artifacts:
+        gh('api', '--method', 'DELETE', f'repos/{repository}/actions/artifacts/{artifact["id"]}')
+    print(f'Removed {len(artifacts)} published workflow artifacts ({sum(artifact["size_in_bytes"] for artifact in artifacts)} bytes)')
+
+
+def main() -> None:
+    version = json.loads((ROOT / 'package.json').read_text(encoding='utf-8'))['version']
+    tag = release_tag(version)
+    commit = os.environ['GITHUB_SHA']
+    repository = os.environ['GH_REPO']
     assets = collect_assets(version, commit)
     hashes = {path.name: 'sha256:' + digest(path) for path in assets}
     prerelease = '-' in version.split('+', 1)[0]
@@ -93,7 +107,7 @@ def main() -> None:
     if not section:
         raise RuntimeError(f'CHANGELOG.md has no entry for {version}')
     notes.write_text(
-        f'自动构建发布，源码提交：`{commit}`。\n\n'
+        f'手动触发 Actions 构建发布，源码提交：`{commit}`。\n\n'
         f'{section.group(1).strip()}\n\n'
         f'[构建记录]({run_url})\n\n'
         '- Windows：x64、ARM64（安装 EXE、便携 EXE、ZIP）\n'
@@ -134,7 +148,7 @@ def main() -> None:
     summary = os.environ.get('GITHUB_STEP_SUMMARY')
     if summary:
         with Path(summary).open('a', encoding='utf-8') as stream:
-            stream.write(f'## Release 已自动发布\n\n[{tag}]({url})\n\n7 种版本，20 个分发包，SHA256 与构建清单齐全。\n')
+            stream.write(f'## 手动 Release 已发布\n\n[{tag}]({url})\n\n7 种版本，20 个分发包，SHA256 与构建清单齐全。\n')
     print(f'Published {len(assets)} assets: {url}')
 
 

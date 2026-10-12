@@ -70,9 +70,10 @@ def main() -> None:
     manifest = {'version': json.loads((ROOT / 'package.json').read_text(encoding='utf-8'))['version'], 'platform': platform, 'arch': arch, 'commit': os.environ['GITHUB_SHA'], 'packages': []}
     for package in packages:
         checksum = digest(package)
-        shutil.copy2(package, DESTINATION / package.name)
+        size = package.stat().st_size
+        shutil.move(package, DESTINATION / package.name)
         (DESTINATION / (package.name + '.sha256')).write_text(f'{checksum}  {package.name}\n', encoding='ascii')
-        manifest['packages'].append({'name': package.name, 'bytes': package.stat().st_size, 'sha256': checksum})
+        manifest['packages'].append({'name': package.name, 'bytes': size, 'sha256': checksum})
     (DESTINATION / f'ScTranslateKit-{manifest["version"]}-{platform}-{arch}-build.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
     print(f'Collected {len(packages)} packages for {platform}-{arch}')
 
