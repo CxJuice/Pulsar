@@ -34,7 +34,7 @@ function harness(t, overrides = {}) {
     quitAndInstall() {},
   });
   const electron = {
-    app: { getAppPath: () => folder, getPath: () => folder, isPackaged: false },
+    app: { getAppPath: () => folder, getPath: () => folder, setPath() {}, isPackaged: false },
     protocol: { registerSchemesAsPrivileged() {} },
     net: overrides.net || {},
     ipcMain: { handle(name, action) { ipcHandlers.set(name, action); }, on() {} },
