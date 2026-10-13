@@ -29,6 +29,10 @@ function harness(t, overrides = {}) {
     });
     return sessions.get(name);
   };
+  const autoUpdater = Object.assign(new EventEmitter(), {
+    async checkForUpdates() { return null; },
+    quitAndInstall() {},
+  });
   const electron = {
     app: { getAppPath: () => folder, getPath: () => folder, isPackaged: false },
     protocol: { registerSchemesAsPrivileged() {} },
@@ -45,6 +49,7 @@ function harness(t, overrides = {}) {
   const context = vm.createContext({
     require(name) {
       if (name === 'electron') return electron;
+      if (name === 'electron-updater') return { autoUpdater };
       if (name === './presence.cjs') return () => ({ stop() {} });
       if (name === 'node:child_process' && overrides.spawn) return { spawn: overrides.spawn };
       return requireFromMain(name);
