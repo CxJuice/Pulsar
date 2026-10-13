@@ -80,9 +80,13 @@ def collect_assets(version: str, commit: str, app_version: str | None = None) ->
     return [ASSETS / name for name in sorted(names)]
 
 
-def release_tag(version: str) -> str:
+def require_manual_dispatch() -> None:
     if os.environ.get('GITHUB_EVENT_NAME') != 'workflow_dispatch':
         raise RuntimeError('Releases require a manually dispatched workflow')
+
+
+def release_tag(version: str) -> str:
+    require_manual_dispatch()
     ref = os.environ['GITHUB_REF']
     if ref.startswith('refs/tags/v'):
         tag = ref.removeprefix('refs/tags/')
@@ -105,6 +109,7 @@ def cleanup_run_artifacts(repository: str, run_id: str) -> None:
 
 
 def main() -> None:
+    require_manual_dispatch()
     manifests = sorted(ASSETS.glob('Pulsar-*-build.json'))
     if not manifests:
         raise RuntimeError('Build manifests are missing')
@@ -135,10 +140,10 @@ def main() -> None:
         '- macOS：Universal，包含 Intel x64 和 Apple Silicon ARM64（DMG、ZIP）\n\n'
         '- Linux：x64、ARM64（AppImage、DEB、RPM、tar.gz）\n\n'
         '共 13 个分发包，版本号包含递增的 GitHub Actions 构建号，附带 SHA256 校验文件及构建清单。\n\n'
-        ('\n\n完整发布文件与自动更新清单也同步到 Cloudflare R2：'
-         f'[{os.environ["SCKIT_UPDATE_URL"].rstrip("/")}/releases/{tag}/release.json]'
-         f'({os.environ["SCKIT_UPDATE_URL"].rstrip("/")}/releases/{tag}/release.json)。\n\n'
-         if os.environ.get('SCKIT_UPDATE_URL') else '')
+        + ('\n\n完整发布文件与自动更新清单也同步到 Cloudflare R2：'
+           f'[{os.environ["SCKIT_UPDATE_URL"].rstrip("/")}/releases/{tag}/release.json]'
+           f'({os.environ["SCKIT_UPDATE_URL"].rstrip("/")}/releases/{tag}/release.json)。\n\n'
+           if os.environ.get('SCKIT_UPDATE_URL') else '')
         + 'Windows 包未签名；macOS 使用临时签名，未经过 Apple 公证。'
         '编译与打包已完成，各平台安装运行尚未验证。\n', encoding='utf-8')
     existing = subprocess.run(['gh', 'release', 'view', tag, '--json', 'isDraft,isImmutable,targetCommitish'], text=True, capture_output=True)
