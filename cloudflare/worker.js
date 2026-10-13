@@ -27,7 +27,8 @@ export default {
     const key = validKey(new URL(request.url).pathname);
     if (!key) return new Response('Not found', { status: 404 });
 
-    const object = await env.UPDATES.get(key, request.headers.has('Range') ? { range: request.headers } : undefined);
+    const rangeRequested = request.headers.has('Range');
+    const object = await env.UPDATES.get(key, rangeRequested ? { range: request.headers } : undefined);
     if (!object) return new Response('Not found', { status: 404 });
     const headers = new Headers();
     object.writeHttpMetadata(headers);
@@ -35,12 +36,12 @@ export default {
     headers.set('Cache-Control', cacheControl(key));
     headers.set('Accept-Ranges', 'bytes');
     headers.set('Content-Length', String(object.range?.length ?? object.size));
-    if (object.range) {
+    if (rangeRequested && object.range) {
       const start = object.range.offset;
       const end = start + object.range.length - 1;
       headers.set('Content-Range', `bytes ${start}-${end}/${object.size}`);
     }
     if (request.headers.get('If-None-Match') === object.httpEtag) return new Response(null, { status: 304, headers });
-    return new Response(request.method === 'HEAD' ? null : object.body, { status: object.range ? 206 : 200, headers });
+    return new Response(request.method === 'HEAD' ? null : object.body, { status: rangeRequested && object.range ? 206 : 200, headers });
   },
 };
