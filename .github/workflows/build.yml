@@ -42,6 +42,7 @@ jobs:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       BUILD_NUMBER: ${{ github.run_number }}
       CARGO_INCREMENTAL: '0'
+      SCKIT_UPDATE_URL: https://pulsar.42kit.com
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -50,6 +51,12 @@ jobs:
         with:
           node-version: '24'
           cache: npm
+      - name: Require Cloudflare R2 credentials for a published release
+        if: github.event_name == 'workflow_dispatch' && inputs.validate_only != true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: test -n "$CLOUDFLARE_API_TOKEN" -a -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'Configure the Cloudflare API token secret and account ID repository variable.' >&2; exit 1; }
       - name: Prepare build version
         run: python scripts/prepare_build_version.py
       - name: Install Linux packaging tools
@@ -114,9 +121,9 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         run: |
           case "$CI_PLATFORM" in
-            win) npx electron-builder --win nsis portable zip --${{ matrix.arch }} --publish never --config.directories.output=release/ci ;;
-            mac) npx electron-builder --mac dmg zip --${{ matrix.arch }} --publish never --config.directories.output=release/ci ;;
-            linux) npx electron-builder --linux AppImage deb rpm tar.gz --${{ matrix.arch }} --publish never --config.directories.output=release/ci ;;
+            win) npx electron-builder --config electron-builder.config.cjs --win nsis portable zip --${{ matrix.arch }} --publish never --config.directories.output=release/ci ;;
+            mac) npx electron-builder --config electron-builder.config.cjs --mac dmg zip --${{ matrix.arch }} --publish never --config.directories.output=release/ci ;;
+            linux) npx electron-builder --config electron-builder.config.cjs --linux AppImage deb rpm tar.gz --${{ matrix.arch }} --publish never --config.directories.output=release/ci ;;
           esac
       - name: Collect packages and checksums
         if: github.event_name == 'workflow_dispatch'
@@ -124,7 +131,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: github.event_name == 'workflow_dispatch'
         with:
-          name: ScTranslateKit-${{ matrix.platform }}-${{ matrix.arch }}
+          name: Pulsar-${{ matrix.platform }}-${{ matrix.arch }}
           path: release/artifacts/*
           if-no-files-found: error
           compression-level: 0
@@ -151,12 +158,23 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: false
+          persist-credentials: true
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: ScTranslateKit-*
+          pattern: Pulsar-*
           path: release-assets
           merge-multiple: true
+      - name: Mirror complete release and update feeds to Cloudflare R2
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          SCKIT_UPDATE_URL: https://pulsar.42kit.com
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: python scripts/publish_cloudflare_updates.py
       - name: Publish all packages
         env:
           GH_TOKEN: ${{ github.token }}
@@ -173,3 +191,21 @@ jobs:
           from scripts.publish_release import cleanup_run_artifacts
           cleanup_run_artifacts(os.environ['GH_REPO'], os.environ['GITHUB_RUN_ID'])
           PY
+      - name: Advance source version after a successful release
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git fetch origin "$DEFAULT_BRANCH"
+          git checkout --detach FETCH_HEAD
+          python scripts/bump_source_version.py
+          git add package.json package-lock.json
+          if git diff --cached --quiet; then
+            echo 'Source version already matches the published release.'
+          else
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            version=$(python -c "import json; print(json.load(open('package.json', encoding='utf-8'))['version'])")
+            git commit -m "chore: advance version to $version"
+            git push origin "HEAD:refs/heads/$DEFAULT_BRANCH"
+          fi

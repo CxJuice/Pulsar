@@ -96,7 +96,7 @@ class ReleasePipelineTests(unittest.TestCase):
         bundled.chmod(0o755)
         (self.root / 'package.json').write_text('{"version":"0.1.1+build.42"}', encoding='utf-8')
         packages = {
-            f'ScTranslateKit-0.1.1-build-42-linux-x64.{extension}': extension.encode()
+            f'Pulsar-0.1.1-build-42-linux-x64.{extension}': extension.encode()
             for extension in ['AppImage', 'deb', 'rpm', 'tar.gz']
         }
         for name, content in packages.items():
@@ -107,7 +107,7 @@ class ReleasePipelineTests(unittest.TestCase):
                 patch.object(ci_artifacts, 'DESTINATION', destination):
             ci_artifacts.main()
 
-        manifest = json.loads((destination / 'ScTranslateKit-0.1.1+build.42-linux-x64-build.json').read_text())
+        manifest = json.loads((destination / 'Pulsar-0.1.1+build.42-linux-x64-build.json').read_text())
         self.assertEqual(manifest['commit'], 'linux-test-commit')
         self.assertEqual(manifest['version'], '0.1.1+build.42')
         self.assertEqual(len(manifest['packages']), 4)
@@ -119,9 +119,9 @@ class ReleasePipelineTests(unittest.TestCase):
             self.assertEqual((destination / (name + '.sha256')).read_text().strip(), f'{checksum}  {name}')
 
     def test_cleanup_handles_pagination_and_preserves_unrelated_artifacts(self):
-        pages = [{'artifacts': [{'id': 1, 'name': 'ScTranslateKit-win-x64', 'size_in_bytes': 100},
+        pages = [{'artifacts': [{'id': 1, 'name': 'Pulsar-win-x64', 'size_in_bytes': 100},
                                 {'id': 2, 'name': 'test-diagnostics', 'size_in_bytes': 10}]},
-                 {'artifacts': [{'id': 3, 'name': 'ScTranslateKit-mac-universal', 'size_in_bytes': 200}]}]
+                 {'artifacts': [{'id': 3, 'name': 'Pulsar-mac-universal', 'size_in_bytes': 200}]}]
         with patch.object(publish_release, 'gh', side_effect=[json.dumps(pages), '', '']) as github:
             publish_release.cleanup_run_artifacts('owner/repo', '42')
         self.assertEqual(github.call_args_list[0].args,
@@ -143,9 +143,9 @@ class ReleasePipelineTests(unittest.TestCase):
         struct.pack_into('<H', binary, 68, 0x8664)
         service.write_bytes(binary)
         bundled.write_bytes(binary)
-        packages = {'ScTranslateKit-0.1.1-Setup-x64.exe': b'installer',
-                    'ScTranslateKit-0.1.1-Portable-x64.exe': b'portable',
-                    'ScTranslateKit-0.1.1-win-x64.zip': b'archive'}
+        packages = {'Pulsar-0.1.1-Setup-x64.exe': b'installer',
+                    'Pulsar-0.1.1-Portable-x64.exe': b'portable',
+                    'Pulsar-0.1.1-win-x64.zip': b'archive'}
         for name, content in packages.items():
             (output / name).write_bytes(content)
         return output, destination, packages, service, bundled
@@ -156,7 +156,7 @@ class ReleasePipelineTests(unittest.TestCase):
                 patch.object(ci_artifacts, 'ROOT', self.root), patch.object(ci_artifacts, 'OUTPUT', output), \
                 patch.object(ci_artifacts, 'DESTINATION', destination):
             ci_artifacts.main()
-        manifest = json.loads((destination / 'ScTranslateKit-0.1.1-win-x64-build.json').read_text())
+        manifest = json.loads((destination / 'Pulsar-0.1.1-win-x64-build.json').read_text())
         self.assertEqual(manifest['commit'], 'test-commit')
         self.assertEqual(len(manifest['packages']), 3)
         for package in manifest['packages']:

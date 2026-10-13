@@ -214,7 +214,7 @@ async function loadCommunityCandidates() {
   try {
     const result = await window.scKit?.fetchCommunityTranslationCandidates()
     if (sequence !== communitySequence) return
-    if (!result) throw new Error('请在 ScTranslateKit 桌面应用中打开译名讨论页')
+    if (!result) throw new Error('请在 Pulsar 桌面应用中打开译名讨论页')
     if (!result.ok || !result.data) throw new Error(result.message || '译名讨论页暂时无法读取')
     communityEntries.value = result.data.entries
     communityWarnings.value = result.data.warnings

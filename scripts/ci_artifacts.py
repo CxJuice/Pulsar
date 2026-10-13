@@ -64,7 +64,7 @@ def main() -> None:
         if platform != 'mac' and digest(path) != digest(source):
             raise RuntimeError(f'Packaged Rust service differs from build: {path}')
     suffixes = {'win': ('.exe', '.zip'), 'mac': ('.dmg', '.zip'), 'linux': ('.AppImage', '.deb', '.rpm', '.tar.gz')}[platform]
-    packages = sorted(path for path in OUTPUT.iterdir() if path.is_file() and path.name.startswith('ScTranslateKit-') and path.name.endswith(suffixes) and '__uninstaller' not in path.name)
+    packages = sorted(path for path in OUTPUT.iterdir() if path.is_file() and path.name.startswith('Pulsar-') and path.name.endswith(suffixes) and '__uninstaller' not in path.name)
     expected_count = {'win': 3, 'mac': 2, 'linux': 4}[platform]
     if len(packages) != expected_count:
         raise RuntimeError(f'Expected {expected_count} packages; found {len(packages)}')
@@ -74,14 +74,39 @@ def main() -> None:
         if any(marker not in package.name for package in packages):
             raise RuntimeError(f'Package filenames must include the automatic build number {build_number}')
     DESTINATION.mkdir(parents=True, exist_ok=True)
-    manifest = {'version': json.loads((ROOT / 'package.json').read_text(encoding='utf-8'))['version'], 'platform': platform, 'arch': arch, 'commit': os.environ['GITHUB_SHA'], 'packages': []}
+    app_version = json.loads((ROOT / 'package.json').read_text(encoding='utf-8'))['version']
+    manifest = {'version': app_version, 'platform': platform, 'arch': arch, 'commit': os.environ['GITHUB_SHA'], 'packages': []}
+    version_info_path = ROOT / 'release' / 'build-version.json'
+    version_info = json.loads(version_info_path.read_text(encoding='utf-8')) if version_info_path.is_file() else {}
+    manifest.update({key: value for key, value in version_info.items() if key in {'sourceVersion', 'releaseVersion', 'appVersion'}})
     for package in packages:
         checksum = digest(package)
         size = package.stat().st_size
         shutil.move(package, DESTINATION / package.name)
         (DESTINATION / (package.name + '.sha256')).write_text(f'{checksum}  {package.name}\n', encoding='ascii')
         manifest['packages'].append({'name': package.name, 'bytes': size, 'sha256': checksum})
-    (DESTINATION / f'ScTranslateKit-{manifest["version"]}-{platform}-{arch}-build.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
+    if os.environ.get('SCKIT_UPDATE_URL'):
+        target_suffix = {'win': '-Setup-', 'mac': '.zip', 'linux': '.AppImage'}[platform]
+        targets = [package for package in packages if (target_suffix in package.name if platform == 'win' else package.name.endswith(target_suffix))]
+        if len(targets) != 1:
+            raise RuntimeError(f'Expected one {platform} updater package; found {len(targets)}')
+        update_files = sorted(path for path in OUTPUT.iterdir() if path.is_file() and (path.name in {'latest.yml', 'latest-mac.yml', 'latest-linux.yml', 'latest-linux-arm64.yml'} or path.name.endswith('.blockmap')))
+        expected_metadata = {
+            'win': 'latest.yml',
+            'mac': 'latest-mac.yml',
+            'linux': 'latest-linux.yml' if arch == 'x64' else f'latest-linux-{arch}.yml',
+        }[platform]
+        if not any(path.name == expected_metadata for path in update_files):
+            raise RuntimeError(f'electron-builder did not produce {expected_metadata}')
+        manifest['updateTarget'] = targets[0].name
+        manifest['updateFiles'] = []
+        for update_file in update_files:
+            checksum = digest(update_file)
+            size = update_file.stat().st_size
+            shutil.move(update_file, DESTINATION / update_file.name)
+            role = 'metadata' if update_file.name == expected_metadata else 'blockmap'
+            manifest['updateFiles'].append({'name': update_file.name, 'role': role, 'bytes': size, 'sha256': checksum})
+    (DESTINATION / f'Pulsar-{manifest["version"]}-{platform}-{arch}-build.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
     print(f'Collected {len(packages)} packages for {platform}-{arch}')
 
 

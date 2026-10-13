@@ -1,4 +1,5 @@
 const { app, BrowserWindow, WebContentsView, ipcMain, protocol, session, net, safeStorage, dialog, shell, screen } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const { spawn } = require('node:child_process');
 const { randomBytes, createHash } = require('node:crypto');
 const http = require('node:http');
@@ -20,10 +21,16 @@ if (smoke) {
   const smokeFolder = process.env.SCKIT_SMOKE_PATH || path.join(app.getAppPath(), 'artifacts');
   fs.mkdirSync(path.join(smokeFolder, 'profile'), { recursive: true });
   app.setPath('userData', path.join(smokeFolder, 'profile'));
+} else {
+  // Keep the existing profile path when the displayed product and package names change.
+  app.setPath('userData', path.join(app.getPath('appData'), 'sc-translate-kit'));
 }
 const serviceKey = randomBytes(32).toString('hex');
 let mainWindow, loginWindow, dictionaryView, translatorView, auxCustomizationWindow, sidecar, serviceUrl, closing = false;
 let closeApproved = smoke, closeCheckPending = false, closeCheckTimer;
+let autoUpdatesEnabled = false;
+let autoUpdateState = { status: 'disabled', version: '', percent: 0, downloadUrl: '' };
+const promptedMacUpdateVersions = new Set();
 async function resolveCloseCheck(ok, message = '') {
   if (!closeCheckPending || !mainWindow || mainWindow.isDestroyed()) return;
   closeCheckPending = false;
@@ -288,7 +295,7 @@ function probeProxyUrl(targetUrl, agent, timeoutMs = 12000) {
     };
     // Socket timeouts alone do not cover a stalled proxy CONNECT or SOCKS handshake.
     const timer = setTimeout(() => finish({ ok: false, message: '连接超时' }), timeoutMs);
-    request = client.request(target, { method: 'GET', agent, timeout: timeoutMs, headers: { 'User-Agent': 'ScTranslateKit proxy test' } }, response => {
+    request = client.request(target, { method: 'GET', agent, timeout: timeoutMs, headers: { 'User-Agent': 'Pulsar proxy test' } }, response => {
       const status = response.statusCode || 500;
       const ok = status >= 200 && status < 500 && status !== 407;
       response.resume();
@@ -542,6 +549,91 @@ function validateSender(event) {
   const url = event.senderFrame?.url || '';
   if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame || !(url.startsWith('sckit://app/') || (devUrl && new URL(url).origin === new URL(devUrl).origin))) {
     throw new Error('无效的应用请求来源');
+  }
+}
+function autoUpdateSnapshot() { return { ...autoUpdateState }; }
+function publishAutoUpdateState(status, details = {}) {
+  autoUpdateState = {
+    status,
+    version: details.version ?? (status === 'up-to-date' ? app.getVersion() : autoUpdateState.version),
+    percent: details.percent ?? (status === 'downloaded' ? 100 : status === 'downloading' ? autoUpdateState.percent : 0),
+    downloadUrl: status === 'available' ? (details.downloadUrl ?? autoUpdateState.downloadUrl) : '',
+  };
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('sc:update-state', autoUpdateSnapshot());
+}
+function macDmgDownloadUrl(info) {
+  const zip = Array.isArray(info?.files) ? info.files.find(file => typeof file?.url === 'string' && file.url.toLowerCase().endsWith('.zip')) : null;
+  if (!zip) return '';
+  try {
+    const url = new URL(zip.url, 'https://pulsar.42kit.com/mac/universal/');
+    if (url.protocol !== 'https:' || url.hostname !== 'pulsar.42kit.com' || url.username || url.password || url.search || url.hash) return '';
+    const prefix = '/mac/universal/';
+    const name = url.pathname.startsWith(prefix) ? url.pathname.slice(prefix.length) : '';
+    if (!name || name.includes('/') || !/^Pulsar-[A-Za-z0-9.+-]+\.zip$/i.test(name)) return '';
+    url.pathname = `${prefix}${name.slice(0, -4)}.dmg`;
+    return url.href;
+  } catch { return ''; }
+}
+async function promptMacUpdate(version, downloadUrl) {
+  if (!downloadUrl || promptedMacUpdateVersions.has(version) || !mainWindow || mainWindow.isDestroyed()) return;
+  promptedMacUpdateVersions.add(version);
+  const result = await dialog.showMessageBox(mainWindow, {
+    type: 'info', title: 'Pulsar 有新版本',
+    message: `发现 macOS 新版本 ${version}`,
+    detail: '请下载 DMG 并手动打开安装。安装前请保存当前工作。',
+    buttons: ['下载更新', '稍后'], defaultId: 0, cancelId: 1,
+  });
+  if (result.response === 0) await shell.openExternal(downloadUrl);
+}
+function configureAutoUpdater() {
+  const hasFeed = app.isPackaged && !smoke && fs.existsSync(path.join(process.resourcesPath, 'app-update.yml'));
+  const supportedTarget = process.platform === 'darwin'
+    || (['win32', 'linux'].includes(process.platform)
+      && (process.platform !== 'linux' || Boolean(process.env.APPIMAGE))
+      && (process.platform !== 'win32' || !process.env.PORTABLE_EXECUTABLE_FILE));
+  if (!hasFeed || !supportedTarget) {
+    publishAutoUpdateState('disabled');
+    return;
+  }
+
+  autoUpdatesEnabled = true;
+  const macManualUpdate = process.platform === 'darwin';
+  autoUpdater.autoDownload = !macManualUpdate;
+  autoUpdater.autoInstallOnAppQuit = !macManualUpdate;
+  autoUpdater.on('checking-for-update', () => publishAutoUpdateState('checking'));
+  autoUpdater.on('update-available', info => {
+    if (macManualUpdate) {
+      const downloadUrl = macDmgDownloadUrl(info);
+      if (!downloadUrl) {
+        log(`macOS update ${String(info.version || '').slice(0, 80)} is available, but its DMG URL could not be resolved`);
+        publishAutoUpdateState('error');
+        return;
+      }
+      publishAutoUpdateState('available', { version: info.version, downloadUrl });
+      void promptMacUpdate(info.version, downloadUrl).catch(error => log(`macOS update prompt failed: ${String(error?.message || error).slice(0, 300)}`));
+      return;
+    }
+    publishAutoUpdateState('downloading', { version: info.version, percent: 0 });
+  });
+  autoUpdater.on('update-not-available', info => publishAutoUpdateState('up-to-date', { version: info.version || app.getVersion() }));
+  autoUpdater.on('download-progress', progress => publishAutoUpdateState('downloading', { percent: Math.max(0, Math.min(100, Math.round(progress.percent || 0))) }));
+  autoUpdater.on('update-downloaded', info => publishAutoUpdateState('downloaded', { version: info.version, percent: 100 }));
+  autoUpdater.on('error', error => {
+    log(`Automatic update failed: ${String(error?.message || error).slice(0, 500)}`);
+    publishAutoUpdateState('error');
+  });
+}
+async function checkForAutoUpdate() {
+  if (!autoUpdatesEnabled) return { ok: true, data: autoUpdateSnapshot() };
+  if (['downloading', 'downloaded'].includes(autoUpdateState.status)) return { ok: true, data: autoUpdateSnapshot() };
+  publishAutoUpdateState('checking');
+  try {
+    await autoUpdater.checkForUpdates();
+    return { ok: true, data: autoUpdateSnapshot() };
+  } catch (error) {
+    log(`Automatic update check failed: ${String(error?.message || error).slice(0, 500)}`);
+    publishAutoUpdateState('error');
+    return { ok: false, message: '检查更新失败，请稍后重试' };
   }
 }
 const citizenWikiOrigin = 'https://support.citizenwiki.cn';
@@ -1127,7 +1219,7 @@ async function startService() {
     target.stderr.on('data', () => log('Rust service emitted an error; no credentials recorded.'));
   });
   target.on('exit', code => {
-    if (!closing && !restartingService && sidecar === target) { log(`Rust service unexpectedly exited: ${code}`); dialog.showErrorBox('翻译服务已停止', '请重新启动 ScTranslateKit。已保存的本地草稿会保留。'); }
+    if (!closing && !restartingService && sidecar === target) { log(`Rust service unexpectedly exited: ${code}`); dialog.showErrorBox('翻译服务已停止', '请重新启动 Pulsar。已保存的本地草稿会保留。'); }
   });
   log('Rust service ready');
 }
@@ -1390,6 +1482,20 @@ async function login(project, presenceOnly = false) {
 }
 function registerIpc() {
   const cancellableRequests = new Map();
+  ipcMain.handle('sc:update-status', event => {
+    validateSender(event);
+    return { ok: true, data: autoUpdateSnapshot() };
+  });
+  ipcMain.handle('sc:update-check', async event => {
+    validateSender(event);
+    return checkForAutoUpdate();
+  });
+  ipcMain.handle('sc:update-install', event => {
+    validateSender(event);
+    if (!autoUpdatesEnabled || autoUpdateState.status !== 'downloaded') return { ok: false, message: '更新尚未下载完成' };
+    autoUpdater.quitAndInstall(false, true);
+    return { ok: true };
+  });
   ipcMain.handle('sc:build-info', event => {
     validateSender(event);
     try { return JSON.parse(fs.readFileSync(path.join(app.getAppPath(), '.output/public/build-info.json'), 'utf8')); }
@@ -1619,7 +1725,7 @@ function registerIpc() {
   ipcMain.handle('sc:external', async (event, url) => {
     validateSender(event);
     const parsed = new URL(url);
-    if (parsed.protocol !== 'https:' || !['paratranz.cn', 'nuxt.com', 'www.electronjs.org', 'support.citizenwiki.cn'].includes(parsed.hostname)) throw new Error('此链接不受支持');
+    if (parsed.protocol !== 'https:' || !['paratranz.cn', 'nuxt.com', 'www.electronjs.org', 'support.citizenwiki.cn', 'pulsar.42kit.com'].includes(parsed.hostname)) throw new Error('此链接不受支持');
     await shell.openExternal(parsed.href);
   });
   ipcMain.handle('sc:export', async (event, content, defaultName) => {
@@ -1736,6 +1842,7 @@ else {
     mainWindow.webContents.on('will-navigate', (event, url) => { if (!(url.startsWith('sckit://app/') || (devUrl && new URL(url).origin === new URL(devUrl).origin))) event.preventDefault(); });
     mainWindow.webContents.on('console-message', (_event, _level, message) => { if (/error|failed/i.test(message)) log(`Renderer: ${message.substring(0, 500)}`); });
     registerIpc();
+    configureAutoUpdater();
     await mainWindow.loadURL(devUrl || 'sckit://app/');
     if (smoke) await smokeCapture();
     else {
@@ -1747,12 +1854,14 @@ else {
           if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('sc:session-restored', { ok: result.ok, message: result.message || '' });
           return result;
         });
+      const updateCheckTimer = setTimeout(() => { void checkForAutoUpdate(); }, 10000);
+      updateCheckTimer.unref?.();
     }
     log('Editor window loaded');
   }).catch(error => {
     log(`${smoke ? 'Diagnostic' : 'Startup'} failed: ${error.message}`);
     if (smoke) { closing = true; sidecar?.kill(); process.stderr.write(`Diagnostic failed: ${error.message}\n`); app.exit(1); }
-    else { dialog.showErrorBox('ScTranslateKit 启动失败', error.message); app.quit(); }
+    else { dialog.showErrorBox('Pulsar 启动失败', error.message); app.quit(); }
   });
 }
 app.on('before-quit', event => {

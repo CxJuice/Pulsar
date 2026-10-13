@@ -35,8 +35,8 @@ def release_information(repository: str, tag: str) -> dict:
     return json.loads(gh('api', f'repos/{repository}/releases/{identifier}'))
 
 
-def collect_assets(version: str, commit: str) -> list[Path]:
-    manifests = sorted(ASSETS.glob('ScTranslateKit-*-build.json'))
+def collect_assets(version: str, commit: str, app_version: str | None = None) -> list[Path]:
+    manifests = sorted(ASSETS.glob('Pulsar-*-build.json'))
     combinations = set()
     names = set()
     for manifest in manifests:
@@ -45,7 +45,9 @@ def collect_assets(version: str, commit: str) -> list[Path]:
         if combination not in COMBINATIONS or combination in combinations:
             raise RuntimeError(f'Unexpected or duplicate build: {combination}')
         combinations.add(combination)
-        if data['version'] != version or data['commit'] != commit:
+        manifest_release_version = data.get('releaseVersion', data['version'])
+        expected_app_version = app_version or version
+        if manifest_release_version != version or data['version'] != expected_app_version or data['commit'] != commit:
             raise RuntimeError(f'Build source mismatch: {manifest.name}')
         if len(data['packages']) != COMBINATIONS[combination]:
             raise RuntimeError(f'Incomplete build: {manifest.name}')
@@ -61,6 +63,16 @@ def collect_assets(version: str, commit: str) -> list[Path]:
             if checksum.read_text(encoding='ascii').strip() != f'{package["sha256"]}  {name}':
                 raise RuntimeError(f'Checksum file mismatch: {name}')
             names.update((name, checksum.name))
+        for update_file in data.get('updateFiles', []):
+            name = update_file['name']
+            if Path(name).name != name or name in names:
+                raise RuntimeError(f'Invalid or duplicate update file: {name}')
+            path = ASSETS / name
+            if path.stat().st_size != update_file['bytes'] or digest(path) != update_file['sha256']:
+                raise RuntimeError(f'Update file checksum mismatch: {name}')
+            names.add(name)
+        if data.get('updateTarget') and data['updateTarget'] not in {item['name'] for item in data['packages']}:
+            raise RuntimeError(f'Invalid updater target: {manifest.name}')
     if combinations != set(COMBINATIONS):
         raise RuntimeError('Windows x64, macOS universal, and Linux x64/ARM64 builds are required')
     if {path.name for path in ASSETS.iterdir()} != names:
@@ -84,7 +96,7 @@ def release_tag(version: str) -> str:
 
 
 def cleanup_run_artifacts(repository: str, run_id: str) -> None:
-    expected = {f'ScTranslateKit-{platform}-{arch}' for platform, arch in COMBINATIONS}
+    expected = {f'Pulsar-{platform}-{arch}' for platform, arch in COMBINATIONS}
     pages = json.loads(gh('api', '--paginate', '--slurp', f'repos/{repository}/actions/runs/{run_id}/artifacts?per_page=100'))
     artifacts = [artifact for page in pages for artifact in page['artifacts'] if artifact['name'] in expected]
     for artifact in artifacts:
@@ -93,15 +105,22 @@ def cleanup_run_artifacts(repository: str, run_id: str) -> None:
 
 
 def main() -> None:
-    base_version = json.loads((ROOT / 'package.json').read_text(encoding='utf-8'))['version']
+    manifests = sorted(ASSETS.glob('Pulsar-*-build.json'))
+    if not manifests:
+        raise RuntimeError('Build manifests are missing')
+    first_manifest = json.loads(manifests[0].read_text(encoding='utf-8'))
+    base_version = first_manifest.get('sourceVersion', json.loads((ROOT / 'package.json').read_text(encoding='utf-8'))['version'])
+    app_version = first_manifest['version']
     tag = release_tag(base_version)
     version = tag.removeprefix('v')
+    if first_manifest.get('releaseVersion', version) != version:
+        raise RuntimeError('Build manifest release version does not match the release tag')
     commit = os.environ['GITHUB_SHA']
     repository = os.environ['GH_REPO']
-    assets = collect_assets(version, commit)
+    assets = collect_assets(version, commit, app_version)
     hashes = {path.name: 'sha256:' + digest(path) for path in assets}
     prerelease = '-' in version.split('+', 1)[0]
-    title = f'ScTranslateKit {tag.removeprefix("v")}'
+    title = f'Pulsar {tag.removeprefix("v")}'
     notes = ROOT / 'release-notes.md'
     run_url = f'https://github.com/{repository}/actions/runs/{os.environ["GITHUB_RUN_ID"]}'
     changelog = (ROOT / 'CHANGELOG.md').read_text(encoding='utf-8')
@@ -116,7 +135,11 @@ def main() -> None:
         '- macOS：Universal，包含 Intel x64 和 Apple Silicon ARM64（DMG、ZIP）\n\n'
         '- Linux：x64、ARM64（AppImage、DEB、RPM、tar.gz）\n\n'
         '共 13 个分发包，版本号包含递增的 GitHub Actions 构建号，附带 SHA256 校验文件及构建清单。\n\n'
-        'Windows 包未签名；macOS 使用临时签名，未经过 Apple 公证。'
+        ('\n\n完整发布文件与自动更新清单也同步到 Cloudflare R2：'
+         f'[{os.environ["SCKIT_UPDATE_URL"].rstrip("/")}/releases/{tag}/release.json]'
+         f'({os.environ["SCKIT_UPDATE_URL"].rstrip("/")}/releases/{tag}/release.json)。\n\n'
+         if os.environ.get('SCKIT_UPDATE_URL') else '')
+        + 'Windows 包未签名；macOS 使用临时签名，未经过 Apple 公证。'
         '编译与打包已完成，各平台安装运行尚未验证。\n', encoding='utf-8')
     existing = subprocess.run(['gh', 'release', 'view', tag, '--json', 'isDraft,isImmutable,targetCommitish'], text=True, capture_output=True)
     if existing.returncode == 0:

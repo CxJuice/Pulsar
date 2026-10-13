@@ -17,8 +17,8 @@ def main() -> None:
         raise RuntimeError("缺少打包目录；请先运行 npm run package。")
     build = max(available, key=lambda folder: (folder / "resources" / "app.asar").stat().st_mtime)
     version = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["version"]
-    archive_path = DESTINATION / f"ScTranslateKit-{version}-win-x64.zip"
-    required = ["ScTranslateKit.exe", "resources/app.asar", "resources/service/sctranslate-service.exe"]
+    archive_path = DESTINATION / f"Pulsar-{version}-win-x64.zip"
+    required = ["Pulsar.exe", "resources/app.asar", "resources/service/sctranslate-service.exe"]
     for name in required:
         if not (build / name).is_file():
             raise RuntimeError(f"缺少打包文件：{name}；请先运行 npm run package。")
@@ -29,10 +29,10 @@ def main() -> None:
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
         for file_path in sorted(build.rglob("*")):
             if file_path.is_file():
-                archive.write(file_path, "ScTranslateKit/" + file_path.relative_to(build).as_posix())
-        archive.writestr("ScTranslateKit/使用说明.txt", (
-            f"ScTranslateKit {version} — Windows x64 便携版\n"
-            "请解压整个文件夹，再运行 ScTranslateKit.exe。更新前关闭旧工作台。\n"
+                archive.write(file_path, "Pulsar/" + file_path.relative_to(build).as_posix())
+        archive.writestr("Pulsar/使用说明.txt", (
+            f"Pulsar {version} — Windows x64 便携版\n"
+            "请解压整个文件夹，再运行 Pulsar.exe。更新前关闭旧工作台。\n"
             "不需要安装 Node.js、Rust 或 Python。点击「连接 ParaTranz」登录自己的账户。\n"
             "本地草稿和启动日志保存在应用数据目录。\n"
             "本版未签名。项目数据来自登录账号可访问的 ParaTranz 项目。接口参考：\n"
@@ -40,7 +40,7 @@ def main() -> None:
         ))
     with zipfile.ZipFile(archive_path) as archive:
         for name in required:
-            if "ScTranslateKit/" + name not in archive.namelist():
+            if "Pulsar/" + name not in archive.namelist():
                 raise RuntimeError(f"便携包缺少必要文件：{name}")
         corrupt_entry = archive.testzip()
         if corrupt_entry:

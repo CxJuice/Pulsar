@@ -28,5 +28,9 @@ contextBridge.exposeInMainWorld('scKit', {
   onBeforeClose: callback => { const listener = () => callback(); ipcRenderer.on('sc:prepare-close', listener); return () => ipcRenderer.removeListener('sc:prepare-close', listener); },
   closeResponse: (ok, message = '') => ipcRenderer.send('sc:close-response', { ok, message }),
   getBuildInfo: () => ipcRenderer.invoke('sc:build-info'),
+  getAutoUpdateStatus: () => ipcRenderer.invoke('sc:update-status'),
+  checkForUpdates: () => ipcRenderer.invoke('sc:update-check'),
+  installUpdate: () => ipcRenderer.invoke('sc:update-install'),
+  onAutoUpdateStatus: callback => { const listener = (_event, state) => callback(state); ipcRenderer.on('sc:update-state', listener); return () => ipcRenderer.removeListener('sc:update-state', listener); },
   onSessionRestored: callback => { const listener = (_event, result) => callback(result); ipcRenderer.on('sc:session-restored', listener); return () => ipcRenderer.removeListener('sc:session-restored', listener); },
 });

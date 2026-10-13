@@ -447,7 +447,7 @@ def port_open(port: int) -> bool:
 def app_ready() -> bool:
     try:
         with urlopen(f"http://127.0.0.1:{FIXTURE_PORT}/", timeout=2) as response:
-            return response.status == 200 and b"ScTranslateKit" in response.read(100_000)
+            return response.status == 200 and b"Pulsar" in response.read(100_000)
     except OSError:
         return False
 

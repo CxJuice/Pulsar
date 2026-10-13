@@ -2,7 +2,7 @@
 import { ArrowLeft, Sun, Moon, Check, Link, ExternalLink, Settings, Monitor, Compass, Languages } from 'lucide-vue-next'
 import type { UnwrapNestedRefs } from 'vue'
 import type { WorkspaceNavigation } from '~/composables/useWorkspaceNavigation'
-import type { LocalFontData, ProxyTestResult, TranslationMode, TranslationProvider, TranslationProxyMode, TranslationSettings, TranslationSettingsUpdate } from '~/types/editor'
+import type { AutoUpdateState, LocalFontData, ProxyTestResult, TranslationMode, TranslationProvider, TranslationProxyMode, TranslationSettings, TranslationSettingsUpdate } from '~/types/editor'
 import { appearanceStorageKey, cssFontFamily, defaultAccentColors, defaultAppearanceSettings, defaultBackgroundColors, defaultFontFamily, safeFontFamily } from '~/utils/appearance'
 import type { AppearanceSettings, AppearanceTextRegion, AppearanceTheme } from '~/utils/appearance'
 import { compileTermExemptionRules, defaultTermExemptionRules } from '~/utils/termHighlights'
@@ -23,6 +23,20 @@ const termExemptionDraft = ref(termExemptionRules.value.join('\n'))
 const termExemptionError = ref(''), termExemptionNotice = ref('')
 const systemFonts = ref<string[]>([]), systemFontsBusy = ref(false), systemFontsError = ref(false), systemFontsMessage = ref('')
 const buildInfo = ref<{ commit: string; sourceFingerprint: string; builtAt: string } | null>(null)
+const autoUpdate = ref<AutoUpdateState>({ status: 'disabled', version: '', percent: 0 })
+const autoUpdateBusy = ref(false), autoUpdateError = ref('')
+let removeAutoUpdateListener: (() => void) | undefined
+const autoUpdateMessage = computed(() => {
+  switch (autoUpdate.value.status) {
+    case 'checking': return '正在检查更新…'
+    case 'available': return `发现 macOS 新版本 ${autoUpdate.value.version}，请下载 DMG 并手动安装。`
+    case 'downloading': return `正在下载 ${autoUpdate.value.version || '新版本'}（${autoUpdate.value.percent}%）`
+    case 'downloaded': return `${autoUpdate.value.version} 已下载，退出应用时会自动安装。`
+    case 'up-to-date': return `已是最新版本${autoUpdate.value.version ? `（${autoUpdate.value.version}）` : ''}。`
+    case 'error': return '更新检查或下载失败，可稍后重试。'
+    default: return '当前运行方式未启用自动更新。'
+  }
+})
 const typographyRegions: { key: AppearanceTextRegion; title: string }[] = [
   { key: 'ui', title: '界面默认' },
   { key: 'listSource', title: '字符串列表 · 原文' },
@@ -62,6 +76,40 @@ watch(() => translationConfig.provider, provider => {
 const accountName = computed(() => props.editor.sessionInfo.user?.nickname || props.editor.sessionInfo.user?.username)
 const connectionStatus = computed(() => props.editor.initializing ? '正在恢复登录…' : props.editor.connected ? props.editor.sessionInfo.authenticated ? '已连接 ParaTranz' : '登录已过期' : '未连接')
 function openAccount() { window.scKit?.openExternal('https://paratranz.cn/users/my') }
+async function refreshAutoUpdateStatus() {
+  if (!window.scKit) return
+  try {
+    const result = await window.scKit.getAutoUpdateStatus()
+    if (result.ok && result.data) autoUpdate.value = result.data
+  } catch { /* The update status can be checked again from this page. */ }
+}
+async function checkForUpdates() {
+  if (!window.scKit) return
+  autoUpdateBusy.value = true
+  autoUpdateError.value = ''
+  try {
+    const result = await window.scKit.checkForUpdates()
+    if (!result.ok || !result.data) throw new Error(result.message || '检查更新失败')
+    autoUpdate.value = result.data
+  } catch (reason) { autoUpdateError.value = (reason as Error).message || '检查更新失败' }
+  finally { autoUpdateBusy.value = false }
+}
+async function installDownloadedUpdate() {
+  if (!window.scKit) return
+  autoUpdateBusy.value = true
+  autoUpdateError.value = ''
+  try {
+    const result = await window.scKit.installUpdate()
+    if (!result.ok) throw new Error(result.message || '无法安装更新')
+  } catch (reason) { autoUpdateError.value = (reason as Error).message || '无法安装更新' }
+  finally { autoUpdateBusy.value = false }
+}
+async function downloadMacUpdate() {
+  if (!window.scKit || !autoUpdate.value.downloadUrl) return
+  autoUpdateError.value = ''
+  try { await window.scKit.openExternal(autoUpdate.value.downloadUrl) }
+  catch (reason) { autoUpdateError.value = (reason as Error).message || '无法打开 macOS 更新下载页' }
+}
 function setTheme(value: 'light' | 'dark') {
   theme.value = value; appearanceError.value = ''
   try { localStorage.setItem('sckit-theme', value) }
@@ -267,6 +315,8 @@ async function saveTranslationSettings() {
 }
 onMounted(() => {
   void window.scKit?.getBuildInfo?.().then(info => { buildInfo.value = info })
+  removeAutoUpdateListener = window.scKit?.onAutoUpdateStatus(state => { autoUpdate.value = state })
+  void refreshAutoUpdateStatus()
   theme.value = localStorage.getItem('sckit-theme') || 'light'
   try {
     const savedLayout = localStorage.getItem('sckit-translation-layout')
@@ -274,7 +324,8 @@ onMounted(() => {
   } catch { /* Keep the default layout when storage is unavailable. */ }
   void loadTranslationSettings()
 })
-onActivated(() => { if (loadedTranslationConfig.value) void loadTranslationSettings() })
+onActivated(() => { if (loadedTranslationConfig.value) void loadTranslationSettings(); void refreshAutoUpdateStatus() })
+onBeforeUnmount(() => { removeAutoUpdateListener?.() })
 </script>
 <template>
   <main class="settings-page" aria-label="应用设置">
@@ -422,7 +473,8 @@ onActivated(() => { if (loadedTranslationConfig.value) void loadTranslationSetti
       <section class="settings-card" aria-labelledby="guide-settings-title"><div class="settings-card-heading"><Compass :size="20" /><h2 id="guide-settings-title">使用引导</h2></div><div class="settings-row"><div><h3>启动引导</h3></div><button class="button" :disabled="navigation.blocked" @click="navigation.openGuide">查看启动引导</button></div></section>
       <section class="settings-card" aria-labelledby="about-title">
         <div class="settings-card-heading"><Settings :size="20" /><h2 id="about-title">关于</h2></div>
-        <div class="settings-row"><div><h3>ScTranslateKit</h3></div><span class="settings-version">版本 {{ packageInfo.version }}</span></div>
+        <div class="settings-row"><div><h3>Pulsar</h3></div><span class="settings-version">版本 {{ packageInfo.version }}</span></div>
+        <div class="settings-row"><div><h3>自动更新</h3><p>{{ autoUpdateMessage }}</p><p v-if="autoUpdateError" class="sidebar-message error" role="alert">{{ autoUpdateError }}</p></div><div v-if="editor.desktop" class="settings-actions"><button v-if="autoUpdate.status === 'downloaded'" class="button primary" :disabled="autoUpdateBusy" @click="installDownloadedUpdate">{{ autoUpdateBusy ? '正在重启…' : '立即重启并安装' }}</button><button v-else-if="autoUpdate.status === 'available' && autoUpdate.downloadUrl" class="button primary" @click="downloadMacUpdate">下载 macOS 更新</button><button v-else class="button" :disabled="autoUpdateBusy || ['disabled', 'checking', 'downloading'].includes(autoUpdate.status)" @click="checkForUpdates">{{ autoUpdateBusy || autoUpdate.status === 'checking' ? '正在检查…' : autoUpdate.status === 'downloading' ? '正在下载…' : '检查更新' }}</button></div></div>
         <div class="settings-row"><div><h3>运行方式</h3><p><Monitor :size="14" />{{ editor.desktop ? '桌面应用' : '浏览器预览' }}</p></div></div>
         <div v-if="buildInfo" class="settings-row"><div><h3>运行中的构建</h3><p>提交 {{ buildInfo.commit.slice(0, 12) }} · 源码指纹 {{ buildInfo.sourceFingerprint.slice(0, 12) }}</p></div></div>
       </section>

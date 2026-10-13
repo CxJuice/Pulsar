@@ -727,7 +727,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .timeout(Duration::from_secs(45))
         .connect_timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none())
-        .user_agent(format!("ScTranslateKit/{}", env!("CARGO_PKG_VERSION")));
+        .user_agent(format!("Pulsar/{}", env!("CARGO_PKG_VERSION")));
     if let Ok(proxy) = std::env::var("SCKIT_PROXY") {
         if !proxy.is_empty() {
             builder = builder.proxy(reqwest::Proxy::all(proxy)?);

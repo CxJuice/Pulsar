@@ -2,6 +2,7 @@
 from pathlib import Path
 import json
 import os
+import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,11 +26,27 @@ def main() -> None:
         raise SystemExit('Tag must match package.json version')
 
     version = base_version
+    release_version = base_version
     if os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch':
         sys.path.insert(0, str(ROOT))
         from scripts.publish_release import release_tag
 
-        version = release_tag(base_version).removeprefix('v')
+        release_version = release_tag(base_version).removeprefix('v')
+        if os.environ.get('SCKIT_UPDATE_URL'):
+            match = re.fullmatch(r'(\d+)\.(\d+)\.(\d+)', base_version)
+            if not match:
+                raise SystemExit('Automatic updates require package.json to use a plain major.minor.patch version')
+            major, minor, patch = map(int, match.groups())
+            version = f'{major}.{minor}.{patch + 1}-build.{os.environ["GITHUB_RUN_NUMBER"]}'
+        else:
+            version = release_version
+
+        (ROOT / 'release').mkdir(exist_ok=True)
+        write_json(ROOT / 'release' / 'build-version.json', {
+            'sourceVersion': base_version,
+            'releaseVersion': release_version,
+            'appVersion': version,
+        })
 
     if version != base_version:
         package['version'] = version

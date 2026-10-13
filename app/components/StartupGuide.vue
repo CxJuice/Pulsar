@@ -9,7 +9,7 @@ const navigation = inject<WorkspaceNavigation>('workspace-navigation')!
   <main class="startup-guide" aria-label="启动引导">
     <div class="guide-layout">
       <section class="guide-introduction">
-        <span class="guide-eyebrow">ScTranslateKit</span>
+        <span class="guide-eyebrow">Pulsar</span>
         <h1>开始你的翻译工作</h1>
         
         <div class="guide-features">

@@ -1,12 +1,15 @@
 {
-  "name": "sc-translate-kit",
+  "name": "pulsar",
   "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "ParaTranz translation editor with a Transifex-style workspace",
   "author": "CxJuice <110189934+CxJuice@users.noreply.github.com>",
   "homepage": "https://github.com/CxJuice/ScTranslateKit",
-  "repository": { "type": "git", "url": "https://github.com/CxJuice/ScTranslateKit.git" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CxJuice/ScTranslateKit.git"
+  },
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "node scripts/dev.mjs",
@@ -18,8 +21,10 @@
     "build:service": "cargo build --release --locked --manifest-path service/Cargo.toml",
     "build": "npm run generate && npm run build:service && node scripts/write-build-info.mjs",
     "start": "electron .",
-    "package": "npm run build && electron-builder --win dir && node scripts/stamp-packaged-build.mjs",
-    "package:installer": "npm run build && electron-builder --win nsis --x64 --config.directories.output=release/installer",
+    "package": "npm run build && electron-builder --config electron-builder.config.cjs --win dir && node scripts/stamp-packaged-build.mjs",
+    "package:installer": "npm run build && electron-builder --config electron-builder.config.cjs --win nsis --x64 --config.directories.output=release/installer",
+    "cf:create-updates-bucket": "wrangler r2 bucket create sctranslatekit-updates",
+    "cf:deploy-updates": "wrangler deploy --config cloudflare/wrangler.jsonc",
     "postinstall": "nuxt prepare"
   },
   "devDependencies": {
@@ -30,12 +35,13 @@
     "motion": "^14.1.0",
     "nuxt": "4.6.1",
     "typescript": "^5.9.3",
-    "vue-tsc": "^3.1.0"
+    "vue-tsc": "^3.1.0",
+    "wrangler": "4.149.0"
   },
   "build": {
     "appId": "com.42kit.sctranslatekit",
-    "productName": "ScTranslateKit",
-    "artifactName": "ScTranslateKit-${version}-build-${buildNumber}-${os}-${arch}.${ext}",
+    "productName": "Pulsar",
+    "artifactName": "Pulsar-${version}-build-${buildNumber}-${os}-${arch}.${ext}",
     "directories": {
       "output": "release/desktop"
     },
@@ -49,34 +55,59 @@
       "icon": "public/icon.ico",
       "signAndEditExecutable": true,
       "signExecutable": false,
-      "extraResources": [{ "from": "service/target/release/sctranslate-service.exe", "to": "service/sctranslate-service.exe" }]
+      "extraResources": [
+        {
+          "from": "service/target/release/sctranslate-service.exe",
+          "to": "service/sctranslate-service.exe"
+        }
+      ]
     },
     "mac": {
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "icon": "public/icon.png",
       "category": "public.app-category.productivity",
       "identity": "-",
       "notarize": false,
       "hardenedRuntime": false,
-      "extraResources": [{ "from": "service/target/release/sctranslate-service", "to": "service/sctranslate-service" }]
+      "extraResources": [
+        {
+          "from": "service/target/release/sctranslate-service",
+          "to": "service/sctranslate-service"
+        }
+      ]
     },
     "linux": {
-      "target": ["AppImage", "deb", "rpm", "tar.gz"],
+      "target": [
+        "AppImage",
+        "deb",
+        "rpm",
+        "tar.gz"
+      ],
       "icon": "public/icon.png",
       "category": "Utility",
       "maintainer": "CxJuice <110189934+CxJuice@users.noreply.github.com>",
-      "extraResources": [{ "from": "service/target/release/sctranslate-service", "to": "service/sctranslate-service" }]
+      "extraResources": [
+        {
+          "from": "service/target/release/sctranslate-service",
+          "to": "service/sctranslate-service"
+        }
+      ]
     },
-    "portable": { "artifactName": "ScTranslateKit-${version}-build-${buildNumber}-Portable-${arch}.${ext}" },
+    "portable": {
+      "artifactName": "Pulsar-${version}-build-${buildNumber}-Portable-${arch}.${ext}"
+    },
     "nsis": {
-      "artifactName": "ScTranslateKit-${version}-build-${buildNumber}-Setup-${arch}.${ext}",
+      "artifactName": "Pulsar-${version}-build-${buildNumber}-Setup-${arch}.${ext}",
       "oneClick": false,
       "perMachine": false,
       "selectPerMachineByDefault": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "ScTranslateKit",
+      "shortcutName": "Pulsar",
       "installerIcon": "public/icon.ico",
       "uninstallerIcon": "public/icon.ico",
       "deleteAppDataOnUninstall": false
@@ -84,6 +115,7 @@
     "asar": true
   },
   "dependencies": {
+    "electron-updater": "6.8.10",
     "https-proxy-agent": "^9.1.0",
     "leven": "4.1.0",
     "socket.io-client": "^4.8.4",
