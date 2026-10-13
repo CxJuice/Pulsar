@@ -31,15 +31,17 @@ def main() -> None:
         sys.path.insert(0, str(ROOT))
         from scripts.publish_release import release_tag
 
-        release_version = release_tag(base_version).removeprefix('v')
-        if os.environ.get('SCKIT_UPDATE_URL'):
+        if os.environ.get('SCKIT_UPDATE_URL') and not ref.startswith('refs/tags/'):
             match = re.fullmatch(r'(\d+)\.(\d+)\.(\d+)', base_version)
             if not match:
                 raise SystemExit('Automatic updates require package.json to use a plain major.minor.patch version')
             major, minor, patch = map(int, match.groups())
-            version = f'{major}.{minor}.{patch + 1}-build.{os.environ["GITHUB_RUN_NUMBER"]}'
+            release_base = f'{major}.{minor}.{patch + 1}'
+            version = f'{release_base}-build.{os.environ["GITHUB_RUN_NUMBER"]}'
+            release_version = release_tag(release_base).removeprefix('v')
         else:
-            version = release_version
+            release_version = release_tag(base_version).removeprefix('v')
+            version = base_version if os.environ.get('SCKIT_UPDATE_URL') else release_version
 
         (ROOT / 'release').mkdir(exist_ok=True)
         write_json(ROOT / 'release' / 'build-version.json', {

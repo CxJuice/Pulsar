@@ -15,11 +15,20 @@ COMBINATIONS = {
     ('linux', 'x64'): 4,
     ('linux', 'arm64'): 4,
 }
+MANIFEST_RELEASE_VERSION = re.compile(r'(\d+\.\d+\.\d+)(?:\+build\.(\d+))?')
+APP_BUILD_VERSION = re.compile(r'(\d+\.\d+\.\d+)-build\.(\d+)')
 
 
 def digest(path: Path) -> str:
     with path.open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def normalized_app_version(version: str) -> str:
+    match = APP_BUILD_VERSION.fullmatch(version)
+    if match:
+        return f'{match.group(1)}+build.{match.group(2)}'
+    return version
 
 
 def gh(*arguments: str) -> str:
@@ -47,7 +56,8 @@ def collect_assets(version: str, commit: str, app_version: str | None = None) ->
         combinations.add(combination)
         manifest_release_version = data.get('releaseVersion', data['version'])
         expected_app_version = app_version or version
-        if manifest_release_version != version or data['version'] != expected_app_version or data['commit'] != commit:
+        if (manifest_release_version != version or data['version'] != expected_app_version
+                or normalized_app_version(expected_app_version) != version or data['commit'] != commit):
             raise RuntimeError(f'Build source mismatch: {manifest.name}')
         if len(data['packages']) != COMBINATIONS[combination]:
             raise RuntimeError(f'Incomplete build: {manifest.name}')
@@ -99,6 +109,16 @@ def release_tag(version: str) -> str:
     return f'v{version}+build.{os.environ["GITHUB_RUN_NUMBER"]}'
 
 
+def release_tag_for_manifest(version: str) -> str:
+    match = MANIFEST_RELEASE_VERSION.fullmatch(version)
+    if not match:
+        raise RuntimeError(f'Invalid build manifest release version: {version}')
+    tag = release_tag(match.group(1))
+    if tag.removeprefix('v') != version:
+        raise RuntimeError('Build manifest release version does not match the workflow ref and build number')
+    return tag
+
+
 def cleanup_run_artifacts(repository: str, run_id: str) -> None:
     expected = {f'Pulsar-{platform}-{arch}' for platform, arch in COMBINATIONS}
     pages = json.loads(gh('api', '--paginate', '--slurp', f'repos/{repository}/actions/runs/{run_id}/artifacts?per_page=100'))
@@ -116,10 +136,11 @@ def main() -> None:
     first_manifest = json.loads(manifests[0].read_text(encoding='utf-8'))
     base_version = first_manifest.get('sourceVersion', json.loads((ROOT / 'package.json').read_text(encoding='utf-8'))['version'])
     app_version = first_manifest['version']
-    tag = release_tag(base_version)
+    release_version = first_manifest.get('releaseVersion')
+    if release_version is None:
+        release_version = release_tag(base_version).removeprefix('v')
+    tag = release_tag_for_manifest(release_version)
     version = tag.removeprefix('v')
-    if first_manifest.get('releaseVersion', version) != version:
-        raise RuntimeError('Build manifest release version does not match the release tag')
     commit = os.environ['GITHUB_SHA']
     repository = os.environ['GH_REPO']
     assets = collect_assets(version, commit, app_version)

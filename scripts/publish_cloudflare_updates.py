@@ -43,17 +43,17 @@ def main() -> None:
         raise RuntimeError('SCKIT_UPDATE_URL must be the HTTPS origin https://pulsar.42kit.com')
 
     sys.path.insert(0, str(ROOT))
-    from scripts.publish_release import collect_assets, release_information, release_tag
+    from scripts.publish_release import collect_assets, release_information, release_tag, release_tag_for_manifest
 
     manifests = sorted(ASSETS.glob('Pulsar-*-build.json'))
     if len(manifests) != len(PLATFORMS):
         raise RuntimeError(f'Expected {len(PLATFORMS)} platform build manifests')
     first = json.loads(manifests[0].read_text(encoding='utf-8'))
     source_version = first.get('sourceVersion', first['version'])
-    release_version = first.get('releaseVersion', first['version'])
-    tag = release_tag(source_version)
-    if release_version != tag.removeprefix('v'):
-        raise RuntimeError('Release tag does not match the build manifests')
+    release_version = first.get('releaseVersion')
+    if release_version is None:
+        release_version = release_tag(source_version).removeprefix('v')
+    tag = release_tag_for_manifest(release_version)
     app_version = first['version']
     commit = os.environ['GITHUB_SHA']
     assets = collect_assets(release_version, commit, app_version)
