@@ -1,6 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "sctranslatekit-updates",
+  "account_id": "faa2b62743f9b25377c56a98ec6da7e0",
   "main": "./worker.js",
   "compatibility_date": "2026-10-13",
   "workers_dev": false,
