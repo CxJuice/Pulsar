@@ -113,6 +113,7 @@
     async cancelTranslation(id){record('cancelTranslation',{id});translationRequests.get(id)?.();return ok(null);},
     async fetchCommunityTranslationCandidates(){return ok({entries:[],warnings:[],fetchedAt:new Date().toISOString()});},
     async openExternal(){},async exportData(){return true;},window(){},translatorView(){},onAuxCustomizationAction(){return ()=>{};},onBeforeClose(){return ()=>{};},closeResponse(){},onSessionRestored(){return ()=>{};},async getBuildInfo(){return null;},
-    async lookupCambridge(query){return ok({word:query,url:'https://dictionary.cambridge.org/',ukPronunciation:'',usPronunciation:'',entries:[]});},async openCambridgeOriginal(){}
+    async lookupCambridge(query){return ok({word:query,url:'https://dictionary.cambridge.org/',ukPronunciation:'',usPronunciation:'',entries:[]});},async openCambridgeOriginal(){},
+    async getAutoUpdateStatus(){return ok({status:'disabled',version:'',percent:0});},onAutoUpdateStatus(){return ()=>{};}
   };
 })();
