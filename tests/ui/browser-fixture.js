@@ -54,7 +54,7 @@
       if(action==='legacyDrafts') return ok({count:0});
       if(action==='claimLegacyDrafts') return ok({imported:0});
       if(action==='draft'){const k=p.projectId+'/'+p.stringId;if(p.remove)delete drafts[k];else drafts[k]={translation:p.translation,stage:p.stage,updatedAt:p.updatedAt};return ok({saved:true});}
-      if(action==='strings'){let rows=strings.filter(s=>(!p.fileId||s.fileId===p.fileId)&&(p.stage==null||s.stage===p.stage));const q=(p.text||'').toLowerCase();if(q)rows=rows.filter(s=>(p.searchMode==='text'?[s.original,s.translation,s.key].join(' '):String(s[p.searchMode]||'')).toLowerCase().includes(q));const size=p.pageSize||50;const count=Math.max(1,Math.ceil(rows.length/size));const page=Math.max(1,Math.min(p.page||1,count));return ok({results:rows.slice((page-1)*size,page*size),rowCount:rows.length,pageCount:count,page,pageSize:size});}
+      if(action==='strings'){let rows=strings.filter(s=>(!p.fileId||s.fileId===p.fileId)&&(p.stage==null||s.stage===p.stage));const q=(p.text||'').toLowerCase();if(q)rows=rows.filter(s=>(p.searchMode==='text'?[s.original,s.translation,s.key].join(' '):String(s[p.searchMode]||'')).toLowerCase().includes(q));const order=Array.isArray(p.filterParams)?p.filterParams.find(([name])=>name==='orderBy')?.[1]:p.orderBy;if(order==='key')rows.sort((a,b)=>a.key.localeCompare(b.key)||a.id-b.id);else if(order==='-updatedAt')rows.sort((a,b)=>String(b.updatedAt).localeCompare(String(a.updatedAt))||b.id-a.id);const size=p.pageSize||50;const count=Math.max(1,Math.ceil(rows.length/size));const page=Math.max(1,Math.min(p.page||1,count));return ok({results:rows.slice((page-1)*size,page*size),rowCount:rows.length,pageCount:count,page,pageSize:size});}
       if(action==='string') return ok(strings.find(s=>s.id===p.stringId));
       if(action==='save'){const row=strings.find(s=>s.id===p.stringId);const overwroteConflict=row.translation!==p.expectedTranslation||row.updatedAt!==p.expectedUpdatedAt;Object.assign(row,{translation:p.translation,stage:p.stage,updatedAt:new Date().toISOString()});return ok({...row,overwroteConflict});}
       if(action==='suggestions')return ok([{id:9001,key:'REFERENCE',original:'Avenger Combat Helmet Red',translation:'复仇者战斗头盔 红色',matching:.9,project:{id:4242,name:project.name},file:{id:42420,name:'audit.strings'}}]);
@@ -65,7 +65,7 @@
       if(action==='term')return ok(terms[0]);
       return {ok:false,message:'本地审计未模拟操作：'+action};
     },
-    async presence(target){return ok({projectId:target.projectId,status:'connected',editors:[],userId:1,sessionId:'fixture',message:''});},onPresence(){return ()=>{};},
+    async presence(target){return ok({projectId:target.projectId,status:'connected',editors:[],userId:1,sessionId:'fixture',message:''});},onPresence(){return ()=>{};},reportMcpWorkspaceContext(){},onMcpDraftUpdated(){return ()=>{};},onMcpRemoteSaved(){return ()=>{};},
     async connect(){authenticated=true;return ok(session());},async login(){authenticated=true;return ok(session());},async disconnect(){authenticated=false;return ok(null);},
     async getTranslationSettings(){return ok(settings);},async saveTranslationSettings(value){settings={...settings,...copy(value)};translationResultCache.clear();return ok(settings);},async saveTranslationSelection(value){settings={...settings,...value};translationResultCache.clear();return ok(settings);},
     async testProxy(proxy){return ok({proxy,ok:true,results:[]});},
