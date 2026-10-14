@@ -356,6 +356,58 @@ test('disconnect removes the saved login snapshot and the login session storage'
   assert.equal(fs.existsSync(path.join(h.folder, 'paratranz-session.bin')), false);
 });
 
+test('logout invalidates a login waiting for startup restoration and does not wait for that restoration', async t => {
+  const h = harness(t); let release;
+  h.context.restorationGate = new Promise(resolve => { release = resolve; });
+  const calls = [];
+  h.context.record = (endpoint, method) => { calls.push([endpoint, method]); return {ok:true}; };
+  h.run(`validateSender = () => {}; serviceRequest = async (endpoint, method) => record(endpoint, method); connectionRestoration = restorationGate; registerIpc()`);
+  const connect = h.ipcHandlers.get('sc:connect')({}, '0123456789abcdefghijklmnopqrstuv', true, 0);
+  assert.equal((await h.ipcHandlers.get('sc:disconnect')({})).ok, true);
+  release(); assert.equal((await connect).status, 499);
+  assert.deepEqual(calls, [['/credentials', 'DELETE']]);
+  assert.equal(h.run('activeServiceCredentials'), null);
+});
+
+test('logout during candidate login cannot restore old cookies or recreate persisted credentials', async t => {
+  const h = tokenLoginHarness(t); let release, started;
+  const began = new Promise(resolve => { started = resolve; });
+  h.context.submitGate = new Promise(resolve => { release = resolve; }); h.context.started = started;
+  h.run('submitParaTranzToken = async () => { started(); await submitGate; return {ok:true}; }');
+  h.sessions.get('persist:paratranz').clearStorageData = async () => { await h.liveCookies.remove('https://paratranz.cn', 'sid'); };
+  const connect = h.ipcHandlers.get('sc:connect')({}, '0123456789abcdefghijklmnopqrstuv', true, 0);
+  await began; const logout = h.ipcHandlers.get('sc:disconnect')({}); release();
+  assert.equal((await connect).ok, false); await logout;
+  assert.deepEqual(await h.liveCookies.get(), []);
+  assert.equal(h.credentialCalls.filter(call => call.body?.cookie).length, 0);
+  assert.equal(fs.existsSync(path.join(h.folder, 'credentials.bin')), false);
+});
+
+test('logout during a proxy restart prevents restoration of the captured account', async t => {
+  const h = harness(t); let release, started;
+  const began = new Promise(resolve => { started = resolve; });
+  h.context.restartGate = new Promise(resolve => { release = resolve; }); h.context.started = started;
+  const calls = []; h.context.record = (endpoint, method) => { calls.push([endpoint, method]); return {ok:true}; };
+  h.run(`validateSender = () => {}; serviceRequest = async (endpoint, method) => record(endpoint, method);
+    stopService = async () => {}; startService = async () => { started(); await restartGate; };
+    activeServiceCredentials = {cookie:'sid=old'}; registerIpc()`);
+  const restart = h.run('restartService()'); await began;
+  await h.ipcHandlers.get('sc:disconnect')({}); release(); await restart;
+  assert.equal(calls.some(([endpoint, method]) => endpoint === '/credentials' && method === 'POST'), false);
+});
+
+test('a new login waits for logout credential deletion to finish', async t => {
+  const h=tokenLoginHarness(t);let release,started;
+  const began=new Promise(resolve=>{started=resolve;});
+  h.context.logoutGate=new Promise(resolve=>{release=resolve;});h.context.started=started;
+  h.sessions.get('persist:paratranz').clearStorageData=async()=>{await h.liveCookies.remove('https://paratranz.cn','sid');};
+  h.run(`serviceRequest=async(endpoint,method,body)=>{if(method==='DELETE'){started();await logoutGate;return {ok:true};}return recordCredentialCall(endpoint,body);}`);
+  const logout=h.ipcHandlers.get('sc:disconnect')({});await began;
+  const connect=h.ipcHandlers.get('sc:connect')({},'0123456789abcdefghijklmnopqrstuv',true,0);
+  await new Promise(resolve=>setTimeout(resolve,10));assert.equal(h.submissions.length,0);
+  release();await logout;assert.equal((await connect).ok,true);assert.equal(h.submissions.length,1);
+});
+
 test('direct mode removes inherited proxy environment when restarting the service', async t => {
   let serviceEnv;
   const h = harness(t, {
@@ -510,7 +562,7 @@ test('Chat Completions and Responses preserve the same shared prefix with indepe
     recommendations: [{ original: 'Avenger Combat Helmet Red', translation: '复仇者战斗头盔 红色', similarity: 1 }],
     terms: [{ term: 'Avenger', translation: '复仇者' }] };
   for (const protocol of ['chat/completions', 'responses']) {
-    h.run(`saveTranslationSettings({ ...defaultTranslationSettings(), provider: 'llm', mode: 'api', llmRequestUrl: 'http://127.0.0.1:${server.address().port}/v1/${protocol}', llmModel: 'synthetic-model' })`);
+    h.run(`saveTranslationSettings({ ...defaultTranslationSettings(), provider: 'llm', mode: 'api', llmRequestUrl: 'http://127.0.0.1:${server.address().port}/v1/${protocol}', llmModel: 'synthetic-model', llmPrompt: 'Preserve variant differences and placeholders.' })`);
     for (const variant of ['Red', 'Blue']) {
       h.context.variantSource = `Avenger Combat Helmet ${variant}`;
       h.context.variantContext = { shared, key: `HELMET_${variant}`, terms: [{ term: variant, translation: variant === 'Red' ? '红色' : '蓝色' }], notes: { entryContext: `Only ${variant}` } };
@@ -524,7 +576,9 @@ test('Chat Completions and Responses preserve the same shared prefix with indepe
     assert.equal(JSON.parse(inputB).entry.terms[0].translation, '蓝色');
     assert.equal(JSON.parse(inputB).entry.notes.entryContext, 'Only Blue');
     assert.equal(JSON.parse(inputB).reference.recommendations[0].translation, shared.recommendations[0].translation);
-    assert.match(protocol === 'responses' ? b.instructions : b.messages[0].content, /preserve all differences/);
+    const configuredPrompt = h.run('readTranslationSettings().llmPrompt');
+    assert.equal(protocol === 'responses' ? a.instructions : a.messages[0].content, configuredPrompt);
+    assert.equal(protocol === 'responses' ? b.instructions : b.messages[0].content, configuredPrompt);
     assert.deepEqual(Object.keys(a).sort(), (protocol === 'responses' ? ['input', 'instructions', 'model'] : ['messages', 'model']).sort());
   }
   h.context.variantContext = { shared, key: 'HIDDEN', terms: [{ term: 'Blue', translation: '蓝色' }], notes: { entryContext: 'HIDDEN' } };

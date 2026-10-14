@@ -2,6 +2,22 @@
 
 基于 ParaTranz 协议的桌面翻译工作台。Electron 负责桌面窗口与登录，Nuxt 4 / Vue 负责前端，Rust / Axum / reqwest 负责相应服务。布局参考用户指定的 Transifex 编辑器。
 
+## MCP 接入
+
+批量任务可使用 `get_strings` 一次读取最多 25 个词条及各自的 `snapshotToken`，再用 `prefill_translations` 批量写入草稿，或在直存权限开启后使用 `save_translations_to_paratranz` 合并为一次 ParaTranz 批量编辑。修改已有译文时指定 `mode: "edit"`，保留每条词条的原状态；新译文使用 `mode: "save"`。超过 25 条的任务分组处理。结果包含 `succeeded`、`failed` 和逐条 `results`，冲突或上游未接受的词条会单独报告；提交结果无法确认时应先重新读取，不应直接重试。单条工具仍可使用。
+
+在桌面应用的“设置 → MCP 接入”启用本机 MCP 服务，然后将页面显示的 URL 和 Bearer 令牌配置到支持 Streamable HTTP 的 MCP 客户端。设置可修改本机端口，并分别控制词条读取、本机草稿写入、ParaTranz 直存权限及直存目标状态；直存默认关闭，默认目标状态为“已翻译”。服务只绑定 `127.0.0.1`，令牌使用系统安全存储加密保存。
+
+服务注册固定的 14 个工具，调用时按当前权限校验。读取工具包括 `get_workspace`、`list_projects`、`list_project_files`、`list_strings`、`search_translations`、`get_current_entry`、`get_string`、`get_strings` 和 `get_translation_context`；草稿工具为 `prefill_translation`、`prefill_translations`；直存工具为 `save_translation_to_paratranz`、`edit_translation` 和 `save_translations_to_paratranz`。术语及相似译文建议由 `get_translation_context` 按需读取。省略 `fileId` 的列表与搜索均使用项目全文聚合。
+
+端点兼容现代 `2026-07-28` 协议和旧版 Streamable HTTP 初始化会话。旧版会话隔离请求编号与取消通知，最多 32 个会话，空闲 30 分钟过期；GET 长连接返回 405。服务关闭与配置更新串行执行，并排空或取消请求。设置页每 3 秒刷新运行状态、活动请求数和最近授权请求时间。
+
+直存仅接受设置中选定的“未翻译”“已翻译”“有疑问”“已检查”或“已审核”状态。提交前核对词条版本、草稿内容、账号连接及权限版本；取消、登出或撤销权限会阻止尚未发出的写入，已发送的上游 PUT 仍可能完成。直存先在用户资料目录的 `mcp-save-recovery.jsonl` 记录旧内容和目标译文，再记录返回结果及核对状态，返回 `recoveryRecordId` 供核查。日志包含原文与译文，不包含访问令牌，不会自动重放未确认提交；达到 64 MiB 时须导出清理后继续直存。成功且内容核对通过后才清除匹配草稿，核对异常时保留草稿。
+
+读取与上游 PUT 之间采用后写入生效的并发策略；提交前检测到版本变化会拒绝保存，校验通过后的并发修改仍可能被最后提交的译文覆盖。`get_workspace.remoteWritePolicy` 返回该策略。版本检查、恢复记录和提交后核对不构成远端原子事务。MCP 标准 Prompt `pulsar_translation_prompt` 返回设置中的默认翻译提示词，客户端需主动选择使用。
+
+Token 登录保留网站 Cookie 交换，以支持词条占用状态；业务数据及批量编辑通过 JSON API 读取、保存。所有上游请求共享最多 4 个并发槽，翻译建议另有串行队列，避免多个批次叠加放大并发。
+
 ## 开发与构建
 
 需要 Node.js 24.11+、Rust，以及目标平台的工具链（Windows 使用 MSVC，macOS 使用 Xcode 命令行工具）。

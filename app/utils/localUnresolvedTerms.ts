@@ -73,7 +73,7 @@ export function matchLocalUnresolvedTerms(text: string, entries: LocalUnresolved
       for (const term of part.terms || []) matchedIds.add(term.id)
     }
   }
-  const protectedPattern = /<\/?[A-Za-z][^>]*>|~\w+\([^)]*\)|\\r\\n|\\n|\\r|\{\{[^}]+\}\}|\{\w+\}|%(?:\d+\$)?[sdif]/g
+  const protectedPattern = /<\/?[A-Za-z][^>]*>|~\w+\([^)]*\)|\\n|\{\{[^}]+\}\}|\{\w+\}|%(?:\d+\$)?[sdif]/g
   let start = 0
   for (const match of text.matchAll(protectedPattern)) {
     if (match.index! > start) collect(text.slice(start, match.index))

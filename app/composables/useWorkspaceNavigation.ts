@@ -4,15 +4,17 @@ import { sortFilesByCompletion } from '~/utils/fileSort'
 
 // Owned by app.vue: navigation never recreates the sidebar or its directory state.
 export function useWorkspaceNavigation(e: UnwrapNestedRefs<ReturnType<typeof useEditor>>, flushSurfaces: () => Promise<void> = () => e.flushDraft(true)) {
+  const route = useRoute()
+  const startupCanOpenProject = route.path === '/' || route.path === '/projects'
   const projectChosen = ref(false), collapsed = ref(false)
   const projects = ref<ProjectSummary[]>([]), browse = ref<ProjectInfo>({ ...e.project }), files = ref<FileInfo[]>([])
-  const catalogBusy = ref(false), busy = ref(false), saving = ref(false)
+  const catalogBusy = ref(false), catalogReady = ref(false), busy = ref(false), saving = ref(false)
   const loadingLabel = ref('')
   const catalogError = ref(''), error = ref(''), notice = ref('')
   const projectSearch = ref(''), fileSearch = ref(''), expandedFolders = ref<string[]>([''])
   const showConnection = ref(false)
   const showGuide = ref(false), guideReady = ref(false), loginBusy = ref(false)
-  let guideCompleted = false, startupChecked = false
+  let guideCompleted = false, startupChecked = false, startupProjectDecisionMade = false
   let catalogSequence = 0
   const cache = new Map<number, { project: ProjectInfo; files: FileInfo[]; search: string; folders: string[] }>()
   const blocked = computed(() => loginBusy.value || busy.value || saving.value || e.initializing || e.listBusy || e.reloadBusy)
@@ -35,7 +37,9 @@ export function useWorkspaceNavigation(e: UnwrapNestedRefs<ReturnType<typeof use
   function expandFolders() { expandedFolders.value = fileGroups.value.map(([folder]) => folder) }
   function collapseFolders() { expandedFolders.value = [''] }
   function remember() {
-    if (projectChosen.value) cache.set(browse.value.id, { project: browse.value, files: files.value, search: fileSearch.value, folders: [...expandedFolders.value] })
+    if (!projectChosen.value) return
+    cache.set(browse.value.id, { project: browse.value, files: files.value, search: fileSearch.value, folders: [...expandedFolders.value] })
+    try { localStorage.setItem('sckit-current-project', String(browse.value.id)) } catch { /* Keep project navigation available when storage is unavailable. */ }
   }
   function restore(id: number) {
     const saved = cache.get(id)
@@ -57,6 +61,10 @@ export function useWorkspaceNavigation(e: UnwrapNestedRefs<ReturnType<typeof use
   async function openGuide() { await run(async () => { await navigateTo('/'); showGuide.value = true }) }
   async function goHome() { await run(async () => { await navigateTo('/') }) }
   async function goSettings() { await run(async () => { await navigateTo('/settings') }) }
+  async function openProjectSection(section: string) {
+    if (!projectChosen.value || !['overview', 'history', 'announcements', 'tasks', 'files', 'terms', 'issues', 'members', 'applications', 'leaderboard', 'artifact', 'settings'].includes(section)) return
+    await run(async () => { await navigateTo(`/project-section/${section}`) }, '正在打开项目栏目…')
+  }
   async function loadCatalog() {
     if (catalogBusy.value || e.initializing) return
     const session = e.connected, account = e.sessionInfo, request = ++catalogSequence
@@ -66,6 +74,7 @@ export function useWorkspaceNavigation(e: UnwrapNestedRefs<ReturnType<typeof use
       if (request !== catalogSequence || session !== e.connected || account !== e.sessionInfo) return
       projects.value = loaded
       if (e.workspaceReady && !projects.value.some(p => p.id === e.project.id)) projects.value.unshift({ id: e.project.id, name: e.project.name })
+      catalogReady.value = true
     } catch (reason) { if (request === catalogSequence) catalogError.value = (reason as Error).message }
     finally { if (request === catalogSequence) catalogBusy.value = false }
   }
@@ -83,7 +92,7 @@ export function useWorkspaceNavigation(e: UnwrapNestedRefs<ReturnType<typeof use
         remember()
         if (showGuide.value) finishGuide()
         if (!restore(id)) { projectChosen.value = false; files.value = []; fileSearch.value = ''; expandedFolders.value = [''] }
-        await navigateTo('/')
+        await navigateTo('/project-section/overview')
       }
       if (refresh || !projectChosen.value || browse.value.id !== id) await fetchProject(id)
     }, '正在加载项目…')
@@ -163,7 +172,7 @@ export function useWorkspaceNavigation(e: UnwrapNestedRefs<ReturnType<typeof use
   }
   function reset() {
     ++catalogSequence; catalogBusy.value = false; catalogError.value = ''
-    cache.clear(); projectChosen.value = false; projects.value = []; files.value = []; expandedFolders.value = ['']; fileSearch.value = ''; error.value = ''; notice.value = ''
+    cache.clear(); projectChosen.value = false; projects.value = []; files.value = []; catalogReady.value = false; expandedFolders.value = ['']; fileSearch.value = ''; error.value = ''; notice.value = ''
   }
   watch(() => e.initializing, value => { if (!value && !projects.value.length) loadCatalog() })
   watch(() => e.connected, () => { reset(); loadCatalog() })
@@ -176,6 +185,21 @@ export function useWorkspaceNavigation(e: UnwrapNestedRefs<ReturnType<typeof use
     if (e.connected && e.sessionInfo.authenticated) finishGuide()
     else showGuide.value = true
   })
+  watch(() => [guideReady.value, e.initializing, catalogBusy.value, catalogReady.value, e.connected, e.sessionInfo.authenticated, showGuide.value], () => {
+    if (!startupCanOpenProject || startupProjectDecisionMade || !guideReady.value || e.initializing || catalogBusy.value || !catalogReady.value ||
+      !e.connected || !e.sessionInfo.authenticated || showGuide.value) return
+    startupProjectDecisionMade = true
+    let rememberedId = 0
+    try {
+      rememberedId = Number(localStorage.getItem('sckit-current-project'))
+      if (!Number.isInteger(rememberedId) || rememberedId <= 0) {
+        const previousWorkspace = JSON.parse(localStorage.getItem('sckit-workspace') || 'null')
+        rememberedId = Number(previousWorkspace?.projectId) || 0
+      }
+    } catch { /* Fall back to the first available project when storage is unavailable. */ }
+    const project = projects.value.find(candidate => candidate.id === rememberedId) || projects.value[0]
+    if (project) void inspectProject(project.id)
+  })
   onMounted(() => {
     try { guideCompleted = localStorage.getItem('sckit-guide-completed') === '1' } catch { /* Show the guide when storage is unavailable. */ }
     guideReady.value = true
@@ -183,7 +207,7 @@ export function useWorkspaceNavigation(e: UnwrapNestedRefs<ReturnType<typeof use
   })
   return { projectChosen, collapsed, projects, browse, files, catalogBusy, busy, saving, loadingLabel, catalogError, error, notice,
     projectSearch, fileSearch, expandedFolders, showConnection, showGuide, guideReady, loginBusy, blocked, filteredProjects, fileGroups,
-    folderOpen, toggleFolder, expandFolders, collapseFolders, goHome, goSettings, openGuide, finishGuide, loadCatalog, inspectProject, chooseFile, continueEditing, openString, goBack, openOccurrences, alignEditor, connected, disconnect }
+    folderOpen, toggleFolder, expandFolders, collapseFolders, goHome, goSettings, openProjectSection, openGuide, finishGuide, loadCatalog, inspectProject, chooseFile, continueEditing, openString, goBack, openOccurrences, alignEditor, connected, disconnect }
 }
 
 export type WorkspaceNavigation = UnwrapNestedRefs<ReturnType<typeof useWorkspaceNavigation>>

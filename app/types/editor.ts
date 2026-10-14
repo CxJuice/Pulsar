@@ -9,9 +9,31 @@ export interface FileInfo {
   disputed: number; checked: number; reviewed: number; hidden: number; locked: number; words: number
 }
 export interface HistoryEntry {
-  id?: number; createdAt: string; operation?: string; user?: TinyUser
+  id?: number; tid?: number; project?: number; createdAt: string; operation?: string; user?: TinyUser
   translation?: string; stage?: number; field?: string; from?: string; to?: string
   target?: Record<string, unknown> | string; [key: string]: unknown
+}
+export type StringSearchField = 'text' | 'original' | 'translation' | 'key' | 'context'
+export type StringSearchOperator = '=' | '@=' | '^=' | '$=' | '~=' | '!=' | '!@=' | '!^=' | '!$=' | '!~='
+export interface StringSearchCondition { field: StringSearchField; operator: StringSearchOperator; value: string }
+export interface StringFilterUser { id: number; username: string; nickname?: string; avatar?: string }
+export interface StringFileLabel { id: number; name: string; color?: string; [key: string]: unknown }
+export interface AdvancedStringFilters {
+  conditions: StringSearchCondition[]
+  filename: string
+  fileLabels: StringFileLabel[]
+  stages: number[]
+  createdAtFrom: string
+  createdAtTo: string
+  updatedAtFrom: string
+  updatedAtTo: string
+  lastModifiedScope: '' | 'me' | 'others'
+  lastModifiedBy: StringFilterUser[]
+  translateBy: StringFilterUser[]
+  reviewBy: StringFilterUser[]
+  searchInCurrentFile: boolean
+  ignoreCase: boolean
+  includeHidden: boolean
 }
 export interface CommentEntry {
   id?: number; createdAt?: string; content?: string; text?: string; user?: TinyUser; uid?: number
@@ -24,7 +46,7 @@ export interface StringItem {
   overwroteConflict?: boolean
 }
 export interface StringPage { results: StringItem[]; page: number; pageSize: number; rowCount: number; pageCount: number }
-export interface ProjectInfo { id: number; name: string; source: string; dest: string; desc?: string; tagRules?: Array<{type:number;source?:string;string?:string}> }
+export interface ProjectInfo { id: number; name: string; source: string; dest: string; desc?: string; permission?: number; createdAt?: string; version?: string; tagRules?: Array<{type:number;source?:string;string?:string}>; [key: string]: unknown }
 export interface ProjectSummary { id: number; name: string; permission?: number; privacy?: number }
 export interface Suggestion {
   localMatching?: number; stage?: number
@@ -48,7 +70,7 @@ export interface MemoryPage {
   rowCount: number | { value: number; relation: string }
 }
 export interface Draft { translation: string; stage: number; updatedAt: string }
-export interface SessionStatus { authenticated: boolean; mode: string; user?: TinyUser | null }
+export interface SessionStatus { authenticated: boolean; mode: string; user?: TinyUser | null; connectionEpoch?: number }
 export interface ServiceResult<T = unknown> { ok: boolean; data?: T; status?: number; message?: string }
 export type TranslationProvider = 'google' | 'deepl' | 'llm'
 export type TranslationMode = 'web' | 'api'
@@ -58,7 +80,7 @@ export interface TranslationSettings {
   provider: TranslationProvider; mode: TranslationMode; deeplPlan: 'free' | 'pro'
   proxy: { mode: TranslationProxyMode; host: string; port: number }
   googleConfigured: boolean; deeplConfigured: boolean
-  llmRequestUrl: string; llmModel: string; llmPrefixPrompt: string; llmConfigured: boolean; llmContext: TranslationLlmContextSettings
+  llmRequestUrl: string; llmModel: string; llmPrompt: string; llmPrefixPrompt: string; llmConfigured: boolean; llmContext: TranslationLlmContextSettings
   clearAfterSaveNext: boolean; useTermTranslations: boolean
 }
 export interface TranslationSettingsUpdate {
@@ -66,7 +88,7 @@ export interface TranslationSettingsUpdate {
   proxy: { mode: TranslationProxyMode; host: string; port: number }
   googleApiKey?: string | null; deeplApiKey?: string | null
   clearGoogleApiKey?: boolean; clearDeepLApiKey?: boolean
-  llmRequestUrl: string; llmModel: string; llmPrefixPrompt: string; llmApiKey?: string | null; clearLlmApiKey?: boolean
+  llmRequestUrl: string; llmModel: string; llmPrompt: string; llmPrefixPrompt: string; llmApiKey?: string | null; clearLlmApiKey?: boolean
   llmContext: TranslationLlmContextSettings
   clearAfterSaveNext?: boolean; useTermTranslations?: boolean
 }
@@ -76,6 +98,14 @@ export interface ProxyTestResult {
   results: Array<{ target: string; ok: boolean; status?: number; elapsedMs: number; message?: string }>
 }
 export interface TranslationSelectionUpdate { provider?: TranslationProvider; mode?: TranslationMode }
+export interface McpSettings {
+  enabled: boolean; port: number; token: string; defaultPrompt: string
+  permissions: { readWorkspace: boolean; allowBackgroundAccess: boolean; syncWithFrontend: boolean; prefillDrafts: boolean; overwriteExistingTranslations: boolean; saveToParaTranz: boolean; saveStages: number[] }
+  running: boolean; lifecycle?: 'stopped' | 'starting' | 'running' | 'stopping' | 'error'; url: string; error: string; activeRequests: number; lastRequestAt: string | null
+}
+export interface McpSettingsUpdate { enabled: boolean; port: number; defaultPrompt: string; permissions: McpSettings['permissions']; rotateToken?: boolean }
+export interface McpDraftUpdate { accountId?: number; connectionEpoch?: number; projectId: number; stringId: number; draft: Draft }
+export interface McpRemoteSavedUpdate { accountId?: number; connectionEpoch?: number; projectId: number; stringId: number; item: StringItem; draftPresent: boolean; draftCleared: boolean }
 export interface TranslationSharedReference {
   recommendations?: Array<{ original: string; translation: string; similarity?: number }>
   terms?: Array<{ term: string; translation: string; note?: string }>
@@ -120,13 +150,14 @@ export interface CambridgeDictionaryData {
     }>
   }>
 }
-export type RequestAction = 'session' | 'projects' | 'project' | 'updateProject' | 'files' | 'file' | 'renameFile' | 'strings' | 'string' | 'suggestions' | 'memory' | 'terms' | 'projectTerms' | 'term' | 'createTerm' | 'updateTerm' | 'deleteTerm' | 'history' | 'save' | 'drafts' | 'draft' | 'legacyDrafts' | 'claimLegacyDrafts'
+export type RequestAction = 'session' | 'projects' | 'project' | 'updateProject' | 'files' | 'fileLabels' | 'file' | 'renameFile' | 'strings' | 'string' | 'suggestions' | 'memory' | 'terms' | 'projectTerms' | 'term' | 'createTerm' | 'updateTerm' | 'deleteTerm' | 'history' | 'projectSection' | 'projectSectionDetail' | 'projectSectionAction' | 'downloadArtifact' | 'userSearch' | 'save' | 'drafts' | 'draft' | 'legacyDrafts' | 'claimLegacyDrafts'
 export interface AutoUpdateState { status: 'disabled' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'up-to-date' | 'error'; version: string; percent: number; downloadUrl?: string }
 export interface DesktopBridge {
   presence(target: { projectId: number; stringId: number | null }): Promise<ServiceResult<PresenceState>>
   loginPresence(project: number): Promise<ServiceResult>
   onPresence(callback: (state: PresenceState) => void): () => void
   request<T = unknown>(action: RequestAction, payload?: Record<string, unknown>, requestId?: string): Promise<ServiceResult<T>>
+  saveProjectArtifact(projectId: number, filename?: string): Promise<ServiceResult<{ saved: boolean; canceled?: boolean }>>
   cancelRequest(requestId: string): Promise<ServiceResult>
   connect(token: string, remember: boolean, project: number): Promise<ServiceResult<SessionStatus>>
   login(project: number): Promise<ServiceResult<SessionStatus>>
@@ -138,6 +169,11 @@ export interface DesktopBridge {
   auxCustomizationOverlay(state: AuxCustomizationOverlayState): void
   onAuxCustomizationAction(callback: (action: AuxCustomizationAction) => void): () => void
   getTranslationSettings(): Promise<ServiceResult<TranslationSettings>>
+  getMcpSettings(): Promise<ServiceResult<McpSettings>>
+  saveMcpSettings(settings: McpSettingsUpdate): Promise<ServiceResult<McpSettings>>
+  reportMcpWorkspaceContext(context: Record<string, unknown> | null): void
+  onMcpDraftUpdated(callback: (update: McpDraftUpdate) => void): () => void
+  onMcpRemoteSaved(callback: (update: McpRemoteSavedUpdate) => void): () => void
   testProxy(proxy: TranslationSettingsUpdate['proxy']): Promise<ServiceResult<ProxyTestResult>>
   saveTranslationSettings(settings: TranslationSettingsUpdate): Promise<ServiceResult<TranslationSettings>>
   saveTranslationSelection(selection: TranslationSelectionUpdate): Promise<ServiceResult<TranslationSettings>>

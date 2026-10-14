@@ -2,7 +2,7 @@
 // Game newline escapes are decoded for segment parsing, as in this editor.
 import { tokens } from './text'
 import type { Term } from '~/types/editor'
-import { toEditorText } from './translationText'
+import { countLineBreaks, toEditorText, toParaTranzText } from './translationText'
 import { splitTranslationAlternatives } from './termHighlights'
 
 export interface QualityIssue {
@@ -200,7 +200,7 @@ export function qualityIssues(original: string, translation: string, key = '', t
   const target = translation, result = [...termUsageIssues(original, translation, terms), ...entryNumericIssues(original, translation), ...entryPlaceholderIssues(original, translation)]
   const formal = key !== ignoredKey, advisory = !key.endsWith(',P')
   if (formal) {
-    const a = (toEditorText(original).match(/\n/g) || []).length, b = (toEditorText(target).match(/\n/g) || []).length
+    const a = countLineBreaks(toParaTranzText(original)), b = countLineBreaks(toParaTranzText(target))
     if (a !== b) result.push(issue('newline', '换行数量不一致', [String(a)], [String(b)]))
   }
   if (advisory && normalized(original)) {
@@ -212,7 +212,7 @@ export function qualityIssues(original: string, translation: string, key = '', t
     const expected = balancedNames(original), tagsA = tagSignatures(original).filter(tag => expected.has(tagName(tag))), tagsB = tagSignatures(target).filter(tag => expected.has(tagName(tag)))
     if (JSON.stringify(tagsA) !== JSON.stringify(tagsB)) result.push(issue('tag_structure', '成对标签结构不一致', tagsA, tagsB, 'SCCL 格式提示'))
     if (!formal) {
-      const a = (toEditorText(original).match(/\n/g) || []).length, b = (toEditorText(target).match(/\n/g) || []).length
+      const a = countLineBreaks(toParaTranzText(original)), b = countLineBreaks(toParaTranzText(target))
       if (a !== b) result.push(issue('newline', '换行数量不一致', [String(a)], [String(b)], 'SCCL 格式提示'))
     }
   }

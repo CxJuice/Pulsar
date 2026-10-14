@@ -68,6 +68,8 @@ jobs:
         run: npm ci
       - name: Check desktop state and proxy behavior
         run: npm run test:electron
+      - name: Check MCP batch operations
+        run: npm run test:mcp
       - name: Check list request cancellation
         run: npm run test:logic
       - name: Check release authorization and artifact collection

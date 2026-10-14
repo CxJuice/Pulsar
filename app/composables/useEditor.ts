@@ -1,4 +1,4 @@
-import type { Draft, FileInfo, HistoryEntry, ProjectInfo, RequestAction, SessionStatus, StringItem, StringPage, Suggestion, Term } from '~/types/editor'
+import type { AdvancedStringFilters, Draft, FileInfo, HistoryEntry, ProjectInfo, RequestAction, SessionStatus, StringFileLabel, StringItem, StringPage, Suggestion, Term } from '~/types/editor'
 import { qualityIssues } from '~/utils/quality'
 import { matchSuggestions } from '~/utils/textWorker'
 import { toParaTranzText } from '~/utils/translationText'
@@ -8,6 +8,19 @@ import { ListRequestCoordinator } from '~/utils/listRequestCoordinator'
 
 const emptyProject = (): ProjectInfo => ({ id: 0, name: '', source: '', dest: '' })
 const emptyFile = (): FileInfo => ({ id: 0, name: '', project: 0, total: 0, translated: 0, disputed: 0, checked: 0, reviewed: 0, hidden: 0, locked: 0, words: 0 })
+const emptyAdvancedFilters = (): AdvancedStringFilters => ({
+  conditions: [], filename: '', fileLabels: [], stages: [], createdAtFrom: '', createdAtTo: '', updatedAtFrom: '', updatedAtTo: '',
+  lastModifiedScope: '', lastModifiedBy: [], translateBy: [], reviewBy: [], searchInCurrentFile: true, ignoreCase: false, includeHidden: false,
+})
+function serviceErrorStatus(reason: unknown) {
+  return reason && typeof reason === 'object' && 'status' in reason && typeof reason.status === 'number'
+    ? reason.status
+    : undefined
+}
+function cloneAdvancedFilters(filters: AdvancedStringFilters): AdvancedStringFilters {
+  return { ...filters, conditions: filters.conditions.map(condition => ({ ...condition })), fileLabels: filters.fileLabels.map(label => ({ ...label })), stages: [...filters.stages],
+    lastModifiedBy: filters.lastModifiedBy.map(user => ({ ...user })), translateBy: filters.translateBy.map(user => ({ ...user })), reviewBy: filters.reviewBy.map(user => ({ ...user })) }
+}
 interface Submission {
   id: number; item: StringItem; fileId: number; accountId: number; translation: string; stage: number
 }
@@ -18,8 +31,14 @@ interface WorkspaceLocation {
   stringId?: number
   key?: string
   fileName?: string
+  stageFilter: number | null
+  search: string
+  searchMode: string
+  sort: string
+  page: number
+  pageSize: number
+  advancedFilters: AdvancedStringFilters
 }
-
 export function useEditor() {
   const desktop = ref(false), connected = ref(false), initializing = ref(true)
   const workspaceReady = ref(false)
@@ -32,11 +51,14 @@ export function useEditor() {
   const backNavigationTitle = computed(() => {
     const previous = navigationHistory.value.at(-1)
     if (!previous) return '返回上一个词条和文件'
-    return `返回 ${previous.fileName || `文件 ${previous.fileId}`} · ${previous.key || '此前位置'}`
+    const locationName = previous.fileId === 0 ? '全文聚合' : previous.fileName || `文件 ${previous.fileId}`
+    return `返回 ${locationName} · ${previous.key || '此前位置'}`
   })
   const text = ref(''), editStage = ref(0), translationDisplayCleared = ref(false), stageFilter = ref<number | null>(0), search = ref(''), searchMode = ref('text')
   const page = ref(1), pageSize = ref(50), pageCount = ref(1), rowCount = ref(0), fileId = ref(0), sort = ref('default')
+  const advancedFilters = ref<AdvancedStringFilters>(emptyAdvancedFilters())
   const aggregateMode = computed(() => project.value.id > 0 && fileId.value === 0)
+  const allFilesScope = computed(() => aggregateMode.value || (fileId.value > 0 && !advancedFilters.value.searchInCurrentFile))
   const aggregateFile = computed<FileInfo>(() => {
     const summary = { ...emptyFile(), name: '全文聚合', project: project.value.id }
     for (const entry of files.value) {
@@ -53,7 +75,7 @@ export function useEditor() {
       || (sourceFileId ? `文件 ${sourceFileId}` : aggregateMode.value ? '未知文件' : file.value.name)
   }
   function inCurrentScope(item: StringItem, fallbackFileId = fileId.value) {
-    return project.value.id === item.project && (aggregateMode.value || fileId.value === (item.fileId || item.file?.id || fallbackFileId))
+    return project.value.id === item.project && (allFilesScope.value || fileId.value === (item.fileId || item.file?.id || fallbackFileId))
   }
   function captureWorkspaceLocation(): WorkspaceLocation | null {
     if (!workspaceReady.value || project.value.id <= 0) return null
@@ -62,9 +84,18 @@ export function useEditor() {
     const sourceFile = item?.file?.name || files.value.find(entry => entry.id === sourceFileId)?.name || file.value.name
     return {
       projectId: project.value.id,
-      fileId: sourceFileId,
+      // Keep the active scope (including the all-files aggregate) separate from
+      // the file that owns the selected string.
+      fileId: fileId.value,
       ...(item ? { stringId: item.id, key: item.key } : {}),
       ...(sourceFile ? { fileName: sourceFile } : {}),
+      stageFilter: stageFilter.value,
+      search: search.value,
+      searchMode: searchMode.value,
+      sort: sort.value,
+      page: page.value,
+      pageSize: pageSize.value,
+      advancedFilters: cloneAdvancedFilters(advancedFilters.value),
     }
   }
   function rememberWorkspaceLocation(previous: WorkspaceLocation | null, target?: { projectId: number; fileId: number; stringId?: number }) {
@@ -96,61 +127,98 @@ export function useEditor() {
   const presence = reactive(usePresence(presenceProjectId, computed(() => selected.value?.id || null), computed(() => desktop.value && connected.value && sessionInfo.value.authenticated), computed(() => workspaceReady.value && ![9, -1].includes(selected.value?.stage ?? 0))))
   let draftTimer: ReturnType<typeof setTimeout>, searchTimer: ReturnType<typeof setTimeout>
   let listSequence = 0, auxSequence = 0, historySequence = 0, termsSequence = 0, selectionSequence = 0, changing = false, draftGeneration = 0, termsLoaded = false
-  let suggestionsLoaded = false, historyLoaded = false, openingString = false
+  let suggestionsLoaded = false, historyLoaded = false, openingString = false, suppressFilterWatch = false
   let suggestionsRequest: { sequence: number; promise: Promise<void> } | undefined
   let historyRequest: { sequence: number; promise: Promise<void> } | undefined
   let termsRequest: { sequence: number; promise: Promise<void> } | undefined
   let draftWrites: Promise<void> = Promise.resolve()
   const detachedNeighbors = shallowRef<{ previousId?: number; nextId?: number; index: number; page: number } | null>(null)
   const termsCache = new EntryAuxCache<Term[]>(), suggestionsCache = new EntryAuxCache<Suggestion[]>(), disputedStringsCache = new EntryAuxCache<StringItem[]>(120_000, 8)
-  const updatedStringsCache = shallowRef<{ key: string; items: StringItem[] } | null>(null)
+  const clientSortedStringsCache = shallowRef<{ key: string; items: StringItem[] } | null>(null)
   const listRequests = new ListRequestCoordinator(id => { void window.scKit?.cancelRequest?.(id) })
   const globalSortLimit = 20_000
   let updatedSortNeedsRefresh = false
   let prefetchTimer: ReturnType<typeof setTimeout> | undefined, prefetchSequence = 0, disposed = false
   const auxiliaryKey = (item: StringItem) => JSON.stringify([sessionInfo.value.user?.id, sessionInfo.value.mode, item.project, item.id, item.original])
-
-  function updatedStringsQueryKey() {
-    return JSON.stringify([project.value.id, fileId.value, stageFilter.value, searchMode.value, search.value, sort.value])
+  function reportMcpWorkspaceContext() {
+    if (!import.meta.client || !window.scKit) return
+    if (disposed || !connected.value || !workspaceReady.value || !sessionInfo.value.authenticated) { window.scKit.reportMcpWorkspaceContext(null); return }
+    const item = selected.value
+    window.scKit.reportMcpWorkspaceContext({
+      accountId: sessionInfo.value.user?.id, connectionEpoch: sessionInfo.value.connectionEpoch,
+      project: { id: project.value.id, name: project.value.name },
+      file: { id: file.value.id, name: file.value.name },
+      selected: item ? {
+        id: item.id, key: item.key, original: item.original, translation: item.translation,
+        stage: item.stage, context: item.context, updatedAt: item.updatedAt,
+        fileId: item.fileId || item.file?.id || file.value.id,
+      } : null,
+      editorText: text.value,
+      editorStage: editStage.value,
+      dirty: dirty.value,
+      terms: terms.value.map(term => ({ term: term.term, translation: term.translation, note: term.note || '' })),
+    })
   }
-  function compareUpdated(a: StringItem, b: StringItem) {
-    const aTime = Date.parse(a.updatedAt || '') || 0, bTime = Date.parse(b.updatedAt || '') || 0
-    return bTime - aTime || b.id - a.id
+  function hasAdvancedFilterCriteria() {
+    const filters = advancedFilters.value
+    return filters.conditions.some(condition => condition.value !== '' || ['@=', '!@='].includes(condition.operator)) ||
+      !!filters.filename.trim() || filters.stages.length > 0 || !!filters.createdAtFrom || !!filters.createdAtTo ||
+      !!filters.updatedAtFrom || !!filters.updatedAtTo || !!filters.lastModifiedScope || filters.lastModifiedBy.length > 0 ||
+      filters.translateBy.length > 0 || filters.reviewBy.length > 0 || filters.ignoreCase || filters.includeHidden ||
+      (fileId.value > 0 && !filters.searchInCurrentFile)
   }
-  function sortByUpdated(rows: StringItem[]) { return [...rows].sort(compareUpdated) }
-  function updateUpdatedStringsCache(saved: StringItem, preferSaved = false) {
-    const cache = updatedStringsCache.value
-    if (sort.value !== 'updated' || !cache || cache.key !== updatedStringsQueryKey()) return false
-    if (search.value) {
-      updatedStringsCache.value = null
+  function stringFilterParams(includeSort = true): Array<[string, string]> {
+    const filters = advancedFilters.value, params: Array<[string, string]> = []
+    for (const condition of filters.conditions) {
+      if (!condition.value && !['@=', '!@='].includes(condition.operator)) continue
+      params.push([`${condition.field}${condition.operator}`, condition.value])
+    }
+    if (filters.stages.length) for (const stage of filters.stages) params.push(['stage', String(stage)])
+    for (const label of filters.fileLabels) params.push(['fileLabel', String(label.id)])
+    for (const user of filters.lastModifiedBy) params.push(['uid', String(user.id)])
+    for (const user of filters.translateBy) params.push(['translateBy', String(user.id)])
+    for (const user of filters.reviewBy) params.push(['reviewBy', String(user.id)])
+    if (filters.lastModifiedScope && sessionInfo.value.user?.id) {
+      const id = sessionInfo.value.user.id * (filters.lastModifiedScope === 'others' ? -1 : 1)
+      params.push(['uid', String(id)])
+    }
+    if (filters.filename.trim()) params.push(['filename', filters.filename.trim()])
+    const asIsoDate = (value: string) => {
+      const timestamp = Date.parse(value)
+      return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : value
+    }
+    if (filters.createdAtFrom) params.push(['createdAt>=', asIsoDate(filters.createdAtFrom)])
+    if (filters.createdAtTo) params.push(['createdAt<=', asIsoDate(filters.createdAtTo)])
+    if (filters.updatedAtFrom) params.push(['updatedAt>=', asIsoDate(filters.updatedAtFrom)])
+    if (filters.updatedAtTo) params.push(['updatedAt<=', asIsoDate(filters.updatedAtTo)])
+    if (hasAdvancedFilterCriteria()) params.push(['advanced', '1'])
+    const mode = (filters.ignoreCase ? 1 : 0) | (filters.includeHidden ? 4 : 0)
+    if (mode) params.push(['mode', String(mode)])
+    if (includeSort && sort.value === 'key') params.push(['orderBy', 'key'])
+    else if (includeSort && sort.value === 'updated') params.push(['orderBy', '-updatedAt'])
+    return params
+  }
+  function lengthStringsQueryKey() {
+    return JSON.stringify([project.value.id, fileId.value, stageFilter.value, searchMode.value, search.value, sort.value, advancedFilters.value])
+  }
+  function updateSortedViewAfterSave(preferSaved = false) {
+    if (sort.value === 'key') {
+      // A compatibility fallback caches remote pages; refresh their row data after edits.
+      clientSortedStringsCache.value = null
+    } else if (sort.value === 'updated') {
+      // ParaTranz owns updatedAt and the order of ties. Refresh its page after a save.
+      clientSortedStringsCache.value = null
       updatedSortNeedsRefresh = true
-      return false
+      if (preferSaved) page.value = 1
+    } else if (sort.value === 'length') {
+      // A stage change can alter the cached filtered set, so rebuild it on the next page load.
+      clientSortedStringsCache.value = null
     }
-
-    const rows = [...cache.items], index = rows.findIndex(item => item.project === saved.project && item.id === saved.id)
-    const matchesStage = stageFilter.value === null || saved.stage === stageFilter.value
-    if (index >= 0) {
-      if (matchesStage) rows[index] = saved
-      else rows.splice(index, 1)
-    } else if (matchesStage) rows.push(saved)
-    const sorted = sortByUpdated(rows)
-    updatedStringsCache.value = { key: cache.key, items: sorted }
-    rowCount.value = sorted.length
-    pageCount.value = Math.max(1, Math.ceil(rowCount.value / pageSize.value))
-    if (preferSaved && matchesStage) {
-      const savedIndex = sorted.findIndex(item => item.project === saved.project && item.id === saved.id)
-      if (savedIndex >= 0) page.value = Math.floor(savedIndex / pageSize.value) + 1
-    }
-    page.value = Math.max(1, Math.min(page.value, pageCount.value))
-    items.value = sorted.slice((page.value - 1) * pageSize.value, page.value * pageSize.value)
-    return true
   }
 
   function orderedItems(rows: StringItem[]) {
     const result = [...rows]
-    if (sort.value === 'key') result.sort((a, b) => a.key.localeCompare(b.key))
     if (sort.value === 'length') result.sort((a, b) => b.original.length - a.original.length)
-    if (sort.value === 'updated') result.sort(compareUpdated)
     return result
   }
   const visibleItems = computed(() => orderedItems(items.value))
@@ -175,6 +243,8 @@ export function useEditor() {
     const queued = pendingSubmissions.value.findLast(job => job.item.project === item.project && job.item.id === item.id)
     return toParaTranzText(text.value) !== toParaTranzText(queued?.translation ?? item.translation) || editStage.value !== (queued?.stage ?? item.stage)
   })
+  watch(() => [connected.value, workspaceReady.value, sessionInfo.value, project.value.id, project.value.name, file.value.id, file.value.name, selected.value, text.value, editStage.value, dirty.value, terms.value],
+    reportMcpWorkspaceContext, { deep: true, flush: 'sync' })
   const locked = computed(() => [9, -1].includes(selected.value?.stage ?? 0))
   const issues = computed(() => selected.value ? qualityIssues(selected.value.original, text.value, selected.value.key, terms.value) : [])
   const untranslated = computed(() => Math.max(0, file.value.total - file.value.translated - file.value.hidden))
@@ -194,22 +264,86 @@ export function useEditor() {
       const result = await bridge.request<T>(action, payload, requestId)
       if (!result.ok) {
         if (result.status === 401) sessionInfo.value.authenticated = false
-        throw new Error(result.message || '请求失败')
+        const error = new Error(result.message || '请求失败')
+        Object.assign(error, { status: result.status })
+        throw error
       }
-      return result.data as T
+      const data = result.data
+      if (action === 'string' || action === 'save') return normalizeStringItem(data) as T
+      const stringPage = data as unknown as StringPage
+      if (action === 'strings' && data && typeof data === 'object' && Array.isArray(stringPage.results)) {
+        return { ...stringPage, results: stringPage.results.map(normalizeStringItem) } as T
+      }
+      return data as T
     } finally { requestCount.value-- }
+  }
+  function normalizeStringItem(value: unknown): StringItem {
+    if (!value || typeof value !== 'object') return value as StringItem
+    // ParaTranz returns `file` as a numeric ID; the editor uses `fileId` plus
+    // an optional expanded file object for display and scope checks.
+    const item = value as Record<string, unknown>
+    const file = item.file
+    const nestedFile = file && typeof file === 'object' ? file as Record<string, unknown> : null
+    const candidates = [item.fileId, typeof file === 'number' ? file : undefined, nestedFile?.id]
+    const sourceFileId = candidates.find(candidate => typeof candidate === 'number' && Number.isSafeInteger(candidate) && candidate > 0)
+    return {
+      ...item,
+      ...(typeof sourceFileId === 'number' ? { fileId: sourceFileId } : {}),
+      ...(typeof file === 'number' ? { file: undefined } : {}),
+    } as unknown as StringItem
   }
   function stopListRequests() {
     listRequests.cancelAll()
   }
-  async function listPage(payload: Record<string, unknown>): Promise<StringPage> {
-    return listRequests.run(id => api<StringPage>('strings', payload, id))
+  async function listPage(payload: Record<string, unknown>, includeSort = true): Promise<StringPage> {
+    return listRequests.run(id => api<StringPage>('strings', {
+      ...payload, filterParams: stringFilterParams(includeSort), searchInCurrentFile: advancedFilters.value.searchInCurrentFile,
+    }, id))
   }
-  function remoteStringPageCount(page: StringPage, requestedPageSize: number) {
-    const actualPageSize = Number.isInteger(page.pageSize) && page.pageSize > 0
+  function remoteStringPageSize(page: StringPage, requestedPageSize: number) {
+    return Number.isInteger(page.pageSize) && page.pageSize > 0
       ? Math.min(page.pageSize, 800)
       : requestedPageSize
-    return Math.max(1, Math.ceil(Math.max(0, page.rowCount) / actualPageSize))
+  }
+  function remoteStringPageCount(page: StringPage, requestedPageSize: number) {
+    return Math.max(1, Math.ceil(Math.max(0, page.rowCount) / remoteStringPageSize(page, requestedPageSize)))
+  }
+  function sortFetchedStrings(rows: StringItem[], mode: string) {
+    const result = [...rows]
+    if (mode === 'key') return result.sort((a, b) => a.key.localeCompare(b.key) || a.id - b.id)
+    if (mode === 'updated') return result.sort((a, b) => (Date.parse(b.updatedAt || '') || 0) - (Date.parse(a.updatedAt || '') || 0) || b.id - a.id)
+    return result.sort((a, b) => b.original.length - a.original.length)
+  }
+  async function loadClientSortedFallback(sequence: number, preferredId?: number, retainedSelection?: StringItem, edge: 'first' | 'last' = 'first', clearTranslation = false) {
+    const query = { projectId: project.value.id, fileId: fileId.value, pageSize: 800, stage: stageFilter.value, text: search.value, searchMode: searchMode.value }
+    const first = await listPage({ ...query, page: 1 }, false)
+    if (sequence !== listSequence) return
+    const remotePageCount = remoteStringPageCount(first, query.pageSize)
+    if (!allFilesScope.value && first.rowCount > globalSortLimit) {
+      throw new Error(`单文件全局排序最多处理 ${globalSortLimit.toLocaleString()} 条词条；请先按状态或搜索缩小范围。`)
+    }
+    listProgress.value = `已读取 1 / ${remotePageCount} 页，正在兼容排序方式`
+    const fetched = new Map(first.results.map(item => [item.id, item]))
+    for (let currentPage = 2; currentPage <= remotePageCount; currentPage++) {
+      const data = await listPage({ ...query, page: currentPage }, false)
+      if (sequence !== listSequence) return
+      for (const item of data.results) fetched.set(item.id, item)
+      listProgress.value = `已读取 ${currentPage} / ${remotePageCount} 页，正在整理排序`
+    }
+    const all = sortFetchedStrings([...fetched.values()], sort.value)
+    clientSortedStringsCache.value = { key: lengthStringsQueryKey(), items: all }
+    rowCount.value = all.length
+    pageCount.value = Math.max(1, Math.ceil(rowCount.value / pageSize.value))
+    if (retainedSelection) {
+      const index = all.findIndex(item => item.id === retainedSelection.id && item.project === retainedSelection.project)
+      if (index >= 0) page.value = Math.floor(index / pageSize.value) + 1
+      else notice.value = '当前筛选结果不包含此前选中的词条。'
+    }
+    page.value = Math.max(1, Math.min(page.value, pageCount.value))
+    items.value = all.slice((page.value - 1) * pageSize.value, page.value * pageSize.value)
+    if (sort.value === 'updated') updatedSortNeedsRefresh = false
+    const rows = visibleItems.value
+    choose(rows.find(item => item.id === preferredId) || (edge === 'last' ? rows.at(-1) : rows[0]) || null, clearTranslation)
   }
   function choose(item: StringItem | null, clearTranslation = false) {
     ++selectionSequence
@@ -248,9 +382,8 @@ export function useEditor() {
       const latest = await api<StringItem>('string', { projectId: item.project, stringId: item.id })
       if (sequence !== selectionSequence || selected.value?.project !== item.project || selected.value.id !== item.id) return
 
-      const cacheHandled = updateUpdatedStringsCache(latest)
       const index = items.value.findIndex(row => row.project === latest.project && row.id === latest.id)
-      if (!cacheHandled && index >= 0) items.value[index] = latest
+      if (index >= 0) items.value[index] = latest
       selected.value = latest
 
       // Keep any typing the user started while the verification request was in flight.
@@ -344,10 +477,10 @@ export function useEditor() {
       if (sameSelection && stageFilter.value !== null && saved.stage !== stageFilter.value && priorVisibleIndex >= 0) {
         detachedNeighbors.value = { previousId: priorVisible[priorVisibleIndex - 1]?.id, nextId: priorVisible[priorVisibleIndex + 1]?.id, index: priorVisibleIndex, page: page.value }
       }
-      const updatedCacheHandled = updateUpdatedStringsCache(saved, sameSelection)
+      updateSortedViewAfterSave(sameSelection)
       const index = items.value.findIndex(row => row.project === item.project && row.id === item.id)
       const visibleIndex = visibleItems.value.findIndex(row => row.project === item.project && row.id === item.id)
-      if (!updatedCacheHandled && index >= 0) {
+      if (index >= 0) {
         if (stageFilter.value !== null && saved.stage !== stageFilter.value) {
           if (sameSelection) detachedNeighbors.value = { previousId: visibleItems.value[visibleIndex - 1]?.id, nextId: visibleItems.value[visibleIndex + 1]?.id, index: visibleIndex, page: page.value }
           items.value.splice(index, 1)
@@ -419,21 +552,21 @@ export function useEditor() {
     if (!connected.value || sequence !== listSequence) return
     listBusy.value = true; listProgress.value = ''; error.value = ''; selectedIds.value = []
     try {
-      if (sort.value !== 'default') {
-        const key = updatedStringsQueryKey()
-        let all = !force && updatedStringsCache.value?.key === key ? updatedStringsCache.value.items : undefined
+      if (sort.value === 'length' || (!force && clientSortedStringsCache.value?.key === lengthStringsQueryKey())) {
+        const key = lengthStringsQueryKey()
+        let all = !force && clientSortedStringsCache.value?.key === key ? clientSortedStringsCache.value.items : undefined
         if (!all) {
-          // ParaTranz does not expose a list sort parameter, so collect the full filtered result before sorting.
-          updatedStringsCache.value = null
+          // ParaTranz has no original-length sort, so collect the filtered result and sort it locally.
+          clientSortedStringsCache.value = null
           const remotePageSize = 800
           const query = { projectId: project.value.id, fileId: fileId.value, pageSize: remotePageSize, stage: stageFilter.value, text: search.value, searchMode: searchMode.value }
           const first = await listPage({ ...query, page: 1 })
           if (sequence !== listSequence) return
           const remotePageCount = remoteStringPageCount(first, remotePageSize)
-          if (!aggregateMode.value && first.rowCount > globalSortLimit) {
+          if (!allFilesScope.value && first.rowCount > globalSortLimit) {
             throw new Error(`单文件全局排序最多处理 ${globalSortLimit.toLocaleString()} 条词条；请先按状态或搜索缩小范围。`)
           }
-          listProgress.value = `已读取 1 / ${remotePageCount} 页，正在按${sort.value === 'key' ? '键值' : sort.value === 'length' ? '原文长度' : '修改时间'}排序`
+          listProgress.value = `已读取 1 / ${remotePageCount} 页，正在按原文长度排序`
           const fetched = new Map(first.results.map(item => [item.id, item]))
           for (let currentPage = 2; currentPage <= remotePageCount; currentPage++) {
             const data = await listPage({ ...query, page: currentPage })
@@ -441,9 +574,8 @@ export function useEditor() {
             for (const item of data.results) fetched.set(item.id, item)
             listProgress.value = `已读取 ${currentPage} / ${remotePageCount} 页，正在整理排序`
           }
-          all = orderedItems([...fetched.values()])
-          updatedStringsCache.value = { key, items: all }
-          updatedSortNeedsRefresh = false
+          all = sortFetchedStrings([...fetched.values()], sort.value)
+          clientSortedStringsCache.value = { key, items: all }
         }
         if (sequence !== listSequence) return
         rowCount.value = all.length
@@ -460,15 +592,16 @@ export function useEditor() {
           const query = { projectId: project.value.id, fileId: fileId.value, pageSize: 800, stage: stageFilter.value, text: search.value, searchMode: searchMode.value }
           const first = await listPage({ ...query, page: 1 })
           if (sequence !== listSequence) return
-          if (!aggregateMode.value && first.rowCount > globalSortLimit) throw new Error(`定位原选中词条需要扫描超过 ${globalSortLimit.toLocaleString()} 条记录；请先缩小筛选范围。`)
+          if (!allFilesScope.value && first.rowCount > globalSortLimit) throw new Error(`定位原选中词条需要扫描超过 ${globalSortLimit.toLocaleString()} 条记录；请先缩小筛选范围。`)
           const remotePageCount = remoteStringPageCount(first, query.pageSize)
+          const actualRemotePageSize = remoteStringPageSize(first, query.pageSize)
           let index = first.results.findIndex(item => item.id === retainedSelection.id && item.project === retainedSelection.project)
           for (let remotePage = 2; index < 0 && remotePage <= remotePageCount; remotePage++) {
             const data = await listPage({ ...query, page: remotePage })
             if (sequence !== listSequence) return
             listProgress.value = `正在定位所选词条：${remotePage} / ${remotePageCount} 页`
             const match = data.results.findIndex(item => item.id === retainedSelection.id && item.project === retainedSelection.project)
-            if (match >= 0) index = (remotePage - 1) * 800 + match
+            if (match >= 0) index = (remotePage - 1) * actualRemotePageSize + match
           }
           if (index >= 0) page.value = Math.floor(index / pageSize.value) + 1
           else notice.value = '当前筛选结果不包含此前选中的词条。'
@@ -477,9 +610,15 @@ export function useEditor() {
         if (sequence !== listSequence) return
         items.value = data.results; rowCount.value = data.rowCount; pageCount.value = Math.max(1, data.pageCount); page.value = data.page
       }
+      if (sort.value === 'updated') updatedSortNeedsRefresh = false
       const rows = visibleItems.value
       choose(rows.find(item => item.id === preferredId) || (edge === 'last' ? rows.at(-1) : rows[0]) || null, clearTranslation)
-    } catch (reason) { if (sequence === listSequence) error.value = (reason as Error).message }
+    } catch (reason) {
+      if (sequence === listSequence && serviceErrorStatus(reason) === 405 && ['key', 'updated'].includes(sort.value)) {
+        try { await loadClientSortedFallback(sequence, preferredId, retainedSelection, edge, clearTranslation) }
+        catch (fallbackReason) { if (sequence === listSequence) error.value = (fallbackReason as Error).message }
+      } else if (sequence === listSequence) error.value = (reason as Error).message
+    }
     finally { if (sequence === listSequence) { listBusy.value = false; listProgress.value = '' } }
   }
   function cancelListLoad(silent = false) {
@@ -494,7 +633,7 @@ export function useEditor() {
     if (!sessionInfo.value.authenticated || initializing.value && connected.value) return
     try { await flushDraft(true) } catch (reason) { error.value = (reason as Error).message; return }
     clearAuxiliaryCache()
-    updatedStringsCache.value = null
+    clientSortedStringsCache.value = null
     initializing.value = true; error.value = ''
     try {
       const accountId = sessionInfo.value.user?.id
@@ -505,6 +644,7 @@ export function useEditor() {
       if (!newFiles.length) throw new Error('项目中没有可翻译的文件')
       if (query?.item && !newFiles.some(entry => entry.id === newFileId)) throw new Error('目标文件不可用，无法定位词条')
       project.value = newProject; files.value = newFiles; drafts.value = localDrafts; legacyDraftCount.value = legacy.count
+      advancedFilters.value = emptyAdvancedFilters()
       file.value = newFileId === 0 ? aggregateFile.value : newFiles.find(entry => entry.id === newFileId) || newFiles[0]!
       fileId.value = file.value.id; connected.value = true; choose(null); page.value = 1
       if (aggregateMode.value) stageFilter.value = null
@@ -521,7 +661,7 @@ export function useEditor() {
     const previousLocation = recordHistory ? captureWorkspaceLocation() : null
     error.value = ''
     try { await flushDraft(true) } catch (reason) { error.value = (reason as Error).message; return }
-    updatedStringsCache.value = null; fileId.value = id; file.value = id === 0 ? aggregateFile.value : files.value.find(entry => entry.id === id) || file.value
+    clientSortedStringsCache.value = null; fileId.value = id; file.value = id === 0 ? aggregateFile.value : files.value.find(entry => entry.id === id) || file.value
     if (aggregateMode.value) stageFilter.value = null
     page.value = 1; await loadStrings()
     if (error.value) return
@@ -554,6 +694,7 @@ export function useEditor() {
     if (!connected.value || !sessionInfo.value.authenticated) throw new Error('请先登录 ParaTranz')
     const previousLocation = recordHistory ? captureWorkspaceLocation() : null
     reloadBusy.value = true; openingString = true; error.value = ''; notice.value = ''
+    advancedFilters.value = emptyAdvancedFilters()
     clearTimeout(searchTimer)
     try {
       const item = await api<StringItem>('string', { projectId, stringId })
@@ -568,7 +709,7 @@ export function useEditor() {
       const targetFile = files.value.find(entry => entry.id === targetFileId)
       if (!targetFile) throw new Error('目标文件不可用，无法定位词条')
       fileId.value = targetFileId; file.value = targetFile
-      updatedStringsCache.value = null
+      clientSortedStringsCache.value = null
       // Search by key so a jump does not need to scan every page of a large file.
       stageFilter.value = null; searchMode.value = 'key'; search.value = item.key; page.value = 1
       await nextTick()
@@ -592,11 +733,12 @@ export function useEditor() {
     try {
       await flushDraft(true)
       sort.value = 'default'
+      advancedFilters.value = emptyAdvancedFilters()
       await nextTick()
       if (!workspaceReady.value || project.value.id !== projectId) {
         await bootstrap(projectId, 0, { text: query, searchMode: 'original' })
       } else {
-        updatedStringsCache.value = null
+        clientSortedStringsCache.value = null
         fileId.value = 0; file.value = aggregateFile.value
         stageFilter.value = null; searchMode.value = 'original'; search.value = query; page.value = 1
         await nextTick()
@@ -611,30 +753,68 @@ export function useEditor() {
   async function goBack() {
     const previous = navigationHistory.value.at(-1)
     if (!previous || initializing.value || listBusy.value || reloadBusy.value) return false
+    let retained: StringItem | undefined
     let restored = false
     if (previous.stringId) {
       restored = await openString(previous.projectId, previous.stringId, false)
-    } else if (!workspaceReady.value || project.value.id !== previous.projectId) {
-      error.value = ''
-      await bootstrap(previous.projectId, previous.fileId)
-      restored = workspaceReady.value && project.value.id === previous.projectId && fileId.value === previous.fileId && !error.value
+      retained = selected.value || undefined
     } else {
-      error.value = ''
-      await changeFile(previous.fileId, false)
-      restored = project.value.id === previous.projectId && fileId.value === previous.fileId && !error.value
+      restored = await openFile(previous.projectId, previous.fileId, false)
+    }
+    if (restored) {
+      // Opening a linked string uses a temporary key search. Restore the exact
+      // view the user came from before loading its original result page.
+      openingString = true
+      try {
+        clearTimeout(searchTimer)
+        error.value = ''
+        fileId.value = previous.fileId
+        file.value = previous.fileId === 0
+          ? aggregateFile.value
+          : files.value.find(entry => entry.id === previous.fileId) || file.value
+        stageFilter.value = previous.stageFilter
+        searchMode.value = previous.searchMode
+        search.value = previous.search
+        sort.value = previous.sort
+        pageSize.value = previous.pageSize
+        page.value = previous.page
+        advancedFilters.value = cloneAdvancedFilters(previous.advancedFilters)
+        clientSortedStringsCache.value = null
+        await nextTick()
+        await loadStrings(previous.stringId, retained)
+        restored = project.value.id === previous.projectId && fileId.value === previous.fileId && !error.value
+      } finally { openingString = false }
+      if (restored) localStorage.setItem('sckit-workspace', JSON.stringify({ projectId: previous.projectId, fileId: previous.fileId }))
     }
     if (restored) navigationHistory.value = navigationHistory.value.slice(0, -1)
     return restored
   }
-  function filter(stage: number | null) { stageFilter.value = stage; page.value = 1; loadStrings() }
+  function filter(stage: number | null) { advancedFilters.value.stages = []; stageFilter.value = stage; page.value = 1; loadStrings() }
+  function applyAdvancedFilters(filters: AdvancedStringFilters, nextSort = sort.value) {
+    advancedFilters.value = cloneAdvancedFilters(filters)
+    stageFilter.value = null
+    const sortChanged = sort.value !== nextSort
+    sort.value = nextSort
+    page.value = 1
+    clientSortedStringsCache.value = null
+    if (!sortChanged) void loadStrings()
+  }
+  function clearFilters() {
+    clearTimeout(searchTimer)
+    suppressFilterWatch = true
+    search.value = ''; searchMode.value = 'text'; stageFilter.value = null
+    advancedFilters.value = emptyAdvancedFilters(); sort.value = 'default'; page.value = 1
+    clientSortedStringsCache.value = null
+    void nextTick(() => { suppressFilterWatch = false; void loadStrings(selected.value?.id) })
+  }
   watch([search, searchMode], (_value, previous) => {
     clearTimeout(searchTimer)
-    if (initializing.value || openingString) return
+    if (initializing.value || openingString || suppressFilterWatch) return
     if (listBusy.value) cancelListLoad(true)
     const preserve = !search.value.trim() && !!previous?.[0] ? selected.value || undefined : undefined
     searchTimer = setTimeout(() => { page.value = 1; void loadStrings(preserve?.id, preserve) }, 350)
   })
-  watch(sort, () => { if (openingString) return; page.value = 1; void loadStrings(selected.value?.id) })
+  watch(sort, () => { if (openingString || suppressFilterWatch) return; page.value = 1; void loadStrings(selected.value?.id) })
   async function paginate(newPage: number, edge: 'first' | 'last' = 'first', clearTranslation = false) { if (listBusy.value) return; page.value = Math.max(1, Math.min(newPage, pageCount.value)); await loadStrings(undefined, undefined, edge, clearTranslation, false) }
   async function changePageSize(size: number) { pageSize.value = size; page.value = 1; await loadStrings(undefined, undefined, 'first', false, false) }
 
@@ -744,11 +924,10 @@ export function useEditor() {
     if (!valid()) return
     let next = nextLocalItem.value
     if (!next && page.value < pageCount.value) {
-      if (sort.value === 'updated') {
-        const cache = updatedStringsCache.value
-        if (cache?.key === updatedStringsQueryKey()) next = cache.items[page.value * pageSize.value]
-      } else {
-        const data = await api<StringPage>('strings', { projectId: project.value.id, fileId: fileId.value, page: page.value + 1, pageSize: pageSize.value, stage: stageFilter.value, text: search.value, searchMode: searchMode.value })
+      const cache = clientSortedStringsCache.value
+      if (cache?.key === lengthStringsQueryKey()) next = cache.items[page.value * pageSize.value]
+      else {
+        const data = await listPage({ projectId: project.value.id, fileId: fileId.value, page: page.value + 1, pageSize: pageSize.value, stage: stageFilter.value, text: search.value, searchMode: searchMode.value })
         if (!valid()) return
         next = orderedItems(data.results)[0]
       }
@@ -763,7 +942,7 @@ export function useEditor() {
   watch([selected, nextLocalItem, sort, page, pageSize, stageFilter, search, searchMode, fileId, listBusy, initializing, reloadBusy], scheduleNextPrefetch)
   watch([connected, () => sessionInfo.value.authenticated, () => sessionInfo.value.user?.id, () => sessionInfo.value.mode], () => {
     clearAuxiliaryCache()
-    updatedStringsCache.value = null
+    clientSortedStringsCache.value = null
   }, { flush: 'sync' })
   async function loadHistory(force = false): Promise<void> {
     if (force) { ++historySequence; historyLoaded = false; historyRequest = undefined }
@@ -850,10 +1029,10 @@ export function useEditor() {
               if (sameSelection && stageFilter.value !== null && saved.stage !== stageFilter.value && priorVisibleIndex >= 0) {
                 detachedNeighbors.value = { previousId: priorVisible[priorVisibleIndex - 1]?.id, nextId: priorVisible[priorVisibleIndex + 1]?.id, index: priorVisibleIndex, page: page.value }
               }
-              const updatedCacheHandled = updateUpdatedStringsCache(saved, sameSelection)
+              updateSortedViewAfterSave(sameSelection)
               const index = items.value.findIndex(row => row.id === job.item.id)
               const visibleIndex = visibleItems.value.findIndex(row => row.id === job.item.id)
-              if (!updatedCacheHandled && index >= 0) {
+              if (index >= 0) {
                 if (stageFilter.value !== null && saved.stage !== stageFilter.value) {
                   if (sameSelection) detachedNeighbors.value = { previousId: visibleItems.value[visibleIndex - 1]?.id, nextId: visibleItems.value[visibleIndex + 1]?.id, index: visibleIndex, page: page.value }
                   items.value.splice(index, 1); rowCount.value = Math.max(0, rowCount.value - 1)
@@ -931,10 +1110,10 @@ export function useEditor() {
       await flushDraft()
       const data = await api<StringItem>('string', { projectId: item.project, stringId: item.id })
       if (selected.value?.id !== item.id || selected.value.project !== item.project) return
-      const updatedCacheHandled = updateUpdatedStringsCache(data, true)
+      updateSortedViewAfterSave(true)
       const index = items.value.findIndex(item => item.id === data.id); if (index !== -1) items.value[index] = data
       choose(data); notice.value = '已载入远端版本，本地草稿保留在编辑框'
-      if (!updatedCacheHandled && updatedSortNeedsRefresh && sort.value === 'updated') {
+      if (updatedSortNeedsRefresh && sort.value === 'updated') {
         updatedSortNeedsRefresh = false
         await loadStrings(data.id)
       }
@@ -947,7 +1126,7 @@ export function useEditor() {
   }
   async function resetWorkspace() {
     clearAuxiliaryCache()
-    updatedStringsCache.value = null
+    clientSortedStringsCache.value = null
     updatedSortNeedsRefresh = false
     navigationHistory.value = []
     await flushDraft(true); connected.value = false; sessionInfo.value = { authenticated: false, mode: 'none' }
@@ -1006,9 +1185,71 @@ export function useEditor() {
     } catch (reason) { error.value = (reason as Error).message }
     finally { presenceLoginBusy.value = false }
   }
+  let removeMcpDraftUpdate: (() => void) | undefined, removeMcpRemoteSaved: (() => void) | undefined
   onMounted(async () => {
     desktop.value = !!window.scKit
     if (desktop.value) {
+      removeMcpDraftUpdate = window.scKit?.onMcpDraftUpdated(update => {
+        if (update.accountId !== undefined && update.accountId !== sessionInfo.value.user?.id) return
+        if (update.connectionEpoch !== undefined && update.connectionEpoch !== sessionInfo.value.connectionEpoch) return
+        if (!Number.isInteger(update.projectId) || !Number.isInteger(update.stringId) || !update.draft) return
+        const key = `${update.projectId}/${update.stringId}`
+        const previousDraft = drafts.value[key]
+        drafts.value[key] = update.draft
+        if (selected.value?.project !== update.projectId || selected.value.id !== update.stringId || (dirty.value && (text.value !== previousDraft?.translation || editStage.value !== previousDraft?.stage))) return
+        changing = true
+        translationDisplayCleared.value = false
+        text.value = toParaTranzText(update.draft.translation)
+        editStage.value = update.draft.stage
+        draftStatus.value = 'MCP 已填入本机草稿'
+        changing = false
+      })
+      removeMcpRemoteSaved = window.scKit?.onMcpRemoteSaved(update => {
+        if (update.accountId !== undefined && update.accountId !== sessionInfo.value.user?.id) return
+        if (update.connectionEpoch !== undefined && update.connectionEpoch !== sessionInfo.value.connectionEpoch) return
+        const saved = normalizeStringItem(update.item)
+        if (!Number.isInteger(update.projectId) || !Number.isInteger(update.stringId) ||
+          saved?.project !== update.projectId || saved?.id !== update.stringId) return
+        const key = `${update.projectId}/${update.stringId}`
+        const sameSelection = selected.value?.project === update.projectId && selected.value.id === update.stringId
+        const editorWasClean = sameSelection && !dirty.value
+        const previousDraft = drafts.value[key]
+        if (update.draftCleared) delete drafts.value[key]
+        if (inCurrentScope(saved)) {
+          const priorVisible = visibleItems.value
+          const priorVisibleIndex = priorVisible.findIndex(row => row.project === update.projectId && row.id === update.stringId)
+          if (sameSelection && stageFilter.value !== null && saved.stage !== stageFilter.value && priorVisibleIndex >= 0) {
+            detachedNeighbors.value = { previousId: priorVisible[priorVisibleIndex - 1]?.id, nextId: priorVisible[priorVisibleIndex + 1]?.id, index: priorVisibleIndex, page: page.value }
+          }
+          updateSortedViewAfterSave(sameSelection)
+          const index = items.value.findIndex(row => row.project === update.projectId && row.id === update.stringId)
+          const visibleIndex = visibleItems.value.findIndex(row => row.project === update.projectId && row.id === update.stringId)
+          if (index >= 0) {
+            if (stageFilter.value !== null && saved.stage !== stageFilter.value) {
+              if (sameSelection) detachedNeighbors.value = { previousId: visibleItems.value[visibleIndex - 1]?.id, nextId: visibleItems.value[visibleIndex + 1]?.id, index: visibleIndex, page: page.value }
+              items.value.splice(index, 1)
+              rowCount.value = Math.max(0, rowCount.value - 1)
+              pageCount.value = Math.max(1, Math.ceil(rowCount.value / pageSize.value))
+            } else items.value[index] = saved
+          }
+        }
+        if (sameSelection) {
+          selected.value = saved
+          if (editorWasClean || (update.draftCleared && toParaTranzText(text.value) === saved.translation && editStage.value === previousDraft?.stage)) {
+            changing = true
+            translationDisplayCleared.value = false
+            text.value = toParaTranzText(saved.translation)
+            editStage.value = saved.stage
+            changing = false
+          }
+          draftStatus.value = update.draftPresent && !update.draftCleared ? 'MCP 已直接保存到 ParaTranz；本机草稿仍保留' : 'MCP 已直接保存到 ParaTranz'
+        }
+        if (updatedSortNeedsRefresh && sort.value === 'updated' && workspaceReady.value && connected.value && sessionInfo.value.authenticated) {
+          updatedSortNeedsRefresh = false
+          void loadStrings(selected.value?.id)
+        }
+        suggestionsCache.clear(); disputedStringsCache.clear()
+      })
       try {
         sessionInfo.value = await api<SessionStatus>('session')
         if (sessionInfo.value.authenticated) {
@@ -1018,8 +1259,8 @@ export function useEditor() {
     }
     initializing.value = false
   })
-  onBeforeUnmount(() => { disposed = true; stopListRequests(); clearAuxiliaryCache(); clearTimeout(draftTimer); clearTimeout(searchTimer); ++auxSequence; ++historySequence; ++termsSequence; flushDraft() })
+  onBeforeUnmount(() => { window.scKit?.reportMcpWorkspaceContext(null); removeMcpDraftUpdate?.(); removeMcpRemoteSaved?.(); disposed = true; stopListRequests(); clearAuxiliaryCache(); clearTimeout(draftTimer); clearTimeout(searchTimer); ++auxSequence; ++historySequence; ++termsSequence; flushDraft() })
   const translationCacheState = { auxiliaryCacheVersion }
-  return { ...translationCacheState, desktop, connected, initializing, workspaceReady, project, file, files, sortedFiles, aggregateMode, aggregateFile, stringFileName, items, visibleItems, selected, canGoBack, backNavigationTitle, text, editStage, stageFilter, search, searchMode, page, pageSize, pageCount, rowCount, fileId, sort, listBusy, listProgress, cancelListLoad, pendingCount, submissionFailures, error, notice, draftStatus, dirty, locked, issues, untranslated, selectedIds, panel, suggestions, suggestionsBusy, suggestionsError, terms, history, historyBusy, historyError, auxBusy, auxError, termsBusy, termsError, sessionInfo, drafts, legacyDraftCount, claimLegacyDrafts,
+  return { ...translationCacheState, desktop, connected, initializing, workspaceReady, project, file, files, sortedFiles, aggregateMode, allFilesScope, showSourceFile: allFilesScope, aggregateFile, stringFileName, items, visibleItems, selected, canGoBack, backNavigationTitle, text, editStage, stageFilter, search, searchMode, advancedFilters, applyAdvancedFilters, clearFilters, page, pageSize, pageCount, rowCount, fileId, sort, listBusy, listProgress, cancelListLoad, pendingCount, submissionFailures, error, notice, draftStatus, dirty, locked, issues, untranslated, selectedIds, panel, suggestions, suggestionsBusy, suggestionsError, terms, history, historyBusy, historyError, auxBusy, auxError, termsBusy, termsError, sessionInfo, drafts, legacyDraftCount, claimLegacyDrafts,
     presence, presenceProjectId, presenceLoginBusy, loginPresence, requestCount, reloadBusy, exportBusy, api, input, select, loadStrings, bootstrap, changeFile, openFile, refreshFiles, openString, openOccurrences, goBack, filter, paginate, changePageSize, loadAux, loadTerms, loadSuggestions, loadHistory, termsFor, suggestionsFor, submissionQueued, dismissSubmission, openSubmission, save, move, reloadSelected, discardDraft, restoreClearedTranslation, savePrefillDraft, savePrefillToParaTranz, translationDisplayCleared, resetWorkspace, restoreSession, flushDraft, waitForSubmissions, exportPage }
 }

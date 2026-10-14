@@ -5,7 +5,7 @@ import type { UnwrapNestedRefs } from 'vue'
 import type { useEditor } from '~/composables/useEditor'
 import type { AuxCustomizationAction, AuxCustomizationOverlayState, CambridgeDictionaryData, HistoryEntry, LocalUnresolvedTerm, StringItem, Suggestion, Term, TranslationLlmContextSettings, TranslationMode, TranslationPromptContext, TranslationProvider, TranslationSettings, TranslationSharedReference } from '~/types/editor'
 import { displayDate, stageLabels } from '~/utils/text'
-import { toEditorText, toTranslationRequestText } from '~/utils/translationText'
+import { toEditorText, toParaTranzText, toTranslationRequestText } from '~/utils/translationText'
 import { replaceSourceTerms } from '~/utils/termHighlights'
 import { matchLocalUnresolvedTerms, readLocalUnresolvedTerms } from '~/utils/localUnresolvedTerms'
 import { BatchTranslationRequests } from '~/utils/batchPrefill'
@@ -20,12 +20,15 @@ const termPanel = ref<{ focusTerm: (id: number) => void }>()
 const memorySearch = ref<{ focus: () => void }>()
 const translatorHost = ref<HTMLElement>(), cambridgeSearch = ref<HTMLInputElement>()
 const customizationBounds = ref<HTMLElement>()
+const suggestionLineByLine = ref(false)
+const suggestionLineByLineStorageKey = 'sckit-suggestion-line-by-line'
 const dictionarySelection = useState('cambridge-selected-word', () => '')
 const dictionaryTerm = ref(dictionarySelection.value), dictionaryError = ref('')
 const dictionaryQueried = ref(false), dictionaryBusy = ref(false)
 const dictionaryData = ref<CambridgeDictionaryData | null>(null)
 const translationMode = ref<'translate' | 'dictionary'>('translate')
 const translationSource = ref(''), translationResult = ref(''), translationError = ref(''), translationResultNotice = ref('')
+const translationResultDisplay = computed(() => props.breaks === false ? toParaTranzText(translationResult.value) : toEditorText(translationResult.value))
 const translationBusy = ref(false)
 const translationProvider = ref<TranslationProvider>('google'), translationAccessMode = ref<TranslationMode>('web')
 const useTermTranslations = ref(true)
@@ -76,6 +79,29 @@ const plainSources = ref<number[]>([])
 const concordance = ref<{ original: string; projectId: number; projectName: string } | null>(null)
 watch(() => props.editor.selected?.id, () => { plainSources.value = [] })
 function toggleDiff(id: number) { plainSources.value = plainSources.value.includes(id) ? plainSources.value.filter(value => value !== id) : [...plainSources.value, id] }
+function loadSuggestionLineByLinePreference() {
+  if (layoutPreview) return
+  try { suggestionLineByLine.value = localStorage.getItem(suggestionLineByLineStorageKey) === 'true' }
+  catch { suggestionLineByLine.value = false }
+}
+function toggleSuggestionLineByLine() {
+  suggestionLineByLine.value = !suggestionLineByLine.value
+  if (layoutPreview) return
+  try { localStorage.setItem(suggestionLineByLineStorageKey, String(suggestionLineByLine.value)) }
+  catch { /* Keep the selected display mode for this session when storage is unavailable. */ }
+}
+function suggestionLinePairs(suggestion: Suggestion) {
+  const originalLines = toEditorText(suggestion.original).split('\n')
+  const translationLines = toEditorText(suggestion.translation).split('\n')
+  const currentLines = toEditorText(props.editor.selected?.original || '').split('\n')
+  const lineCount = Math.max(originalLines.length, translationLines.length)
+  return Array.from({ length: lineCount }, (_, index) => ({
+    number: index + 1,
+    original: originalLines[index] ?? '',
+    translation: translationLines[index] ?? '',
+    current: currentLines[index] ?? '',
+  }))
+}
 function lookup(suggestion?: Suggestion) {
   const e = props.editor
   concordance.value = { original: suggestion?.original || e.selected?.original || '', projectId: suggestion?.project?.id || e.project.id, projectName: suggestion?.project?.name || e.project.name }
@@ -208,7 +234,7 @@ async function loadTranslationSelection() {
 }
 function applyTranslationSettings(settings: TranslationSettings, forceInvalidate = false) {
   const signature = JSON.stringify([settings.provider, settings.mode, settings.deeplPlan, settings.proxy, settings.llmRequestUrl,
-    settings.llmModel, settings.llmPrefixPrompt, settings.llmContext, settings.useTermTranslations,
+    settings.llmModel, settings.llmPrompt, settings.llmContext, settings.useTermTranslations,
     settings.googleConfigured, settings.deeplConfigured, settings.llmConfigured])
   const changed = forceInvalidate || signature !== translationSettingsSignature
   translationSettingsSignature = signature
@@ -577,6 +603,7 @@ onMounted(() => {
   document.addEventListener('visibilitychange', endDockDrag)
   document.addEventListener('keydown', cancelDockDragOnEscape)
   loadTranslationSelection()
+  loadSuggestionLineByLinePreference()
   auxPreferencesFrame = requestAnimationFrame(() => {
     auxPreferencesFrame = 0
     loadAuxTabPreferences()
@@ -620,11 +647,23 @@ onBeforeUnmount(() => {
   window.scKit?.translatorView({ visible: false, bounds: null })
   window.scKit?.auxCustomizationOverlay({ visible: false, bounds: null, items: [], theme: {} })
 })
-function historyTranslation(entry: HistoryEntry) {
+function historyValues(entry: HistoryEntry) {
   let target = entry.target
   if (typeof target === 'string') { try { target = JSON.parse(target) } catch { target = undefined } }
-  const value = entry.translation ?? (typeof target === 'object' ? target?.translation : undefined) ?? (entry.field === 'translation' ? entry.to : undefined)
-  return typeof value === 'string' ? value : value ? JSON.stringify(value, null, 2) : ''
+  const formatValue = (value: unknown): string | null => {
+    if (typeof value === 'string') return value
+    if (value === undefined || value === null) return null
+    try { return JSON.stringify(value, null, 2) ?? String(value) } catch { return String(value) }
+  }
+  const targetTranslation = typeof target === 'object' ? target?.translation : undefined
+  const previous = entry.field === 'translation' ? formatValue(entry.from) : null
+  const current = formatValue(entry.field === 'translation'
+    ? entry.to ?? entry.translation ?? targetTranslation
+    : entry.translation ?? targetTranslation)
+  const values: { label: string; text: string }[] = []
+  if (previous !== null) values.push({ label: '修改前', text: previous })
+  if (current !== null) values.push({ label: previous !== null ? '修改后' : '译文', text: current })
+  return values
 }
 const tabs = [
   { id: 'suggestions', label: '建议', icon: Lightbulb }, { id: 'history', label: '历史', icon: History },
@@ -1063,7 +1102,7 @@ function handleAuxCustomizationAction(action: AuxCustomizationAction) {
             <p v-if="translationResultNotice" class="sidebar-message" role="status">{{ translationResultNotice }}</p>
             <div v-if="translationBusy" class="panel-loading"><LoadingIndicator :size="20" label="正在翻译文本" /><span>正在翻译…</span></div>
             <p v-else-if="translationError" class="sidebar-message error" role="alert">{{ translationError }}</p>
-            <p v-else-if="translationResult" class="translation-result-text">{{ translationResult }}</p>
+            <p v-else-if="translationResult" class="translation-result-text">{{ translationResultDisplay }}</p>
             <p v-else class="subtle translation-placeholder">右键编辑区中的选中文本，可在此通过 API 翻译成简体中文。单个英文单词会打开剑桥英汉词典；API 密钥和代理在「设置 → 翻译服务」中配置。</p>
           </section>
           </template>
@@ -1076,17 +1115,26 @@ function handleAuxCustomizationAction(action: AuxCustomizationAction) {
       <div v-else-if="panelBusyFor(panel) && !panelHasDataFor(panel) && panel === 'history'" class="panel-loading"><LoadingIndicator :size="24" label="正在获取辅助信息" /><span>正在获取{{ tabs.find(tab => tab.id === panel)?.label }}…</span></div>
       <div v-else-if="panelErrorFor(panel) && !panelBusyFor(panel) && panel === 'history'" class="panel-error" role="alert"><TriangleAlert :size="22" /><p>{{ panelErrorFor(panel) }}</p><button class="button" @click="retryPanel(panel)"><RotateCw :size="14" />重新获取</button></div>
       <template v-else-if="panel === 'suggestions'">
-        <div class="panel-heading suggestion-heading"><span>{{ editor.suggestions.length }} 可用建议</span><button class="button compact" :disabled="!editor.selected" @click="lookup()">词汇索引</button></div>
+        <div class="panel-heading suggestion-heading"><span>{{ editor.suggestions.length }} 可用建议</span><div class="suggestion-heading-actions"><button class="button compact suggestion-line-toggle" type="button" :aria-pressed="suggestionLineByLine" title="按换行逐行对照英文原文和简体中文译文" @click="toggleSuggestionLineByLine">逐行对照</button><button class="button compact" :disabled="!editor.selected" @click="lookup()">词汇索引</button></div></div>
         <TranslationMemorySearch ref="memorySearch" :editor="editor" @replace="emit('replace', $event)">
           <LoadingRegion :busy="panelBusyFor(panel)" :initial="!editor.suggestions.length" label="正在获取建议…">
           <div v-if="panelErrorFor(panel) && !panelBusyFor(panel)" class="panel-error" role="alert"><TriangleAlert :size="22" /><p>{{ panelErrorFor(panel) }}</p><button class="button" @click="retryPanel(panel)"><RotateCw :size="14" />重新获取</button></div>
           <template v-else>
         <div v-if="!editor.suggestions.length" class="empty-state"><Lightbulb :size="34" :stroke-width="1.25" /><h3>暂无相似文本</h3></div>
-        <article v-for="(suggestion, index) in editor.suggestions" :key="suggestion.id" class="suggestion-card">
+        <article v-for="(suggestion, index) in editor.suggestions" :key="suggestion.id" class="suggestion-card" :class="{ 'suggestion-card-line-by-line': suggestionLineByLine }">
           <div class="match-badge" title="本地计算的完整原文 Levenshtein 相似度"><strong>{{ matching(suggestion.localMatching ?? 0) }}</strong><span>匹配</span></div>
           <div class="suggestion-body" @contextmenu="emit('selectionContextMenu', $event)">
-            <div class="suggestion-translation">{{ suggestion.translation.replaceAll('\\n', '\n') }}</div>
-            <SuggestionSource :original="suggestion.original" :current="editor.selected?.original || ''" :show-diff="!plainSources.includes(suggestion.id)" />
+            <div v-if="suggestionLineByLine" class="suggestion-bilingual" :aria-label="`建议 ${index + 1} 的逐行中英对照`">
+              <div class="suggestion-bilingual-heading" aria-hidden="true"><span>英文原文</span><span>简体中文</span></div>
+              <div v-for="line in suggestionLinePairs(suggestion)" :key="line.number" class="suggestion-bilingual-row">
+                <div class="suggestion-bilingual-source"><SuggestionSource :original="line.original" :current="line.current" :show-diff="!plainSources.includes(suggestion.id)" /></div>
+                <div class="suggestion-bilingual-translation"><span class="suggestion-bilingual-text">{{ line.translation }}</span></div>
+              </div>
+            </div>
+            <template v-else>
+              <div class="suggestion-translation">{{ toEditorText(suggestion.translation) }}</div>
+              <SuggestionSource :original="suggestion.original" :current="editor.selected?.original || ''" :show-diff="!plainSources.includes(suggestion.id)" />
+            </template>
             <div class="suggestion-meta"><span v-if="suggestion.stage === 2" class="stage-badge stage-2">有疑问</span><span v-if="suggestion.updatedAt">于 {{ displayDate(suggestion.updatedAt) }} </span><span v-if="suggestion.user">由 {{ suggestion.user.nickname || suggestion.user.username }} </span><span>来自 </span><button class="suggestion-origin" :disabled="!editor.connected || navigation.blocked" :title="`在本地编辑器中定位 ${suggestion.key}`" @click="openSuggestion(suggestion)">{{ suggestion.project?.name || editor.project.name }}<span v-if="suggestion.file?.name"> / {{ suggestion.file.name }}</span></button><span> · {{ editor.project.dest }}</span><div v-if="!suggestion.file?.name" class="suggestion-key" :title="suggestion.key">{{ suggestion.key }}</div><button class="suggestion-occurrences" :disabled="!editor.connected || navigation.blocked" title="在本地编辑器中查看所有文件、所有状态的匹配词条" @click="showOccurrences(suggestion)">显示所有出现的情况</button></div>
           </div>
           <div class="suggestion-actions"><button class="icon-button small" :aria-label="`切换建议 ${index + 1} 的原文差异`" :aria-pressed="!plainSources.includes(suggestion.id)" :title="plainSources.includes(suggestion.id) ? '显示与当前原文的差异' : '显示建议原文'" @click="toggleDiff(suggestion.id)"><GitCompareArrows :size="15" /></button><button class="icon-button small" :disabled="!suggestion.translation || editor.locked" :aria-label="`使用建议 ${index + 1}`" title="使用此译文" @click="emit('replace', suggestion.translation)"><ArrowDownToLine :size="15" /></button><span class="memory-label">TM</span></div>
@@ -1099,7 +1147,7 @@ function handleAuxCustomizationAction(action: AuxCustomizationAction) {
       <template v-else-if="panel === 'history'">
         <div class="panel-heading"><span>词条历史</span><span class="subtle">{{ editor.history.length }} 条记录</span></div>
         <div v-if="!editor.history.length" class="empty-state"><History :size="34" :stroke-width="1.25" /><h3>还没有修改记录</h3></div>
-        <article v-for="(entry, index) in editor.history" :key="entry.id || index" class="history-card"><div class="history-dot"></div><div class="history-body"><div class="history-heading"><strong>{{ entry.user?.nickname || entry.user?.username || '项目成员' }}</strong><time>{{ displayDate(entry.createdAt) }}</time></div><p class="subtle">{{ entry.operation || '更新词条' }}<span v-if="entry.stage !== undefined"> · {{ stageLabels[entry.stage] }}</span></p><div v-if="historyTranslation(entry)" class="history-text">{{ historyTranslation(entry) }}</div></div></article>
+        <article v-for="(entry, index) in editor.history" :key="entry.id || index" class="history-card"><div class="history-dot"></div><div class="history-body"><div class="history-heading"><strong>{{ entry.user?.nickname || entry.user?.username || '项目成员' }}</strong><time>{{ displayDate(entry.createdAt) }}</time></div><p class="subtle">{{ entry.operation || '更新词条' }}<span v-if="entry.stage !== undefined"> · {{ stageLabels[entry.stage] }}</span></p><div v-for="value in historyValues(entry)" :key="value.label" class="history-value"><span class="history-value-label">{{ value.label }}</span><div class="history-text">{{ value.text || '（空译文）' }}</div></div></div></article>
       </template>
       <template v-else>
         <div class="panel-heading"><span>词条评论</span><span class="subtle">{{ editor.selected?.comments?.length || 0 }} 条</span></div>

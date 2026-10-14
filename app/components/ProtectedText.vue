@@ -20,6 +20,8 @@ const recognizedTerms = computed(() => [
 ])
 const describeTerms = (terms: Term[]) => termDescription(terms, termExemptionPatterns.value)
 const hasUnresolvedTerm = (terms?: Term[]) => !!terms?.some(term => unresolvedTermIds.value.has(term.id))
+// CR is ignored by the source display; only the literal \n marker controls wrapping.
+const displayText = computed(() => props.text.replace(/\r/g, ''))
 function hasActiveTextSelection() {
   const selection = window.getSelection()
   return !!selection && !selection.isCollapsed
@@ -40,15 +42,15 @@ function insertTerm(event: MouseEvent, terms: Term[]) {
   })
 }
 const pieces = computed(() => {
-  const pattern = /<\/?[A-Za-z][^>]*>|~\w+\([^)]*\)|\\r\\n|\\n|\\r|\{\{[^}]+\}\}|\{\w+\}|%(?:\d+\$)?[sdif]/g
+  const pattern = /<\/?[A-Za-z][^>]*>|~\w+\([^)]*\)|\\n|\{\{[^}]+\}\}|\{\w+\}|%(?:\d+\$)?[sdif]/g
   const result: Array<{ text: string; token: boolean; newline?: boolean; terms?: Term[]; searchParts?: ReturnType<typeof searchHighlightParts> }> = []
   const plain = (text: string) => result.push(...highlightTerms(text, recognizedTerms.value, 'source', termExemptionPatterns.value).map(piece => ({ ...piece, token: false, searchParts: searchHighlightParts(piece.text, props.searchQuery || '') })))
   let start = 0
-  for (const match of props.text.matchAll(pattern)) {
-    if (match.index! > start) plain(props.text.slice(start, match.index))
-    result.push({ text: match[0], token: true, newline: ['\\r\\n', '\\n', '\\r'].includes(match[0]) }); start = match.index! + match[0].length
+  for (const match of displayText.value.matchAll(pattern)) {
+    if (match.index! > start) plain(displayText.value.slice(start, match.index))
+    result.push({ text: match[0], token: true, newline: match[0] === '\\n' }); start = match.index! + match[0].length
   }
-  if (start < props.text.length) plain(props.text.slice(start))
+  if (start < displayText.value.length) plain(displayText.value.slice(start))
   return result
 })
 </script>

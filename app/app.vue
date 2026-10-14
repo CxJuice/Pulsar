@@ -31,10 +31,12 @@ async function sessionRestored(result: { ok: boolean; message: string; sessionLo
     if (result.sessionLost) { editor.connected = false; editor.sessionInfo = { authenticated: false, mode: 'none' } }
     return
   }
-  if (editor.connected) return
+  const observedSession = editor.sessionInfo
   try {
     const session = await editor.api<import('~/types/editor').SessionStatus>('session')
+    if (editor.sessionInfo !== observedSession) return
     if (session.authenticated) {
+      if (editor.connected && editor.sessionInfo.user?.id === session.user?.id) { editor.sessionInfo = session; return }
       await editor.restoreSession(session)
       navigation.finishGuide()
     }
@@ -100,7 +102,7 @@ onBeforeUnmount(() => { removeBeforeClose?.(); removeSessionRestored?.() })
 </script>
 <template>
   <div class="app-shell" :data-theme="theme" :style="appearanceStyle">
-    <WorkspaceTitlebar :editor="editor" :caption="route.path === '/layout-preview' ? '本地布局测试' : route.path === '/editor' ? '翻译工作台' : route.path === '/settings' ? '设置' : '项目主页'" />
+    <WorkspaceTitlebar :editor="editor" :caption="route.path === '/layout-preview' ? '本地布局测试' : route.path === '/editor' ? '翻译工作台' : route.path === '/settings' ? '设置' : route.path === '/project-section/overview' || route.path === '/' ? '项目主页' : route.path.startsWith('/project-section/') ? '项目栏目' : '项目主页'" />
     <SubmissionNotifications :editor="editor" />
     <div class="application-body">
       <ApplicationSidebar :editor="editor" :navigation="navigation" />

@@ -28,7 +28,7 @@ const strings: StringItem[] = ([
 }))
 
 const suggestions: Suggestion[] = ([
-  ['NAV_MAIN_MENU', 'Main menu', '主菜单'], ['NAV_RETURN', 'Return to the previous screen', '返回上一个界面'],
+  ['NAV_MAIN_MENU', 'Main menu\nOpen project', '主菜单\n打开项目'], ['NAV_RETURN', 'Return to the previous screen', '返回上一个界面'],
   ['NAV_NEXT_STEP', 'Move on to the next step', '前往下一步'], ['NAV_ACCOUNT_SETTINGS', 'Account and privacy settings', '账户与隐私设置'],
   ['NAV_FIND_STRING', 'Find a project, file, or string', '查找项目、文件或词条'],
 ] as const).map(([key, original, translation], index) => ({
