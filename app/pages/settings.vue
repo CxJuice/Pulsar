@@ -110,15 +110,16 @@ const DEFAULT_MCP_PROMPT = [
   '批量任务优先用 get_strings 一次读取最多 25 条及各自 snapshotToken，再用 prefill_translations 或 save_translations_to_paratranz 批量提交；更大任务分成每组最多 25 条，不要逐条循环调用。修改已有译文时指定 mode 为 edit，保留各自原状态。每批返回逐条结果，只重新处理失败项；提交结果无法确认时先重新读取，不能盲目重试。',
   '先用 get_workspace 查看 backgroundProjectAccess。若为 true，可用 list_projects 选择当前账号参与的 projectId，并用 list_project_files 查看文件；若为 false，只能操作 Pulsar 前台当前项目。将 projectId 传给 list_strings、search_translations 和 get_string。',
   '翻译前用 get_string 或 get_strings 读取原文、键值、上下文和现有译文，再按需用 get_translation_context 读取术语和相似译文建议；不要只凭孤立字符串猜测语境。get_string 和 get_current_entry 会返回 snapshotToken，写入工具使用该令牌校验读取后的版本。不要复制或提交任何时间戳。',
+  '开始批量读取前调用 get_workspace 查看 textReading。automatic 模式可按任务为 list_strings 选择 pageSize（不超过 maxCount），manual 模式遵守固定 count。只有 effectivePermissions.queryTranslationContext 为 true 才能调用 get_translation_context 查询文本片段、术语和相似译文。',
   '用户要查找现有中文译文时，使用 search_translations；也可用 list_strings 并设置 searchMode 为 translation。对命中的词条调用 get_string，读取完整译文并取得新的 snapshotToken。',
   '默认用 prefill_translation 将译文写入当前账号的 Pulsar 本机草稿，并传入刚读取的 snapshotToken。get_workspace 返回 syncWithFrontend 为 true 且词条在前台打开时，Pulsar 会同步更新界面。',
   '用户明确要求修改已有译文并写回 ParaTranz 时，使用 edit_translation；它只接受当前账号项目中已有译文且未锁定或隐藏的词条，始终保留原状态。若原状态未获准直存，应提示用户启用该状态，不得改成其他状态。新增译文使用 save_translation_to_paratranz。只有用户明确要求写回时才调用这两个工具；传入最新 get_string 返回的 snapshotToken。遇到真实版本冲突时重新读取，不要强行覆盖。',
   '调用直存工具前，先用 get_workspace 检查 effectivePermissions.saveToParaTranz 为 true，且 effectivePermissions.saveStages 包含目标状态。用户刚开启权限时，等待 Pulsar 显示“权限已自动应用”后再调用；tools/list 仅显示稳定工具清单，不代表当前权限。',
 ].join('\n')
-const mcpConfig = reactive<McpSettings>({ enabled: false, port: 47381, token: '', defaultPrompt: DEFAULT_MCP_PROMPT, permissions: { readWorkspace: true, allowBackgroundAccess: true, syncWithFrontend: true, prefillDrafts: true, overwriteExistingTranslations: false, saveToParaTranz: false, saveStages: [1] }, running: false, url: 'http://127.0.0.1:47381/mcp', error: '', activeRequests: 0, lastRequestAt: null })
+const mcpConfig = reactive<McpSettings>({ enabled: false, port: 47381, token: '', defaultPrompt: DEFAULT_MCP_PROMPT, textCountMode: 'automatic', textCount: 25, permissions: { readWorkspace: true, queryTranslationContext: true, allowBackgroundAccess: true, syncWithFrontend: true, prefillDrafts: true, overwriteExistingTranslations: false, saveToParaTranz: false, saveStages: [1] }, running: false, url: 'http://127.0.0.1:47381/mcp', error: '', activeRequests: 0, lastRequestAt: null })
 const mcpBusy = ref(false), mcpError = ref(''), mcpNotice = ref(''), loadedMcpConfig = ref('')
 const mcpConnectionConfig = computed(() => JSON.stringify({ url: mcpConfig.url, headers: { Authorization: `Bearer ${mcpConfig.token}` } }, null, 2))
-const mcpConfigSnapshot = () => JSON.stringify([mcpConfig.enabled, mcpConfig.port, mcpConfig.token, mcpConfig.defaultPrompt, mcpConfig.permissions])
+const mcpConfigSnapshot = () => JSON.stringify([mcpConfig.enabled, mcpConfig.port, mcpConfig.token, mcpConfig.defaultPrompt, mcpConfig.permissions, mcpConfig.textCountMode, mcpConfig.textCount])
 let mcpPermissionRefreshTimer: ReturnType<typeof setTimeout> | undefined
 const mcpTools = computed(() => [
   'get_workspace', 'list_projects', 'list_project_files', 'list_strings', 'search_translations', 'get_current_entry', 'get_string',
@@ -231,11 +232,30 @@ function resetAccentColor(themeName: AppearanceTheme) {
   appearance.value.accentColors[themeName] = null
   saveAppearance()
 }
-function setFontFamily(region: AppearanceTextRegion, event: Event) {
-  const value = (event.target as HTMLInputElement).value.trim()
+function setFontFamilyValue(region: AppearanceTextRegion, rawValue: string) {
+  const value = rawValue.trim()
   const installedFont = systemFonts.value.find(font => font === value)
   appearance.value.typography[region].fontFamily = installedFont ? `system:${installedFont}` : safeFontFamily(value, '')
   saveAppearance()
+}
+function fontOptions(region: AppearanceTextRegion) {
+  const options: { value: string; label: string; preview?: string }[] = [
+    { value: defaultFontFamily, label: '界面默认字体 · Inter' },
+    { value: 'Microsoft YaHei UI, Microsoft YaHei, sans-serif', label: 'Microsoft YaHei UI' },
+    { value: 'Microsoft YaHei, sans-serif', label: 'Microsoft YaHei' },
+    { value: 'Arial, sans-serif', label: 'Arial' },
+    { value: 'Consolas, monospace', label: 'Consolas' },
+  ]
+  if (region !== 'ui') options.unshift({ value: '', label: '跟随界面默认字体' })
+  for (const family of systemFonts.value) {
+    if (!options.some(option => option.value === family || option.label === family)) {
+      options.push({ value: family, label: family, preview: cssFontFamily(`system:${family}`) })
+    }
+  }
+  return options.map(option => ({
+    ...option,
+    preview: option.preview || cssFontFamily(option.value || defaultFontFamily, defaultFontFamily),
+  }))
 }
 function fontFamilyInput(region: AppearanceTextRegion) {
   const value = appearance.value.typography[region].fontFamily
@@ -259,7 +279,7 @@ async function loadSystemFonts() {
     systemFonts.value = [...new Set(fonts.map(font => font.family.trim()).filter(Boolean))]
       .sort((first, second) => first.localeCompare(second, undefined, { sensitivity: 'base' }))
     systemFontsMessage.value = systemFonts.value.length
-      ? `已读取 ${systemFonts.value.length} 种系统字体，可在字体框中搜索并选择。`
+      ? `已读取 ${systemFonts.value.length} 种系统字体，可在字体下拉框中搜索并选择。`
       : '没有读取到系统字体；仍可手动输入字体名称。'
   } catch (reason) {
     systemFontsError.value = true
@@ -439,7 +459,7 @@ async function saveMcpSettings(rotateToken = false) {
   mcpError.value = ''
   mcpNotice.value = ''
   try {
-    const result = await window.scKit.saveMcpSettings({ enabled: mcpConfig.enabled, port: Number(mcpConfig.port), defaultPrompt: mcpConfig.defaultPrompt, permissions: { ...mcpConfig.permissions, saveStages: [...mcpConfig.permissions.saveStages] }, ...(rotateToken ? { rotateToken: true } : {}) })
+    const result = await window.scKit.saveMcpSettings({ enabled: mcpConfig.enabled, port: Number(mcpConfig.port), defaultPrompt: mcpConfig.defaultPrompt, textCountMode: mcpConfig.textCountMode, textCount: Number(mcpConfig.textCount), permissions: { ...mcpConfig.permissions, saveStages: [...mcpConfig.permissions.saveStages] }, ...(rotateToken ? { rotateToken: true } : {}) })
     if (!result.ok || !result.data) throw new Error(result.message || '保存 MCP 设置失败')
     Object.assign(mcpConfig, result.data)
     loadedMcpConfig.value = mcpConfigSnapshot()
@@ -458,7 +478,7 @@ function scheduleMcpPermissionAutoApply(delay = 0) {
 }
 function mcpPermissionAutoApplyDelay() {
   try {
-    const baseline = JSON.parse(loadedMcpConfig.value) as [boolean, number, string, string, McpSettings['permissions']]
+    const baseline = JSON.parse(loadedMcpConfig.value) as [boolean, number, string, string, McpSettings['permissions'], McpSettings['textCountMode'], number]
     return mcpConfig.permissions.saveToParaTranz !== baseline[4].saveToParaTranz ? 0 : 120
   } catch { return 0 }
 }
@@ -468,7 +488,7 @@ async function applyMcpPermissionsAutomatically() {
     scheduleMcpPermissionAutoApply(50)
     return
   }
-  let baseline: [boolean, number, string, string, McpSettings['permissions']]
+  let baseline: [boolean, number, string, string, McpSettings['permissions'], McpSettings['textCountMode'], number]
   try { baseline = JSON.parse(loadedMcpConfig.value) as typeof baseline }
   catch { return }
   if (JSON.stringify(mcpConfig.permissions) === JSON.stringify(baseline[4])) return
@@ -482,12 +502,14 @@ async function applyMcpPermissionsAutomatically() {
       enabled: baseline[0],
       port: baseline[1],
       defaultPrompt: baseline[3],
+      textCountMode: baseline[5],
+      textCount: baseline[6],
       permissions: { ...mcpConfig.permissions, saveStages: [...mcpConfig.permissions.saveStages] },
     })
     if (!result.ok || !result.data) throw new Error(result.message || '自动应用 MCP 权限失败')
     if (result.data.enabled && !result.data.running) throw new Error(result.data.error || 'MCP 服务未能启动')
     Object.assign(mcpConfig.permissions, result.data.permissions)
-    loadedMcpConfig.value = JSON.stringify([baseline[0], baseline[1], baseline[2], baseline[3], result.data.permissions])
+    loadedMcpConfig.value = JSON.stringify([baseline[0], baseline[1], baseline[2], baseline[3], result.data.permissions, baseline[5], baseline[6]])
     mcpConfig.running = result.data.running
     mcpConfig.url = result.data.url
     mcpConfig.error = result.data.error
@@ -519,7 +541,9 @@ function resetMcpPrompt() {
 async function copyMcpConnection() {
   if (!mcpConfig.token) return
   try {
-    await navigator.clipboard.writeText(mcpConnectionConfig.value)
+    const bridge = window.scKit
+    if (!bridge) throw new Error('桌面剪贴板不可用')
+    await bridge.copyText(mcpConnectionConfig.value)
     mcpNotice.value = 'MCP 连接信息已复制。'
     mcpError.value = ''
   } catch { mcpError.value = '无法复制到剪贴板，请手动复制连接信息。' }
@@ -583,8 +607,7 @@ onBeforeUnmount(() => {
         <div class="settings-card-heading"><Settings :size="20" /><h2 id="appearance-typography-title">字体与字号</h2></div>
         <div class="appearance-typography-actions"><button class="text-button" type="button" :disabled="systemFontsBusy" @click="loadSystemFonts"><LoadingIndicator v-if="systemFontsBusy" :size="13" label="正在读取系统字体" />{{ systemFontsBusy ? '读取中…' : systemFonts.length ? '刷新系统字体（' + systemFonts.length + '）' : '读取系统字体' }}</button><button class="text-button" type="button" @click="resetAppearance">恢复外观默认值</button></div>
         <p v-if="systemFontsMessage" class="appearance-font-status" :class="{ error: systemFontsError }" role="status">{{ systemFontsMessage }}</p>
-        <datalist id="appearance-font-suggestions"><option value="Inter, Segoe UI, sans-serif" /><option value="Microsoft YaHei UI, Microsoft YaHei, sans-serif" /><option value="Arial, sans-serif" /><option value="Consolas, monospace" /><option v-for="font in systemFonts" :key="font" :value="font" /></datalist>
-        <div class="appearance-typography-grid"><div v-for="region in typographyRegions" :key="region.key" class="appearance-typography-row"><strong>{{ region.title }}</strong><label><span>字体</span><input :aria-label="region.title + '字体'" :value="fontFamilyInput(region.key)" :style="{ fontFamily: fontFamilyPreview(region.key) }" list="appearance-font-suggestions" autocomplete="off" @input="setFontFamily(region.key, $event)" /></label><label><span>字号</span><input :aria-label="region.title + '字号'" :value="appearance.typography[region.key].fontSize ?? ''" type="number" :min="region.key === 'ui' ? 10 : 8" :max="region.key === 'ui' ? 32 : 48" step="1" @change="setFontSize(region.key, $event)" /><small>px</small></label></div></div>
+        <div class="appearance-typography-grid"><div v-for="region in typographyRegions" :key="region.key" class="appearance-typography-row"><strong>{{ region.title }}</strong><label><span>字体</span><FontFamilyPicker :id="`font-picker-${region.key}`" :label="region.title + '字体'" :model-value="fontFamilyInput(region.key)" :options="fontOptions(region.key)" :preview-font-family="fontFamilyPreview(region.key)" :placeholder="region.key === 'ui' ? '搜索或输入字体名称' : '跟随界面默认字体'" @select="setFontFamilyValue(region.key, $event)" /></label><label><span>字号</span><input :aria-label="region.title + '字号'" :value="appearance.typography[region.key].fontSize ?? ''" type="number" :min="region.key === 'ui' ? 10 : 8" :max="region.key === 'ui' ? 32 : 48" step="1" @change="setFontSize(region.key, $event)" /><small>px</small></label></div></div>
         <p v-if="appearanceError" class="sidebar-message error" role="alert">{{ appearanceError }}</p>
       </section>
         </div>
@@ -616,12 +639,18 @@ onBeforeUnmount(() => {
             <div class="settings-card-heading"><Settings :size="20" /><h2 id="mcp-permissions-title">访问权限</h2></div>
             <div class="mcp-permissions">
               <label class="translation-context-option"><input v-model="mcpConfig.permissions.readWorkspace" type="checkbox" :disabled="mcpBusy || !editor.desktop" /><span><strong>读取当前账号项目、文件、原文与译文</strong></span></label>
+              <label class="translation-context-option"><input v-model="mcpConfig.permissions.queryTranslationContext" type="checkbox" :disabled="mcpBusy || !editor.desktop || !mcpConfig.permissions.readWorkspace" /><span><strong>翻译时查询文本片段、术语与相似译文</strong><small>允许 MCP 为当前词条查询上下文和翻译建议；此权限仅开放查询，不会写入词条。</small></span></label>
               <label class="translation-context-option"><input v-model="mcpConfig.permissions.prefillDrafts" type="checkbox" :disabled="mcpBusy || !editor.desktop" /><span><strong>写入本机草稿</strong></span></label>
               <label class="translation-context-option"><input v-model="mcpConfig.permissions.overwriteExistingTranslations" type="checkbox" :disabled="mcpBusy || !editor.desktop || !mcpConfig.permissions.prefillDrafts" /><span><strong>允许回填并覆盖已有译文</strong></span></label>
               <label class="translation-context-option"><input v-model="mcpConfig.permissions.saveToParaTranz" type="checkbox" :disabled="mcpBusy || !editor.desktop" /><span><strong>直接编辑并保存到 ParaTranz</strong></span></label>
             </div>
+            <fieldset class="mcp-stage-permissions" :disabled="mcpBusy || !editor.desktop || !mcpConfig.permissions.readWorkspace"><legend>每次读取的词条数量</legend>
+              <label><input v-model="mcpConfig.textCountMode" type="radio" value="automatic" /><span>自动：MCP 可按任务指定数量</span></label>
+              <label><input v-model="mcpConfig.textCountMode" type="radio" value="manual" /><span>手动：固定读取数量</span></label>
+              <label class="mcp-count-input">建议/固定数量<input v-model.number="mcpConfig.textCount" type="number" min="1" max="50" step="1" :disabled="mcpBusy || !editor.desktop || !mcpConfig.permissions.readWorkspace" /><small>自动模式下作为 MCP 未指定数量时的建议值；手动模式下固定每页数量。上限 50。</small></label>
+            </fieldset>
             <fieldset class="mcp-stage-permissions" :disabled="mcpBusy || !editor.desktop || !mcpConfig.permissions.saveToParaTranz"><legend>MCP 可提交的词条状态</legend><label v-for="stage in mcpSubmissionStages" :key="stage.value"><input v-model="mcpConfig.permissions.saveStages" type="checkbox" :value="stage.value" /><span>{{ stage.label }}</span></label></fieldset>
-            <p class="mcp-permissions-note">权限更改会自动保存并应用，不会重启 MCP 服务或断开客户端。开启直存后，请等到“权限已自动应用”提示，再调用写入工具；也可先用 get_workspace 确认 effectivePermissions.saveToParaTranz。端口、服务启停和提示词仍需点击“保存并应用”。</p>
+            <p class="mcp-permissions-note">权限更改会自动保存并应用，不会重启 MCP 服务或断开客户端。开启直存后，请等到“权限已自动应用”提示，再调用写入工具；也可先用 get_workspace 确认 effectivePermissions.saveToParaTranz。端口、服务启停、读取数量和提示词仍需点击“保存并应用”。</p>
           </section>
           <section class="settings-card" aria-labelledby="mcp-runtime-title">
             <div class="settings-card-heading"><Network :size="20" /><h2 id="mcp-runtime-title">后台运行与界面同步</h2></div>

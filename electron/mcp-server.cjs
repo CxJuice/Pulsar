@@ -36,19 +36,28 @@ function createServer(handlers) {
 
   server.registerPrompt('pulsar_translation_prompt', {
     title: 'Pulsar 默认翻译提示词',
-    description: 'Pulsar 设置中编辑的默认英文到简体中文本地化提示词。',
-  }, () => ({
-    messages: [{ role: 'user', content: { type: 'text', text: typeof handlers.defaultPrompt === 'string' ? handlers.defaultPrompt : '' } }],
-  }));
+    description: 'Pulsar 设置中的默认翻译提示词，并附带当前文本读取数量规则。',
+  }, async () => {
+    const reading = handlers.getReadingPolicy?.();
+    const policyText = reading?.mode === 'manual'
+      ? `\n\n【当前文本读取设置】手动模式：每次调用 list_strings 固定读取 ${reading.count} 条。请按此数量规划分页，不要尝试更改 pageSize；Pulsar 会强制应用此数量。`
+      : reading
+        ? `\n\n【当前文本读取设置】自动模式：每次最多读取 ${reading.maxCount} 条；可按任务需要设置 list_strings 的 pageSize，省略时使用建议值 ${reading.count}。`
+        : '';
+    const prompt = typeof handlers.defaultPrompt === 'string' ? handlers.defaultPrompt : '';
+    return {
+      messages: [{ role: 'user', content: { type: 'text', text: `${prompt}${policyText}` } }],
+    };
+  });
 
   // Keep discovery stable across settings changes and MCP clients that cache tools/list.
   // Every handler checks the current encrypted settings before it reads or writes data.
-  registerTool(server, 'get_workspace', '读取 Pulsar 前台工作区、账号连接状态和此刻生效的 effectivePermissions（包括 saveToParaTranz 与 saveStages）；需要启用读取权限。tools/list 是稳定工具清单，不代表写入权限已开启。', {}, () => handlers.getWorkspace());
+  registerTool(server, 'get_workspace', '读取 Pulsar 前台工作区、账号连接状态、textReading 数量模式与此刻生效的 effectivePermissions（包括翻译上下文查询权限）；需要启用读取权限。tools/list 是稳定工具清单，不代表权限已开启。', {}, () => handlers.getWorkspace());
   registerTool(server, 'list_projects', '列出当前连接账号参与的 ParaTranz 项目；后台访问开启时可在未打开项目时调用，关闭时仅返回当前前台项目。需要启用读取权限。', {}, () => handlers.listProjects());
   registerTool(server, 'list_project_files', '列出指定账号项目中的文件；若后台访问关闭，只能列出当前前台项目的文件。需要启用读取权限。', {
     projectId: z.number().int().positive(),
   }, args => handlers.listProjectFiles(args));
-  registerTool(server, 'list_strings', '按 projectId 分页读取账号项目中的词条；省略 fileId 时读取全文聚合，也可指定文件并按原文、译文、键值或上下文筛选。后台访问关闭时只允许当前前台项目；需要启用读取权限。', {
+  registerTool(server, 'list_strings', '按 projectId 分页读取账号项目中的词条；先用 get_workspace 查看 textReading。automatic 模式可按任务指定 pageSize，省略时采用建议 count；manual 模式每页固定 count 并忽略传入 pageSize（最多 50）。省略 fileId 时读取全文聚合，也可指定文件并按原文、译文、键值或上下文筛选。后台访问关闭时只允许当前前台项目；需要启用读取权限。', {
     projectId: z.number().int().positive().optional(),
     fileId: z.number().int().positive().optional(),
     page: z.number().int().min(1).max(100000).optional(),
@@ -70,8 +79,9 @@ function createServer(handlers) {
     projectId: z.number().int().positive().optional(),
     stringId: z.number().int().positive(),
   }, args => handlers.getString(args));
-  registerTool(server, 'get_translation_context', '读取指定词条的项目术语和相似译文建议；在 get_string/get_strings 取得原文和快照后按需调用，遵循术语并核对建议适用的语境。需要读取权限，后台访问受当前设置限制。', {
+  registerTool(server, 'get_translation_context', '翻译时读取指定词条的文本片段、项目术语和相似译文建议；在 get_string/get_strings 取得原文后按需调用，遵循术语并核对建议语境。建议按相似度降序返回，默认返回 1 条；可用 suggestionCount 请求更多（最多 20 条）。需要启用“翻译时查询文本片段、术语与相似译文”权限，后台访问受当前设置限制。', {
     projectId: z.number().int().positive().optional(), stringId: z.number().int().positive(),
+    suggestionCount: z.number().int().min(1).max(20).optional(),
   }, args => handlers.getTranslationContext(args));
   const stringIdSchema = z.number().int().positive().max(2147483647);
   registerTool(server, 'get_strings', '批量读取同一账号项目的 1 到 25 个词条及各自的一次性 snapshotToken，最多 4 个并行读取。批量任务优先使用此工具，避免逐条 get_string；逐条返回成功或失败，ID 不得重复。需要读取权限。', {

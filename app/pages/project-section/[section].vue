@@ -3,8 +3,11 @@ import { Activity, ArrowDownToLine, ArrowRight, BookOpen, Check, ChevronLeft, Ch
 import type { Component, UnwrapNestedRefs } from 'vue'
 import type { FileInfo, Term, TermPage } from '~/types/editor'
 import type { WorkspaceNavigation } from '~/composables/useWorkspaceNavigation'
+import { fileCompletion } from '~/utils/fileSort'
+import { compareHistoryText, type HistoryComparison } from '~/utils/historyDiff'
 import { projectTermCatalogScope, readProjectTermCatalog, syncProjectTermCatalog } from '~/utils/projectTermCatalogCache'
 import ProjectHome from '~/components/ProjectHome.vue'
+import UserAvatar from '~/components/UserAvatar.vue'
 
 type Row = Record<string, unknown>
 type Column = { key: string; label: string; fields: string[]; kind?: 'date' | 'status' | 'percent' | 'number'; width?: string }
@@ -240,7 +243,13 @@ function filePercent(file: unknown) {
 }
 function fileGroups(rows: Row[]) {
   const groups = new Map<string, Row[]>()
-  for (const row of rows) {
+  const orderedRows = [...rows].sort((a, b) => {
+    const leftFile = fileFrom(a), rightFile = fileFrom(b)
+    return (leftFile ? fileCompletion(leftFile) : 0) - (rightFile ? fileCompletion(rightFile) : 0)
+      || fieldValue(a, ['name']).localeCompare(fieldValue(b, ['name']), 'zh-CN', { numeric: true })
+      || (recordId(a) || 0) - (recordId(b) || 0)
+  })
+  for (const row of orderedRows) {
     const name = fieldValue(row, ['name'])
     const folder = name.includes('/') ? name.slice(0, name.lastIndexOf('/')) : ''
     groups.set(folder, [...(groups.get(folder) || []), row])
@@ -295,8 +304,6 @@ function historyKey(row: Row) {
   const target = rawField(row, ['target.key', 'key'])
   return String(target || (recordId(row) ? `词条 ${recordId(row)}` : '项目记录'))
 }
-type HistoryTextPart = { text: string; kind: 'same' | 'removed' | 'added' }
-type HistoryComparison = { changes: HistoryTextPart[] }
 const historyComparisonCache = new WeakMap<Row, HistoryComparison | null>()
 function historyText(value: unknown): string | null {
   if (value === undefined || value === null) return null
@@ -312,57 +319,11 @@ function historyComparison(row: Row): HistoryComparison | null {
   const afterText = historyText(row.to ?? row.translation ?? objectValue(target)?.translation)
   if (beforeText === null && afterText === null) { historyComparisonCache.set(row, null); return null }
 
-  const beforeValue = beforeText ?? ''
-  const afterValue = afterText ?? ''
-  const beforeTokens = beforeValue.match(/\s+|[\p{L}\p{N}_]+|[^\s\p{L}\p{N}_]/gu) || []
-  const afterTokens = afterValue.match(/\s+|[\p{L}\p{N}_]+|[^\s\p{L}\p{N}_]/gu) || []
-  const changes: HistoryTextPart[] = []
-  const append = (text: string, kind: HistoryTextPart['kind']) => {
-    if (!text) return
-    const previous = changes.at(-1)
-    if (previous?.kind === kind) previous.text += text
-    else changes.push({ text, kind })
-  }
-
-  if (beforeValue === afterValue) {
-    append(beforeValue, 'same')
-  } else if ((beforeTokens.length + 1) * (afterTokens.length + 1) > 250_000) {
-    let prefix = 0, suffix = 0
-    while (prefix < beforeTokens.length && prefix < afterTokens.length && beforeTokens[prefix] === afterTokens[prefix]) prefix++
-    while (suffix < beforeTokens.length - prefix && suffix < afterTokens.length - prefix && beforeTokens[beforeTokens.length - 1 - suffix] === afterTokens[afterTokens.length - 1 - suffix]) suffix++
-    append(beforeTokens.slice(0, prefix).join(''), 'same')
-    append(beforeTokens.slice(prefix, beforeTokens.length - suffix).join(''), 'removed')
-    append(afterTokens.slice(prefix, afterTokens.length - suffix).join(''), 'added')
-    append(afterTokens.slice(afterTokens.length - suffix).join(''), 'same')
-  } else {
-    const columns = afterTokens.length + 1, rows = beforeTokens.length + 1
-    const lcs = new Uint32Array(rows * columns)
-    for (let i = beforeTokens.length - 1; i >= 0; i--) {
-      for (let j = afterTokens.length - 1; j >= 0; j--) {
-        const cell = i * columns + j
-        lcs[cell] = beforeTokens[i] === afterTokens[j]
-          ? (lcs[(i + 1) * columns + j + 1] ?? 0) + 1
-          : Math.max(lcs[(i + 1) * columns + j] ?? 0, lcs[i * columns + j + 1] ?? 0)
-      }
-    }
-    let i = 0, j = 0
-    while (i < beforeTokens.length || j < afterTokens.length) {
-      if (i < beforeTokens.length && j < afterTokens.length && beforeTokens[i] === afterTokens[j]) {
-        append(beforeTokens[i]!, 'same'); i++; j++
-      } else if (i < beforeTokens.length && (j === afterTokens.length || (lcs[(i + 1) * columns + j] ?? 0) >= (lcs[i * columns + j + 1] ?? 0))) {
-        append(beforeTokens[i++]!, 'removed')
-      } else {
-        append(afterTokens[j++]!, 'added')
-      }
-    }
-  }
-  if (!changes.length) changes.push({ text: '（空）', kind: 'same' })
-  const result = { changes }
+  const result = compareHistoryText(beforeText, afterText)
   historyComparisonCache.set(row, result)
   return result
 }
 function memberName(row: Row) { return fieldValue(row, ['user.nickname', 'user.username', 'nickname', 'username']) || `用户 ${fieldValue(row, ['uid'])}` }
-function memberInitial(row: Row) { return memberName(row).slice(0, 1).toLocaleUpperCase() || 'U' }
 function leaderboardContribution(row: Row) { return numericField(row, ['totalPoints', 'total_points', 'points']) || 0 }
 function announcementCategory(row: Row) { return fieldValue(row, ['category']) === 'blog' ? '项目动态' : '公告' }
 function applicationMessage(row: Row) { return fieldValue(row, ['message', 'content']) }
@@ -761,7 +722,7 @@ onBeforeUnmount(() => { clearTimeout(memberSearchTimer); window.removeEventListe
           <header><h2>{{ group.title }}</h2><span>{{ group.rows.length }}</span></header>
           <div class="member-role-group-list">
             <article v-for="(row, index) in group.rows" :key="`${group.id}-${rowKey(row, index)}`" class="member-entry">
-              <div class="member-avatar">{{ memberInitial(row) }}</div>
+              <UserAvatar :url="fieldValue(row, ['user.avatar', 'avatar'])" :label="memberName(row)" />
               <div class="member-main">
                 <div class="member-name-line"><strong>{{ memberName(row) }}</strong><span class="member-role" :class="`role-${numericField(row, ['permission']) || 0}`">{{ permissionLabel(rawField(row, ['permission'])) }}</span></div>
                 <small>@{{ fieldValue(row, ['user.username', 'username']) || '—' }} · 加入于 {{ displayDate(rawField(row, ['createdAt'])) }}</small>
@@ -781,11 +742,11 @@ onBeforeUnmount(() => { clearTimeout(memberSearchTimer); window.removeEventListe
       </div>
     </section>
     <section v-else-if="sectionId === 'applications'" class="section-workspace application-workspace" :aria-busy="busy">
-      <div class="application-queue-heading"><div><h2>{{ statusFilter === '0' ? '待审核申请' : statusFilter === '2' ? '已通过' : statusFilter === '1' ? '已拒绝' : '加入项目申请' }}</h2><p>阅读申请说明后，在详情中查看记录并处理待审核项目。</p></div><span class="application-queue-count">{{ totalCount }}</span></div><div v-if="visibleRows.length" class="application-queue"><article v-for="(row, index) in visibleRows" :key="rowKey(row, index)" class="application-entry"><div class="member-avatar">{{ memberInitial(row) }}</div><div class="application-entry-main"><header><strong>{{ memberName(row) }}</strong><span class="section-status" :class="{ done: Number(rawField(row, ['status'])) === 2 }">{{ statusText('applications', rawField(row, ['status'])) }}</span><time>{{ displayDate(rawField(row, ['createdAt'])) }}</time></header><p>{{ excerpt({ content: applicationMessage(row) }, 300) || '申请者没有填写说明。' }}</p><footer><button class="button compact" @click="openDetails(row)">查看申请</button><template v-if="canManage && Number(rawField(row, ['status'])) === 0"><button class="button compact primary" @click="startForm('application-approve', row)"><Check :size="12" />通过</button><button class="button compact danger" @click="startForm('application-reject', row)">拒绝</button></template><span v-if="rawField(row, ['reason'])" class="application-reason">处理说明：{{ fieldValue(row, ['reason']) }}</span></footer></div></article></div><div v-else class="workflow-empty"><UserRoundPlus :size="28" /><strong>{{ search ? '没有匹配的申请' : '当前没有申请' }}</strong><span>新的项目加入申请会显示在此队列中。</span></div>
+      <div class="application-queue-heading"><div><h2>{{ statusFilter === '0' ? '待审核申请' : statusFilter === '2' ? '已通过' : statusFilter === '1' ? '已拒绝' : '加入项目申请' }}</h2><p>阅读申请说明后，在详情中查看记录并处理待审核项目。</p></div><span class="application-queue-count">{{ totalCount }}</span></div><div v-if="visibleRows.length" class="application-queue"><article v-for="(row, index) in visibleRows" :key="rowKey(row, index)" class="application-entry"><UserAvatar :url="fieldValue(row, ['user.avatar', 'avatar'])" :label="memberName(row)" /><div class="application-entry-main"><header><strong>{{ memberName(row) }}</strong><span class="section-status" :class="{ done: Number(rawField(row, ['status'])) === 2 }">{{ statusText('applications', rawField(row, ['status'])) }}</span><time>{{ displayDate(rawField(row, ['createdAt'])) }}</time></header><p>{{ excerpt({ content: applicationMessage(row) }, 300) || '申请者没有填写说明。' }}</p><footer><button class="button compact" @click="openDetails(row)">查看申请</button><template v-if="canManage && Number(rawField(row, ['status'])) === 0"><button class="button compact primary" @click="startForm('application-approve', row)"><Check :size="12" />通过</button><button class="button compact danger" @click="startForm('application-reject', row)">拒绝</button></template><span v-if="rawField(row, ['reason'])" class="application-reason">处理说明：{{ fieldValue(row, ['reason']) }}</span></footer></div></article></div><div v-else class="workflow-empty"><UserRoundPlus :size="28" /><strong>{{ search ? '没有匹配的申请' : '当前没有申请' }}</strong><span>新的项目加入申请会显示在此队列中。</span></div>
     </section>
     <section v-else-if="sectionId === 'leaderboard'" class="section-workspace leaderboard-workspace" :aria-busy="busy">
       <div class="leaderboard-heading"><div><h2>项目贡献排行</h2><p>按贡献值排序 · 翻译、编辑及审核按 ParaTranz 规则加权统计</p></div><Trophy :size="22" /></div>
-      <div v-if="visibleRows.length" class="leaderboard-list"><article v-for="(row, index) in visibleRows" :key="rowKey(row, index)" class="leaderboard-entry"><strong class="leaderboard-rank" :class="{ podium: (page - 1) * pageSize + index < 3 }">{{ (page - 1) * pageSize + index + 1 }}</strong><div class="member-avatar">{{ memberInitial(row) }}</div><div class="leaderboard-member"><strong>{{ memberName(row) }}</strong><small>{{ leaderboardContribution(row).toLocaleString() }} 贡献值</small></div><div class="leaderboard-score"><div><span>综合贡献</span><strong>{{ leaderboardContribution(row).toLocaleString() }}</strong></div><div class="leaderboard-bar"><span :style="{ width: `${Math.min(100, leaderboardContribution(row) / topLeaderboardScore * 100)}%` }" /></div></div><div class="leaderboard-breakdown"><span>翻译 <b>{{ numericField(row, ['translated']) || 0 }}</b></span><span>编辑 <b>{{ numericField(row, ['edited']) || 0 }}</b></span><span>审核 <b>{{ numericField(row, ['reviewed']) || 0 }}</b></span></div></article></div><div v-else class="workflow-empty"><Trophy :size="28" /><strong>{{ search ? '没有匹配的排行榜成员' : '暂时没有贡献记录' }}</strong><span>项目成员的贡献统计会显示在这里。</span></div>
+      <div v-if="visibleRows.length" class="leaderboard-list"><article v-for="(row, index) in visibleRows" :key="rowKey(row, index)" class="leaderboard-entry"><strong class="leaderboard-rank" :class="{ podium: (page - 1) * pageSize + index < 3 }">{{ (page - 1) * pageSize + index + 1 }}</strong><UserAvatar :url="fieldValue(row, ['user.avatar', 'avatar'])" :label="memberName(row)" :size="30" /><div class="leaderboard-member"><strong>{{ memberName(row) }}</strong><small>{{ leaderboardContribution(row).toLocaleString() }} 贡献值</small></div><div class="leaderboard-score"><div><span>综合贡献</span><strong>{{ leaderboardContribution(row).toLocaleString() }}</strong></div><div class="leaderboard-bar"><span :style="{ width: `${Math.min(100, leaderboardContribution(row) / topLeaderboardScore * 100)}%` }" /></div></div><div class="leaderboard-breakdown"><span>翻译 <b>{{ numericField(row, ['translated']) || 0 }}</b></span><span>编辑 <b>{{ numericField(row, ['edited']) || 0 }}</b></span><span>审核 <b>{{ numericField(row, ['reviewed']) || 0 }}</b></span></div></article></div><div v-else class="workflow-empty"><Trophy :size="28" /><strong>{{ search ? '没有匹配的排行榜成员' : '暂时没有贡献记录' }}</strong><span>项目成员的贡献统计会显示在这里。</span></div>
     </section>
     <section v-else-if="sectionId === 'artifact'" class="section-workspace artifact-workspace" :aria-busy="busy">
       <section v-if="latestArtifact" class="artifact-current"><header class="artifact-current-heading"><div><span class="artifact-eyebrow">CURRENT BUILD</span><h2>最新项目导出</h2><p>生成于 {{ displayDate(rawField(latestArtifact, ['createdAt'])) }}</p></div><span class="artifact-ready"><Check :size="12" />可下载</span></header><div class="artifact-stats"><div><small>词条总数</small><strong>{{ numericField(latestArtifact, ['total'])?.toLocaleString() || '—' }}</strong></div><div><small>已翻译条数</small><strong>{{ numericField(latestArtifact, ['translated'])?.toLocaleString() || '—' }}</strong><span>{{ filePercent({ total: numericField(latestArtifact, ['total']), translated: numericField(latestArtifact, ['translated']) }) }}%</span></div><div><small>有疑问条数</small><strong>{{ numericField(latestArtifact, ['disputed'])?.toLocaleString() || '0' }}</strong></div><div><small>已审核条数</small><strong>{{ numericField(latestArtifact, ['reviewed'])?.toLocaleString() || '0' }}</strong></div><div><small>生成用时</small><strong>{{ numericField(latestArtifact, ['duration']) ?? '—' }}<small v-if="numericField(latestArtifact, ['duration']) !== undefined"> 秒</small></strong></div><div><small>文件大小</small><strong>{{ fieldValue(latestArtifact, ['size', 'filesize']) || '由 ParaTranz 提供' }}</strong></div></div><label class="artifact-license-check"><input v-model="artifactAgreement" type="checkbox" /><span>我同意遵守项目采用的许可协议 <strong>CC BY-NC-SA 4.0</strong></span></label><div class="artifact-download-actions"><button class="button primary" :disabled="!artifactAgreement || !!actionBusy || navigation.blocked" @click="saveArtifact"><ArrowDownToLine :size="15" />{{ actionBusy === 'download-artifact' ? '正在保存压缩包…' : '下载压缩包到本机' }}</button><span>下载前请确认已阅读并接受此许可协议。</span></div></section><div v-else class="artifact-empty"><Download :size="30" /><strong>还没有可下载的构建</strong><span>生成项目压缩包后，当前构建信息会显示在这里。</span><button class="button compact primary" :disabled="!!actionBusy || navigation.blocked" @click="startHeaderAction"><RefreshCw :size="13" />生成压缩包</button></div><section v-if="visibleRows.length" class="artifact-history"><header class="workflow-section-heading"><div><h2>构建历史</h2><p>每次重新生成都会建立一个可下载的项目快照。</p></div><span>{{ totalCount }} 个构建</span></header><div class="artifact-history-list"><article v-for="(row, index) in visibleRows" :key="rowKey(row, index)" class="artifact-history-entry"><span class="artifact-history-icon"><History :size="15" /></span><div><strong>{{ index === 0 ? '最新构建' : `历史构建 ${visibleRows.length - index}` }}</strong><small>{{ displayDate(rawField(row, ['createdAt'])) }} · {{ numericField(row, ['total'])?.toLocaleString() || '—' }} 个词条 · {{ numericField(row, ['translated'])?.toLocaleString() || '—' }} 已翻译</small></div><button v-if="index === 0" class="button compact" :disabled="!artifactAgreement || !!actionBusy" @click="saveArtifact"><ArrowDownToLine :size="12" />下载</button><span v-else class="section-muted">历史版本</span></article></div></section>

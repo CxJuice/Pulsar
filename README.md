@@ -1,6 +1,6 @@
 # Pulsar
 
-基于 ParaTranz 协议的桌面翻译工作台。Electron 负责桌面窗口与登录，Nuxt 4 / Vue 负责前端，Rust / Axum / reqwest 负责相应服务。布局参考用户指定的 Transifex 编辑器。
+基于 ParaTranz 协议的桌面翻译工作台。软件ICON由GrakePCH绘制。
 
 ## 开发与构建
 

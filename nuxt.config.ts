@@ -26,7 +26,7 @@ export default defineNuxtConfig({
       title: 'Pulsar · 翻译工作台',
       htmlAttrs: { lang: 'zh-CN' },
       meta: [{ name: 'description', content: 'ParaTranz 桌面翻译工作台' }],
-      link: [{ rel: 'icon', type: 'image/svg+xml', href: '/icon.svg' }],
+      link: [{ rel: 'icon', type: 'image/svg+xml', href: '/Pulsar.svg' }],
     },
   },
   typescript: { strict: true },

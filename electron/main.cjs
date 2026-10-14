@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, protocol, session, net, safeStorage, dialog, shell, screen } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, protocol, session, net, safeStorage, clipboard, dialog, shell, screen } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const { spawn } = require('node:child_process');
 const { randomBytes, createHash } = require('node:crypto');
@@ -34,7 +34,6 @@ let mainWindow, loginWindow, dictionaryView, translatorView, auxCustomizationWin
 let closeApproved = smoke, closeCheckPending = false, closeCheckTimer;
 let autoUpdatesEnabled = false;
 let autoUpdateState = { status: 'disabled', version: '', percent: 0, downloadUrl: '' };
-const promptedMacUpdateVersions = new Set();
 async function resolveCloseCheck(ok, message = '') {
   if (!closeCheckPending || !mainWindow || mainWindow.isDestroyed()) return;
   closeCheckPending = false;
@@ -232,7 +231,7 @@ function mcpAssertSession(session) {
   if (session?._mcpGeneration !== mcpConnectionGeneration) throw new Error('ParaTranz 连接已变更，请重新读取词条后再操作');
 }
 const MCP_SUBMISSION_STAGES = [0, 1, 2, 3, 5];
-function defaultMcpSettings() { return { enabled: false, port: DEFAULT_MCP_PORT, token: '', defaultPrompt: DEFAULT_MCP_PROMPT, permissions: { readWorkspace: true, allowBackgroundAccess: true, syncWithFrontend: true, prefillDrafts: true, overwriteExistingTranslations: false, saveToParaTranz: false, saveStages: [1] } }; }
+function defaultMcpSettings() { return { enabled: false, port: DEFAULT_MCP_PORT, token: '', defaultPrompt: DEFAULT_MCP_PROMPT, textCountMode: 'automatic', textCount: 25, permissions: { readWorkspace: true, queryTranslationContext: true, allowBackgroundAccess: true, syncWithFrontend: true, prefillDrafts: true, overwriteExistingTranslations: false, saveToParaTranz: false, saveStages: [1] } }; }
 function readMcpSettings() {
   if (!safeStorage.isEncryptionAvailable()) return defaultMcpSettings();
   try {
@@ -243,8 +242,11 @@ function readMcpSettings() {
       port: Number.isInteger(port) && port >= 1024 && port <= 65535 ? port : DEFAULT_MCP_PORT,
       token: typeof stored.token === 'string' && /^[A-Za-z0-9_-]{40,100}$/.test(stored.token) ? stored.token : '',
       defaultPrompt: typeof stored.defaultPrompt === 'string' && stored.defaultPrompt.length <= 16000 && stored.defaultPrompt !== LEGACY_DEFAULT_MCP_PROMPT && stored.defaultPrompt !== PREVIOUS_DEFAULT_MCP_PROMPT && stored.defaultPrompt !== PREVIOUS_CURRENT_MCP_PROMPT && stored.defaultPrompt !== PREVIOUS_ACTIVE_MCP_PROMPT && stored.defaultPrompt !== PREVIOUS_PERMISSION_REFRESH_MCP_PROMPT && stored.defaultPrompt !== PREVIOUS_UNBATCHED_MCP_PROMPT && stored.defaultPrompt !== PREVIOUS_BATCH_MCP_PROMPT ? stored.defaultPrompt : DEFAULT_MCP_PROMPT,
+      textCountMode: stored.textCountMode === 'manual' ? 'manual' : 'automatic',
+      textCount: Number.isInteger(stored.textCount) && stored.textCount >= 1 && stored.textCount <= 50 ? stored.textCount : 25,
       permissions: {
         readWorkspace: stored.permissions?.readWorkspace !== false,
+        queryTranslationContext: stored.permissions?.queryTranslationContext !== false,
         allowBackgroundAccess: stored.permissions?.allowBackgroundAccess !== false,
         syncWithFrontend: stored.permissions?.syncWithFrontend !== false,
         prefillDrafts: stored.permissions?.prefillDrafts !== false,
@@ -271,6 +273,8 @@ function publicMcpSettings(settings = readMcpSettings()) {
     port: settings.port,
     token: settings.token,
     defaultPrompt: settings.defaultPrompt,
+    textCountMode: settings.textCountMode,
+    textCount: settings.textCount,
     permissions: settings.permissions,
     running: mcpServerState === 'running' && Boolean(mcpServerHandle),
     lifecycle: mcpServerState,
@@ -312,6 +316,10 @@ async function startMcpServerInternal(settings) {
       handlers: {
         runRequest: (context, invoke) => mcpOperations.run(context, invoke),
         defaultPrompt: settings.defaultPrompt,
+        getReadingPolicy: () => {
+          const current = readMcpSettings();
+          return { mode: current.textCountMode, count: current.textCount, maxCount: 50 };
+        },
         getWorkspace: mcpGetWorkspace,
         listProjects: mcpListProjects,
         listProjectFiles: mcpListProjectFiles,
@@ -347,7 +355,10 @@ async function applyMcpSettings(input) {
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('MCP 端口必须在 1024 到 65535 之间');
   const permissions = input.permissions;
   if (!permissions || typeof permissions !== 'object' || Array.isArray(permissions) ||
-    !['readWorkspace', 'allowBackgroundAccess', 'syncWithFrontend', 'prefillDrafts', 'overwriteExistingTranslations', 'saveToParaTranz'].every(key => typeof permissions[key] === 'boolean')) throw new Error('MCP 权限设置无效');
+    !['readWorkspace', 'queryTranslationContext', 'allowBackgroundAccess', 'syncWithFrontend', 'prefillDrafts', 'overwriteExistingTranslations', 'saveToParaTranz'].every(key => typeof permissions[key] === 'boolean')) throw new Error('MCP 权限设置无效');
+  const textCountMode = input.textCountMode === 'manual' ? 'manual' : input.textCountMode === 'automatic' ? 'automatic' : null;
+  const textCount = Number(input.textCount);
+  if (!textCountMode || !Number.isInteger(textCount) || textCount < 1 || textCount > 50) throw new Error('MCP 每次读取数量必须在 1 到 50 之间');
   if (permissions.saveStages !== undefined && !Array.isArray(permissions.saveStages)) throw new Error('MCP 可提交状态设置无效');
   const previous = readMcpSettings();
   const rawSaveStages = Array.isArray(permissions.saveStages) ? permissions.saveStages : previous.permissions.saveStages;
@@ -356,8 +367,9 @@ async function applyMcpSettings(input) {
   if (permissions.saveToParaTranz && saveStages.length === 0) throw new Error('启用 ParaTranz 直存时，至少选择一个可提交状态');
   if (input.defaultPrompt !== undefined && (typeof input.defaultPrompt !== 'string' || input.defaultPrompt.length > 16000)) throw new Error('MCP 默认提示词必须是 16000 字以内的文本');
   const token = input.rotateToken === true || !previous.token ? randomBytes(32).toString('base64url') : previous.token;
-  const settings = { enabled: input.enabled, port, token, defaultPrompt: typeof input.defaultPrompt === 'string' ? input.defaultPrompt : previous.defaultPrompt, permissions: {
+  const settings = { enabled: input.enabled, port, token, defaultPrompt: typeof input.defaultPrompt === 'string' ? input.defaultPrompt : previous.defaultPrompt, textCountMode, textCount, permissions: {
     readWorkspace: permissions.readWorkspace,
+    queryTranslationContext: permissions.queryTranslationContext,
     allowBackgroundAccess: permissions.allowBackgroundAccess,
     syncWithFrontend: permissions.syncWithFrontend,
     prefillDrafts: permissions.prefillDrafts,
@@ -893,17 +905,6 @@ function macDmgDownloadUrl(info) {
     return url.href;
   } catch { return ''; }
 }
-async function promptMacUpdate(version, downloadUrl) {
-  if (!downloadUrl || promptedMacUpdateVersions.has(version) || !mainWindow || mainWindow.isDestroyed()) return;
-  promptedMacUpdateVersions.add(version);
-  const result = await dialog.showMessageBox(mainWindow, {
-    type: 'info', title: 'Pulsar 有新版本',
-    message: `发现 macOS 新版本 ${version}`,
-    detail: '请下载 DMG 并手动打开安装。安装前请保存当前工作。',
-    buttons: ['下载更新', '稍后'], defaultId: 0, cancelId: 1,
-  });
-  if (result.response === 0) await shell.openExternal(downloadUrl);
-}
 function configureAutoUpdater() {
   const hasFeed = app.isPackaged && !smoke && fs.existsSync(path.join(process.resourcesPath, 'app-update.yml'));
   const supportedTarget = process.platform === 'darwin'
@@ -929,9 +930,9 @@ function configureAutoUpdater() {
         return;
       }
       publishAutoUpdateState('available', { version: info.version, downloadUrl });
-      void promptMacUpdate(info.version, downloadUrl).catch(error => log(`macOS update prompt failed: ${String(error?.message || error).slice(0, 300)}`));
       return;
     }
+    publishAutoUpdateState('available', { version: info.version, percent: 0 });
     publishAutoUpdateState('downloading', { version: info.version, percent: 0 });
   });
   autoUpdater.on('update-not-available', info => publishAutoUpdateState('up-to-date', { version: info.version || app.getVersion() }));
@@ -1528,6 +1529,7 @@ function mcpRequirePermission(permission) {
   if (!readMcpSettings().enabled) throw new Error('MCP 服务已关闭');
   const labels = {
     readWorkspace: '读取当前账号项目、文件与词条',
+    queryTranslationContext: '翻译时查询文本片段、术语与相似译文',
     allowBackgroundAccess: '后台访问未打开的账号项目',
     syncWithFrontend: '将 MCP 修改同步到前台界面',
     prefillDrafts: '写入本机草稿',
@@ -1668,6 +1670,25 @@ function mcpResolveProjectId(projectId) {
   if (projectId !== undefined) return projectId;
   return requireMcpWorkspace().project.id;
 }
+function mcpSourceSimilarity(original, current) {
+  const left = typeof original === 'string' ? original : '';
+  const right = typeof current === 'string' ? current : '';
+  const maximum = Math.max(left.length, right.length);
+  if (maximum === 0) return 1;
+  let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= left.length; i++) {
+    const next = [i];
+    for (let j = 1; j <= right.length; j++) {
+      next[j] = Math.min(
+        next[j - 1] + 1,
+        previous[j] + 1,
+        previous[j - 1] + (left[i - 1] === right[j - 1] ? 0 : 1),
+      );
+    }
+    previous = next;
+  }
+  return 1 - previous[right.length] / maximum;
+}
 async function mcpLoadString(projectId, stringId) {
   const result = await serviceRequest('/rpc/string', 'POST', { projectId, stringId });
   if (!result.ok || !result.data || typeof result.data !== 'object') throw new Error(result.message || '无法读取 ParaTranz 词条');
@@ -1757,12 +1778,19 @@ async function mcpGetWorkspace() {
     remoteWritePolicy: 'last-writer-wins-after-version-check',
     effectivePermissions: {
       readWorkspace: permissions.readWorkspace === true,
+      queryTranslationContext: permissions.queryTranslationContext === true,
       allowBackgroundAccess: permissions.allowBackgroundAccess === true,
       syncWithFrontend: permissions.syncWithFrontend === true,
       prefillDrafts: permissions.prefillDrafts === true,
       overwriteExistingTranslations: permissions.overwriteExistingTranslations === true,
       saveToParaTranz: permissions.saveToParaTranz === true,
       saveStages: [...permissions.saveStages],
+    },
+    textReading: {
+      mode: readMcpSettings().textCountMode,
+      count: readMcpSettings().textCount,
+      maxCount: 50,
+      instruction: readMcpSettings().textCountMode === 'manual' ? 'list_strings 每次固定读取 count 条，忽略工具传入的 pageSize。' : '可按任务需要为 list_strings 指定 pageSize；省略时采用 count。',
     },
     note: 'effectivePermissions 是此刻生效的权限；权限变更无需重启 MCP 或刷新 tools/list。',
   };
@@ -1791,7 +1819,7 @@ async function mcpListStrings(args) {
   const payload = {
     projectId,
     page: args.page || 1,
-    pageSize: args.pageSize || 25,
+    pageSize: readMcpSettings().textCountMode === 'manual' ? readMcpSettings().textCount : (args.pageSize || readMcpSettings().textCount),
     searchMode: args.searchMode || 'text',
   };
   if (fileId > 0) payload.fileId = fileId;
@@ -1836,15 +1864,26 @@ async function mcpGetCurrentEntry() {
 }
 async function mcpGetTranslationContext(args) {
   mcpRequirePermission('readWorkspace');
+  mcpRequirePermission('queryTranslationContext');
   const projectId = mcpResolveProjectId(args.projectId);
   const { session } = await mcpRequireProject(projectId);
-  const [terms, suggestions] = await Promise.all([
+  const [item, terms, suggestions] = await Promise.all([
+    mcpLoadString(projectId, args.stringId),
     serviceRequest('/rpc/terms', 'POST', { projectId, stringId: args.stringId }),
     serviceRequest('/rpc/suggestions', 'POST', { projectId, stringId: args.stringId }),
   ]);
-  mcpAssertSession(session); mcpRequirePermission('readWorkspace');
+  mcpAssertSession(session); mcpRequirePermission('readWorkspace'); mcpRequirePermission('queryTranslationContext');
   if (!terms.ok || !suggestions.ok) throw new Error(!terms.ok ? terms.message : suggestions.message);
-  return { projectId, stringId: args.stringId, terms: terms.data, suggestions: suggestions.data };
+  const rankedSuggestions = Array.isArray(suggestions.data)
+    ? suggestions.data.map((suggestion, index) => ({
+      suggestion,
+      index,
+      similarity: mcpSourceSimilarity(suggestion?.original, item.original),
+    })).sort((left, right) => right.similarity - left.similarity || left.index - right.index)
+      .slice(0, Number.isInteger(args.suggestionCount) ? Math.max(1, Math.min(20, args.suggestionCount)) : 1)
+      .map(({ suggestion }) => suggestion)
+    : suggestions.data;
+  return { projectId, stringId: args.stringId, terms: terms.data, suggestions: rankedSuggestions };
 }
 async function mcpGetStrings(args) {
   mcpRequirePermission('readWorkspace');
@@ -2486,6 +2525,12 @@ function registerIpc() {
     try { return { ok: true, data: await saveMcpSettings(settings) }; }
     catch (error) { return { ok: false, message: error.message || '保存 MCP 设置失败' }; }
   });
+  ipcMain.handle('sc:clipboard:write-text', (event, text) => {
+    validateSender(event);
+    if (typeof text !== 'string') throw new Error('剪贴板内容无效');
+    clipboard.writeText(text);
+    return true;
+  });
   ipcMain.handle('sc:request', async (event, action, payload, requestId) => {
     validateSender(event);
     if (!actions.has(action) || !payload || typeof payload !== 'object' || Array.isArray(payload)) return { ok: false, message: '无效的服务操作' };
@@ -2754,7 +2799,7 @@ async function registerProtocol() {
     if (!fs.existsSync(filename) || fs.statSync(filename).isDirectory()) return new Response('Not found', { status: 404 });
     const response = await net.fetch(pathToFileURL(filename).href);
     const headers = new Headers(response.headers);
-    headers.set('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'self'");
+    headers.set('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; connect-src 'self'; font-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'self'");
     return new Response(response.body, { status: response.status, headers });
   });
 }

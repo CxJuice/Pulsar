@@ -60,6 +60,10 @@
       "signExecutable": false,
       "extraResources": [
         {
+          "from": "public/icon.ico",
+          "to": "pulsar-shortcut.ico"
+        },
+        {
           "from": "service/target/release/sctranslate-service.exe",
           "to": "service/sctranslate-service.exe"
         }
@@ -113,7 +117,10 @@
       "shortcutName": "Pulsar",
       "installerIcon": "public/icon.ico",
       "uninstallerIcon": "public/icon.ico",
-      "deleteAppDataOnUninstall": false
+      "deleteAppDataOnUninstall": false,
+      "installerSidebar": "build/installerSidebar.bmp",
+      "installerHeader": "build/installerHeader.bmp",
+      "include": "build/installer.nsh"
     },
     "asar": true
   },

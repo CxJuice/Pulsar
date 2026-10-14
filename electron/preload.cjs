@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('scKit', {
   getTranslationSettings: () => ipcRenderer.invoke('sc:translation-settings:get'),
   getMcpSettings: () => ipcRenderer.invoke('sc:mcp-settings:get'),
   saveMcpSettings: settings => ipcRenderer.invoke('sc:mcp-settings:save', settings),
+  copyText: text => ipcRenderer.invoke('sc:clipboard:write-text', text),
   reportMcpWorkspaceContext: context => ipcRenderer.send('sc:mcp-workspace-context', context),
   onMcpDraftUpdated: callback => { const listener = (_event, update) => callback(update); ipcRenderer.on('sc:mcp-draft-updated', listener); return () => ipcRenderer.removeListener('sc:mcp-draft-updated', listener); },
   onMcpRemoteSaved: callback => { const listener = (_event, update) => callback(update); ipcRenderer.on('sc:mcp-remote-saved', listener); return () => ipcRenderer.removeListener('sc:mcp-remote-saved', listener); },

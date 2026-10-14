@@ -100,10 +100,11 @@ export interface ProxyTestResult {
 export interface TranslationSelectionUpdate { provider?: TranslationProvider; mode?: TranslationMode }
 export interface McpSettings {
   enabled: boolean; port: number; token: string; defaultPrompt: string
-  permissions: { readWorkspace: boolean; allowBackgroundAccess: boolean; syncWithFrontend: boolean; prefillDrafts: boolean; overwriteExistingTranslations: boolean; saveToParaTranz: boolean; saveStages: number[] }
+  textCountMode: 'automatic' | 'manual'; textCount: number
+  permissions: { readWorkspace: boolean; queryTranslationContext: boolean; allowBackgroundAccess: boolean; syncWithFrontend: boolean; prefillDrafts: boolean; overwriteExistingTranslations: boolean; saveToParaTranz: boolean; saveStages: number[] }
   running: boolean; lifecycle?: 'stopped' | 'starting' | 'running' | 'stopping' | 'error'; url: string; error: string; activeRequests: number; lastRequestAt: string | null
 }
-export interface McpSettingsUpdate { enabled: boolean; port: number; defaultPrompt: string; permissions: McpSettings['permissions']; rotateToken?: boolean }
+export interface McpSettingsUpdate { enabled: boolean; port: number; defaultPrompt: string; textCountMode: McpSettings['textCountMode']; textCount: number; permissions: McpSettings['permissions']; rotateToken?: boolean }
 export interface McpDraftUpdate { accountId?: number; connectionEpoch?: number; projectId: number; stringId: number; draft: Draft }
 export interface McpRemoteSavedUpdate { accountId?: number; connectionEpoch?: number; projectId: number; stringId: number; item: StringItem; draftPresent: boolean; draftCleared: boolean }
 export interface TranslationSharedReference {
@@ -171,6 +172,7 @@ export interface DesktopBridge {
   getTranslationSettings(): Promise<ServiceResult<TranslationSettings>>
   getMcpSettings(): Promise<ServiceResult<McpSettings>>
   saveMcpSettings(settings: McpSettingsUpdate): Promise<ServiceResult<McpSettings>>
+  copyText(text: string): Promise<boolean>
   reportMcpWorkspaceContext(context: Record<string, unknown> | null): void
   onMcpDraftUpdated(callback: (update: McpDraftUpdate) => void): () => void
   onMcpRemoteSaved(callback: (update: McpRemoteSavedUpdate) => void): () => void

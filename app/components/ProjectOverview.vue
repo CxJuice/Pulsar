@@ -3,7 +3,7 @@ import { Activity, ArrowRight, BookOpen, CalendarDays, Check, FileText, FolderOp
 import type { UnwrapNestedRefs } from 'vue'
 import type { FileInfo, HistoryEntry } from '~/types/editor'
 import type { WorkspaceNavigation } from '~/composables/useWorkspaceNavigation'
-import { fileCompletionPercent } from '~/utils/fileSort'
+import { fileCompletionPercent, sortFilesByCompletion } from '~/utils/fileSort'
 
 const props = defineProps<{ editor: UnwrapNestedRefs<ReturnType<typeof useEditor>>; navigation: WorkspaceNavigation }>()
 const recent = ref<HistoryEntry[]>([])
@@ -19,7 +19,7 @@ const totals = computed(() => props.navigation.files.reduce((sum, file) => ({
 }), { words: 0, strings: 0, translated: 0, checked: 0, reviewed: 0 }))
 const translationPercent = computed(() => totals.value.strings ? Math.min(100, Math.round(totals.value.translated / totals.value.strings * 100)) : 0)
 const reviewPercent = computed(() => totals.value.strings ? Math.min(100, Math.round(totals.value.reviewed / totals.value.strings * 100)) : 0)
-const recentFiles = computed(() => [...props.navigation.files].sort((a, b) => b.total - a.total || a.name.localeCompare(b.name)).slice(0, 7))
+const recentFiles = computed(() => sortFilesByCompletion(props.navigation.files).slice(0, 7))
 const projectVersion = computed(() => String(props.navigation.browse.version || props.navigation.browse.currentVersion || ''))
 
 function dateText(value?: string) {
@@ -62,7 +62,7 @@ async function startTranslation() {
     await props.navigation.continueEditing()
     return
   }
-  const next = [...props.navigation.files].sort((a, b) => fileCompletionPercent(a) - fileCompletionPercent(b) || a.name.localeCompare(b.name))[0]
+  const next = sortFilesByCompletion(props.navigation.files)[0]
   if (next) await props.navigation.chooseFile(next)
   else await props.navigation.openProjectSection('files')
 }
@@ -107,7 +107,7 @@ watch(() => props.navigation.browse.id, () => { recent.value = []; void refresh(
             <div class="overview-file-progress"><span :style="{ width: `${fileCompletionPercent(file)}%` }" /></div>
             <small class="overview-file-percent">{{ fileCompletionPercent(file) }}%</small>
           </div>
-          <p v-if="navigation.files.length > recentFiles.length" class="overview-more">显示词条最多的 {{ recentFiles.length }} 个文件，共 {{ navigation.files.length.toLocaleString() }} 个。</p>
+          <p v-if="navigation.files.length > recentFiles.length" class="overview-more">显示完成度最低的 {{ recentFiles.length }} 个文件，共 {{ navigation.files.length.toLocaleString() }} 个。</p>
         </section>
 
         <section class="overview-panel overview-activity-panel">

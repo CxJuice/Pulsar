@@ -12,6 +12,7 @@ import { BatchTranslationRequests } from '~/utils/batchPrefill'
 import { BatchTranslationContextPool } from '~/utils/batchTranslationContext'
 import { TranslationContextCache } from '~/utils/translationContextCache'
 import type { QualityLocation } from '~/utils/quality'
+import { compareHistoryText, type HistoryComparison } from '~/utils/historyDiff'
 const props = defineProps<{ editor: UnwrapNestedRefs<ReturnType<typeof useEditor>>; compact?: boolean; breaks?: boolean }>()
 const navigation = inject<import('~/composables/useWorkspaceNavigation').WorkspaceNavigation>('workspace-navigation')!
 const emit = defineEmits<{ insert: [text: string]; replace: [text: string]; locate: [location: QualityLocation]; selectionContextMenu: [event: MouseEvent] }>()
@@ -647,7 +648,9 @@ onBeforeUnmount(() => {
   window.scKit?.translatorView({ visible: false, bounds: null })
   window.scKit?.auxCustomizationOverlay({ visible: false, bounds: null, items: [], theme: {} })
 })
-function historyValues(entry: HistoryEntry) {
+const historyComparisonCache = new WeakMap<HistoryEntry, HistoryComparison | null>()
+function historyComparison(entry: HistoryEntry) {
+  if (historyComparisonCache.has(entry)) return historyComparisonCache.get(entry) ?? null
   let target = entry.target
   if (typeof target === 'string') { try { target = JSON.parse(target) } catch { target = undefined } }
   const formatValue = (value: unknown): string | null => {
@@ -660,10 +663,9 @@ function historyValues(entry: HistoryEntry) {
   const current = formatValue(entry.field === 'translation'
     ? entry.to ?? entry.translation ?? targetTranslation
     : entry.translation ?? targetTranslation)
-  const values: { label: string; text: string }[] = []
-  if (previous !== null) values.push({ label: '修改前', text: previous })
-  if (current !== null) values.push({ label: previous !== null ? '修改后' : '译文', text: current })
-  return values
+  const result = compareHistoryText(previous, current)
+  historyComparisonCache.set(entry, result)
+  return result
 }
 const tabs = [
   { id: 'suggestions', label: '建议', icon: Lightbulb }, { id: 'history', label: '历史', icon: History },
@@ -1147,7 +1149,7 @@ function handleAuxCustomizationAction(action: AuxCustomizationAction) {
       <template v-else-if="panel === 'history'">
         <div class="panel-heading"><span>词条历史</span><span class="subtle">{{ editor.history.length }} 条记录</span></div>
         <div v-if="!editor.history.length" class="empty-state"><History :size="34" :stroke-width="1.25" /><h3>还没有修改记录</h3></div>
-        <article v-for="(entry, index) in editor.history" :key="entry.id || index" class="history-card"><div class="history-dot"></div><div class="history-body"><div class="history-heading"><strong>{{ entry.user?.nickname || entry.user?.username || '项目成员' }}</strong><time>{{ displayDate(entry.createdAt) }}</time></div><p class="subtle">{{ entry.operation || '更新词条' }}<span v-if="entry.stage !== undefined"> · {{ stageLabels[entry.stage] }}</span></p><div v-for="value in historyValues(entry)" :key="value.label" class="history-value"><span class="history-value-label">{{ value.label }}</span><div class="history-text">{{ value.text || '（空译文）' }}</div></div></div></article>
+        <article v-for="(entry, index) in editor.history" :key="entry.id || index" class="history-card"><div class="history-dot"></div><div class="history-body"><div class="history-heading"><strong>{{ entry.user?.nickname || entry.user?.username || '项目成员' }}</strong><time>{{ displayDate(entry.createdAt) }}</time></div><p class="subtle">{{ entry.operation || '更新词条' }}<span v-if="entry.stage !== undefined"> · {{ stageLabels[entry.stage] }}</span></p><div v-if="historyComparison(entry)" class="history-text" aria-label="词条变更差异"><template v-for="(part, partIndex) in historyComparison(entry)!.changes" :key="partIndex"><del v-if="part.kind === 'removed'">{{ part.text }}</del><ins v-else-if="part.kind === 'added'">{{ part.text }}</ins><span v-else>{{ part.text }}</span></template></div></div></article>
       </template>
       <template v-else>
         <div class="panel-heading"><span>词条评论</span><span class="subtle">{{ editor.selected?.comments?.length || 0 }} 条</span></div>

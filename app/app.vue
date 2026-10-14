@@ -112,5 +112,6 @@ onBeforeUnmount(() => { removeBeforeClose?.(); removeSessionRestored?.() })
       </div>
     </div>
     <Transition name="dialog"><ConnectionDialog v-if="navigation.showConnection" :desktop="editor.desktop" @close="navigation.showConnection = false" @pending="value => navigation.loginBusy = value" @connected="navigation.connected" /></Transition>
+    <UpdateNoticeDialog v-if="editor.desktop" />
   </div>
 </template>
