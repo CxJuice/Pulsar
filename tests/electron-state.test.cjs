@@ -158,6 +158,14 @@ test('Token login submits the website form, follows redirects and connects using
   assert.equal(JSON.parse(fs.readFileSync(path.join(h.folder, 'connection.json'), 'utf8')).mode, 'token');
 });
 
+test('Token login makes the exchanged web session available to presence authentication', async t => {
+  const h = tokenLoginHarness(t);
+  assert.equal((await h.ipcHandlers.get('sc:connect')({}, '0'.repeat(32), false, 0)).ok, true);
+  await h.run('presenceCredentials()');
+  assert.equal(h.credentialCalls.at(-1).endpoint, '/internal/presence');
+  assert.equal(h.credentialCalls.at(-1).body.cookie, 'sid=new-session');
+});
+
 test('manual Token login waits for startup connection restoration before submitting', async t => {
   const h = tokenLoginHarness(t);
   h.run('connectionRestoration = new Promise(resolve => { globalThis.finishRestoration = resolve; })');
